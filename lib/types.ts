@@ -1,0 +1,212 @@
+// Shared domain types for TaskBuddy.
+
+export type Confidence = "High" | "Medium" | "Low";
+
+export type TaskStatus =
+  | "backlog"
+  | "todo"
+  | "in_progress"
+  | "blocked"
+  | "review"
+  | "done";
+
+export const TASK_STATUSES: TaskStatus[] = [
+  "backlog",
+  "todo",
+  "in_progress",
+  "blocked",
+  "review",
+  "done",
+];
+
+export const STATUS_LABELS: Record<TaskStatus, string> = {
+  backlog: "Backlog",
+  todo: "To Do",
+  in_progress: "In Progress",
+  blocked: "Blocked",
+  review: "Review",
+  done: "Done",
+};
+
+export type PriorityLabel = "Critical" | "High" | "Medium" | "Low" | "Backlog";
+
+/** Default life-areas always shown as Today-page tabs. */
+export const SEED_AREAS = ["Work", "Personal", "Hobby"];
+
+/** How an entry was created: a meeting transcript or a personal goal/note. */
+export type EntryKind = "meeting" | "plan";
+
+/** Lifecycle of an entry: a draft awaiting review, or live. */
+export type EntryStatus = "draft" | "active";
+
+/**
+ * The filing choices a user confirms in the review step before a draft goes
+ * live. On the entry form any of these may be left on "Auto"; the review step
+ * is where they are explicitly confirmed (or corrected).
+ */
+export interface DraftClassification {
+  /** Life-area applied to every task in the entry. */
+  area: string;
+  /** Existing project to attach the entry to, or null for none. */
+  projectId: string | null;
+  /** Name of a brand-new project to create; empty string when not creating one. */
+  newProjectName: string;
+  /** Earlier meeting this entry follows up on, or null. */
+  parentMeetingId: string | null;
+}
+
+// --- Database row shapes ----------------------------------------------------
+
+export interface Project {
+  id: string;
+  name: string;
+  description: string | null;
+  created_at: string;
+}
+
+export interface Meeting {
+  id: string;
+  title: string;
+  raw_input: string;
+  summary: string | null;
+  discussion_points: string[];
+  stakeholders: string[];
+  daily_objective: string | null;
+  key_deliverables: string[];
+  assumptions: string[];
+  risks: string[];
+  kind: EntryKind;
+  status: EntryStatus;
+  project_id: string | null;
+  parent_meeting_id: string | null;
+  created_at: string;
+}
+
+export interface Decision {
+  id: string;
+  meeting_id: string;
+  decision: string;
+  source_quote: string | null;
+  confidence: string | null;
+  created_at: string;
+}
+
+export interface OpenQuestion {
+  id: string;
+  meeting_id: string;
+  question: string;
+  related_stakeholder: string | null;
+  source_quote: string | null;
+  confidence: string | null;
+  status: string;
+  created_at: string;
+}
+
+export interface Task {
+  id: string;
+  meeting_id: string;
+  title: string;
+  description: string | null;
+  owner: string | null;
+  category: string | null;
+  area: string;
+  status: TaskStatus;
+  due_date: string | null;
+  estimated_minutes: number;
+  actual_minutes: number;
+  urgency_score: number | null;
+  impact_score: number | null;
+  effort_score: number | null;
+  dependency_score: number | null;
+  risk_score: number | null;
+  confidence_score: number | null;
+  priority_score: number | null;
+  priority_label: PriorityLabel | null;
+  priority_reason: string | null;
+  source_quote: string | null;
+  is_ai_suggested: boolean;
+  blocked_by: string | null;
+  sort_index: number;
+  created_at: string;
+}
+
+export interface TaskDependency {
+  id: string;
+  meeting_id: string;
+  task_id: string;
+  depends_on_task_id: string;
+  reason: string | null;
+}
+
+export interface ScheduleBlock {
+  id: string;
+  meeting_id: string;
+  task_id: string | null;
+  label: string;
+  start_time: string;
+  end_time: string;
+  reason: string | null;
+  sort_index: number;
+}
+
+// --- Composed views ---------------------------------------------------------
+
+export interface MeetingDetail extends Meeting {
+  decisions: Decision[];
+  open_questions: OpenQuestion[];
+  tasks: Task[];
+  dependencies: TaskDependency[];
+  schedule: ScheduleBlock[];
+}
+
+// --- LLM extraction shape (what the model is asked to return) ---------------
+
+/** The five 1-5 factor ratings the LLM assigns per task. */
+export interface FactorScores {
+  urgency: number;
+  impact: number;
+  dependency: number;
+  risk: number;
+  effort: number;
+  confidence: number;
+}
+
+export interface ExtractedTask extends FactorScores {
+  /** Stable slug the LLM uses so dependencies can reference this task. */
+  key: string;
+  title: string;
+  description: string;
+  owner: string | null;
+  category: string | null;
+  due_date: string | null; // ISO date or null
+  estimated_minutes: number;
+  source_quote: string | null;
+  is_ai_suggested: boolean;
+  blocked_by: string | null;
+  /** keys of tasks this one depends on. */
+  depends_on: string[];
+  priority_reason: string;
+}
+
+export interface ExtractionResult {
+  title: string;
+  summary: string;
+  discussion_points: string[];
+  stakeholders: string[];
+  daily_objective: string;
+  key_deliverables: string[];
+  assumptions: string[];
+  risks: string[];
+  decisions: {
+    decision: string;
+    source_quote: string | null;
+    confidence: Confidence;
+  }[];
+  open_questions: {
+    question: string;
+    related_stakeholder: string | null;
+    source_quote: string | null;
+    confidence: Confidence;
+  }[];
+  tasks: ExtractedTask[];
+}
