@@ -1,26 +1,163 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
+/* ───────────────────────────────────────────────────────────────────────────
+   TaskBuddy design tokens — Tailwind CSS v4
+─────────────────────────────────────────────────────────────────────────── */
+
+@theme {
+  /* Fonts */
+  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, "Cascadia Code", monospace;
+
+  /* Foundation */
+  --color-bg:              oklch(97.8% 0.004 264);
+  --color-surface:         oklch(100%  0     0);
+  --color-surface-raised:  oklch(96%   0.004 264);
+  --color-surface-overlay: oklch(93.5% 0.005 264);
+  --color-border:          oklch(90%   0.006 264);
+  --color-border-strong:   oklch(83%   0.008 264);
+  --color-fg:              oklch(14%   0.015 264);
+  --color-fg-muted:        oklch(50%   0.018 264);
+  --color-fg-subtle:       oklch(66%   0.014 264);
+
+  /* Accent — indigo */
+  --color-accent:          oklch(52%   0.24  264);
+  --color-accent-hover:    oklch(47%   0.24  264);
+  --color-accent-subtle:   oklch(95.5% 0.025 264);
+  --color-accent-fg:       oklch(30%   0.2   264);
+
+  /* Priority */
+  --color-priority-critical:        oklch(51%   0.22  27);
+  --color-priority-critical-subtle: oklch(97%   0.018 27);
+  --color-priority-critical-fg:     oklch(35%   0.17  27);
+  --color-priority-high:            oklch(58%   0.19  47);
+  --color-priority-high-subtle:     oklch(97.5% 0.015 80);
+  --color-priority-high-fg:         oklch(38%   0.15  47);
+  --color-priority-medium:          oklch(66%   0.17  95);
+  --color-priority-medium-subtle:   oklch(98%   0.018 105);
+  --color-priority-medium-fg:       oklch(43%   0.14  95);
+  --color-priority-low:             oklch(54%   0.16  145);
+  --color-priority-low-subtle:      oklch(97%   0.02  145);
+  --color-priority-low-fg:          oklch(37%   0.13  145);
+  --color-priority-backlog:         oklch(50%   0.018 264);
+  --color-priority-backlog-subtle:  oklch(96%   0.004 264);
+  --color-priority-backlog-fg:      oklch(33%   0.015 264);
+
+  /* Kanban status */
+  --color-status-backlog:            oklch(66%   0.014 264);
+  --color-status-backlog-subtle:     oklch(96%   0.004 264);
+  --color-status-backlog-fg:         oklch(33%   0.015 264);
+  --color-status-todo:               oklch(52%   0.24  264);
+  --color-status-todo-subtle:        oklch(95.5% 0.025 264);
+  --color-status-todo-fg:            oklch(30%   0.2   264);
+  --color-status-in-progress:        oklch(52%   0.19  215);
+  --color-status-in-progress-subtle: oklch(96.5% 0.025 215);
+  --color-status-in-progress-fg:     oklch(33%   0.15  215);
+  --color-status-blocked:            oklch(51%   0.22  27);
+  --color-status-blocked-subtle:     oklch(97%   0.018 27);
+  --color-status-blocked-fg:         oklch(35%   0.17  27);
+  --color-status-review:             oklch(49%   0.22  292);
+  --color-status-review-subtle:      oklch(96%   0.022 292);
+  --color-status-review-fg:          oklch(28%   0.18  292);
+  --color-status-done:               oklch(54%   0.16  145);
+  --color-status-done-subtle:        oklch(97%   0.02  145);
+  --color-status-done-fg:            oklch(37%   0.13  145);
+
+  /* Semantic feedback */
+  --color-success:        oklch(54%   0.16  145);
+  --color-success-subtle: oklch(97%   0.02  145);
+  --color-danger:         oklch(51%   0.22  27);
+  --color-danger-subtle:  oklch(97%   0.018 27);
+
+  /* Radius */
+  --radius-xs:   3px;
+  --radius-sm:   5px;
+  --radius-md:   8px;
+  --radius-lg:   12px;
+  --radius-xl:   16px;
+
+  /* Shadows */
+  --shadow-xs: 0 1px 2px oklch(14% 0.015 264 / 0.05);
+  --shadow-sm: 0 1px 3px oklch(14% 0.015 264 / 0.07), 0 1px 2px oklch(14% 0.015 264 / 0.04);
+  --shadow-md: 0 4px 6px oklch(14% 0.015 264 / 0.06), 0 2px 4px oklch(14% 0.015 264 / 0.04);
+  --shadow-lg: 0 10px 15px oklch(14% 0.015 264 / 0.07), 0 4px 6px oklch(14% 0.015 264 / 0.04);
+
+  /* Layout */
+  --spacing-sidebar: 240px;
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+/* Base styles */
+html {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background-color: var(--color-bg);
+  color: var(--color-fg);
+  font-family: var(--font-sans);
+}
+
+::selection {
+  background-color: var(--color-accent-subtle);
+  color: var(--color-accent-fg);
+}
+
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--color-border-strong);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover { background: var(--color-fg-subtle); }
+
+/* ───────────────────────────────────────────────────────────────────────────
+   Motion — keyframes & utilities (CSS layer; framer handles orchestration)
+─────────────────────────────────────────────────────────────────────────── */
+@keyframes tb-shimmer {
+  0%   { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+@keyframes tb-sparkle {
+  0%, 100% { transform: scale(1)    rotate(0deg); }
+  50%      { transform: scale(1.14) rotate(8deg); }
+}
+@keyframes tb-glow {
+  0%, 100% { box-shadow: 0 0 0 0 oklch(52% 0.24 264 / 0);    }
+  50%      { box-shadow: 0 0 0 5px oklch(52% 0.24 264 / 0.07); }
+}
+
+/* Gentle pulse for the "Recommended" sparkle badge */
+.animate-sparkle { animation: tb-sparkle 2.6s ease-in-out infinite; }
+
+/* Breathing accent ring */
+.animate-glow { animation: tb-glow 4.5s ease-in-out infinite; }
+
+/* Diagonal light sweep across the recommended-task card */
+.shimmer-host { position: relative; overflow: hidden; isolation: isolate; }
+.shimmer-host::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  background: linear-gradient(
+    105deg,
+    transparent 42%,
+    oklch(100% 0 0 / 0.55) 50%,
+    transparent 58%
+  );
+  background-size: 220% 100%;
+  animation: tb-shimmer 6s ease-in-out 1.2s infinite;
+}
+
+/* Respect users who'd rather not see motion */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
 }
