@@ -1,65 +1,102 @@
-import Image from "next/image";
+import Link from "next/link";
+import { Plus, CalendarClock } from "lucide-react";
+import { listAllTasks, listMeetings } from "@/lib/store";
+import { PageHeader } from "@/components/ui/page-header";
+import { Card, CardHeader } from "@/components/ui/card";
+import { EmptyState } from "@/components/ui/empty-state";
+import { buttonClasses } from "@/components/ui/button";
+import { MeetingListItem } from "@/components/meetings/meeting-list-item";
+import { Reveal } from "@/components/motion/reveal";
+import { TodayAgenda } from "@/components/today/today-agenda";
 
-export default function Home() {
+export default async function TodayPage() {
+  const [tasks, meetings] = await Promise.all([
+    listAllTasks(),
+    listMeetings(),
+  ]);
+
+  const meetingTitles = Object.fromEntries(
+    meetings.map((m) => [m.id, m.title]),
+  );
+
+  const taskCountByMeeting = new Map<string, { total: number; open: number }>();
+  for (const t of tasks) {
+    const entry = taskCountByMeeting.get(t.meeting_id) ?? { total: 0, open: 0 };
+    entry.total += 1;
+    if (t.status !== "done") entry.open += 1;
+    taskCountByMeeting.set(t.meeting_id, entry);
+  }
+
+  const today = new Date().toLocaleDateString("en-US", {
+    weekday: "long",
+    month: "long",
+    day: "numeric",
+  });
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
+    <main className="mx-auto max-w-[960px] px-8 py-8">
+      <Reveal>
+        <PageHeader
+          title="Today"
+          description={`${today} — what to focus on right now.`}
+          actions={
+            <Link href="/create" className={buttonClasses("primary", "md")}>
+              <Plus className="size-4" />
+              New Entry
+            </Link>
+          }
         />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
-        </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
+      </Reveal>
+
+      <Reveal delay={0.1} className="mt-7">
+        <TodayAgenda tasks={tasks} meetingTitles={meetingTitles} />
+      </Reveal>
+
+      <Reveal delay={0.2} className="mt-5">
+        <Card>
+          <CardHeader
+            title="Recent activity"
+            icon={<CalendarClock className="size-4" />}
+          />
+          {meetings.length === 0 ? (
+            <EmptyState
+              icon={CalendarClock}
+              title="Nothing here yet"
+              description="Add a meeting transcript or a personal goal to generate tasks."
+              action={
+                <Link
+                  href="/create"
+                  className={buttonClasses("primary", "sm")}
+                >
+                  <Plus className="size-4" />
+                  New Entry
+                </Link>
+              }
             />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
-        </div>
-      </main>
-    </div>
+          ) : (
+            <div className="divide-y divide-[var(--color-border)]">
+              {meetings.map((m) => {
+                const counts = taskCountByMeeting.get(m.id) ?? {
+                  total: 0,
+                  open: 0,
+                };
+                return (
+                  <MeetingListItem
+                    key={m.id}
+                    id={m.id}
+                    title={m.title}
+                    summary={m.summary}
+                    createdAt={m.created_at}
+                    taskCount={counts.total}
+                    openCount={counts.open}
+                    kind={m.kind}
+                  />
+                );
+              })}
+            </div>
+          )}
+        </Card>
+      </Reveal>
+    </main>
   );
 }
