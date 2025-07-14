@@ -1,36 +1,88 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# TaskBuddy
 
-## Getting Started
+An AI-powered **meeting-to-execution dashboard**. Paste messy meeting notes and
+TaskBuddy turns them into a structured plan: summary, decisions, open questions,
+blockers, prioritised tasks, a recommended schedule, and a Kanban workflow.
 
-First, run the development server:
+> **Design philosophy:** the LLM is used for _understanding_ (extraction,
+> summaries, follow-up messages). Prioritisation and scheduling use
+> **transparent, deterministic formulas** — so the workflow is explainable.
+
+## Getting started
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
+pnpm install
 pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open <http://localhost:3000>.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+### Demo mode (no setup required)
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Out of the box TaskBuddy runs in **demo mode**:
 
-## Learn More
+- **Data** is stored in an in-memory store, seeded with two sample meetings.
+- **Extraction** uses an offline heuristic parser instead of an LLM.
 
-To learn more about Next.js, take a look at the following resources:
+Everything works — create meetings, score tasks, build schedules, use the
+Kanban board — but data resets when the server restarts. The sidebar shows a
+"Demo mode" badge while keys are missing.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Going live
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+Add a `.env.local` file (copy `.env.local.example`) and fill in:
 
-## Deploy on Vercel
+### 1. Supabase (persistent storage)
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+1. Create a project at <https://supabase.com>.
+2. In the SQL Editor, run [`supabase/schema.sql`](./supabase/schema.sql).
+3. From **Project Settings → API**, copy into `.env.local`:
+   - `NEXT_PUBLIC_SUPABASE_URL`
+   - `SUPABASE_SERVICE_ROLE_KEY` (server-only — never exposed to the browser)
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+### 2. OpenRouter (LLM extraction)
+
+1. Get an API key at <https://openrouter.ai/keys>.
+2. Set `OPENROUTER_API_KEY` and (optionally) `OPENROUTER_MODEL`.
+
+Once a key set is present, TaskBuddy switches that layer over automatically —
+no code change. If an LLM call fails, it falls back to the heuristic extractor.
+
+## How it works
+
+```
+Paste notes → LLM/heuristic extraction → deterministic scoring → schedule → Kanban
+```
+
+| Layer            | Powered by        | Files                                  |
+| ---------------- | ----------------- | -------------------------------------- |
+| Extraction       | LLM or heuristic  | `lib/extraction.ts`, `lib/heuristic.ts`|
+| Priority scoring | Deterministic     | `lib/priority.ts`                      |
+| Scheduling       | Deterministic     | `lib/schedule.ts`                      |
+| Data layer       | Supabase / memory | `lib/store.ts`                         |
+| Mutations        | Server Actions    | `lib/actions.ts`                       |
+
+**Priority score** = `Urgency·0.30 + Impact·0.25 + Dependency·0.20 +
+Risk·0.15 + Confidence·0.10 − Effort·0.10`, mapped to Critical / High / Medium /
+Low / Backlog bands.
+
+## Routes
+
+- `/` — workload dashboard, recommended next task, end-of-day summary
+- `/meetings/new` — paste meeting notes
+- `/meetings/[id]` — summary, decisions, questions, tasks, schedule, planner
+- `/board` — global Kanban board (drag or use the status menu)
+
+## Scripts
+
+```bash
+pnpm dev      # development server
+pnpm build    # production build
+pnpm start    # serve the production build
+pnpm lint     # ESLint
+```
+
+## Stack
+
+Next.js 16 (App Router) · React 19 · TypeScript · Tailwind CSS v4 ·
+lucide-react · Supabase · OpenRouter.
