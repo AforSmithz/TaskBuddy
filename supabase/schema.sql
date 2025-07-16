@@ -8,10 +8,13 @@ create extension if not exists "pgcrypto";
 -- ---------------------------------------------------------------------------
 create table if not exists projects (
   id          uuid primary key default gen_random_uuid(),
+  user_id     uuid references auth.users(id) on delete cascade,
   name        text not null,
   description text,
   created_at  timestamptz not null default now()
 );
+
+create index if not exists projects_user_id_idx on projects(user_id);
 
 -- ---------------------------------------------------------------------------
 -- Meetings: one row per entry (meeting transcript or goal plan), plus its
@@ -19,6 +22,7 @@ create table if not exists projects (
 -- ---------------------------------------------------------------------------
 create table if not exists meetings (
   id                uuid primary key default gen_random_uuid(),
+  user_id           uuid references auth.users(id) on delete cascade,
   title             text not null,
   raw_input         text not null,
   summary           text,
@@ -36,11 +40,13 @@ create table if not exists meetings (
 );
 
 create index if not exists meetings_project_id_idx on meetings(project_id);
+create index if not exists meetings_user_id_idx on meetings(user_id);
 
 -- For existing databases, add the new columns in place:
 alter table meetings
   add column if not exists kind              text not null default 'meeting',
   add column if not exists status            text not null default 'active',
+  add column if not exists user_id           uuid references auth.users(id) on delete cascade,
   add column if not exists project_id        uuid references projects(id) on delete set null,
   add column if not exists parent_meeting_id uuid references meetings(id) on delete set null;
 
@@ -133,3 +139,73 @@ create table if not exists schedule_blocks (
 );
 
 create index if not exists schedule_meeting_id_idx on schedule_blocks(meeting_id);
+
+-- ---------------------------------------------------------------------------
+-- Row Level Security: each user sees only their own data.
+--   * projects & meetings are owned directly via user_id
+--   * child tables (decisions, open_questions, tasks, task_dependencies,
+--     schedule_blocks) inherit ownership through their parent meeting
+-- The app connects with the publishable (anon) key carrying the user's
+-- session, so these policies — not application code — enforce isolation.
+-- ---------------------------------------------------------------------------
+alter table projects          enable row level security;
+alter table meetings          enable row level security;
+alter table decisions         enable row level security;
+alter table open_questions    enable row level security;
+alter table tasks             enable row level security;
+alter table task_dependencies enable row level security;
+alter table schedule_blocks   enable row level security;
+
+drop policy if exists projects_owner on projects;
+create policy projects_owner on projects
+  for all
+  using (user_id = auth.uid())
+  with check (user_id = auth.uid());
+
+drop policy if exists meetings_owner on meetings;
+create policy meetings_owner on meetings
+  for all
+  using (user_id = auth.uid())
+  with check (user_id = auth.uid());
+
+-- Child-table policies. `<table>_owner` is true when the parent meeting
+-- belongs to the current user.
+drop policy if exists decisions_owner on decisions;
+create policy decisions_owner on decisions
+  for all
+  using (exists (select 1 from meetings m
+                 where m.id = decisions.meeting_id and m.user_id = auth.uid()))
+  with check (exists (select 1 from meetings m
+                      where m.id = decisions.meeting_id and m.user_id = auth.uid()));
+
+drop policy if exists open_questions_owner on open_questions;
+create policy open_questions_owner on open_questions
+  for all
+  using (exists (select 1 from meetings m
+                 where m.id = open_questions.meeting_id and m.user_id = auth.uid()))
+  with check (exists (select 1 from meetings m
+                      where m.id = open_questions.meeting_id and m.user_id = auth.uid()));
+
+drop policy if exists tasks_owner on tasks;
+create policy tasks_owner on tasks
+  for all
+  using (exists (select 1 from meetings m
+                 where m.id = tasks.meeting_id and m.user_id = auth.uid()))
+  with check (exists (select 1 from meetings m
+                      where m.id = tasks.meeting_id and m.user_id = auth.uid()));
+
+drop policy if exists task_dependencies_owner on task_dependencies;
+create policy task_dependencies_owner on task_dependencies
+  for all
+  using (exists (select 1 from meetings m
+                 where m.id = task_dependencies.meeting_id and m.user_id = auth.uid()))
+  with check (exists (select 1 from meetings m
+                      where m.id = task_dependencies.meeting_id and m.user_id = auth.uid()));
+
+drop policy if exists schedule_blocks_owner on schedule_blocks;
+create policy schedule_blocks_owner on schedule_blocks
+  for all
+  using (exists (select 1 from meetings m
+                 where m.id = schedule_blocks.meeting_id and m.user_id = auth.uid()))
+  with check (exists (select 1 from meetings m
+                      where m.id = schedule_blocks.meeting_id and m.user_id = auth.uid()));

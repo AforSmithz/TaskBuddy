@@ -2,6 +2,13 @@
 
 export type Confidence = "High" | "Medium" | "Low";
 
+/** Result of a login/signup Server Action, surfaced via `useActionState`. */
+export interface AuthState {
+  error: string | null;
+  /** Non-error message, e.g. "check your email to confirm". */
+  notice?: string | null;
+}
+
 export type TaskStatus =
   | "backlog"
   | "todo"
@@ -59,6 +66,8 @@ export interface DraftClassification {
 
 export interface Project {
   id: string;
+  /** Owner of the project. Undefined in offline demo mode. */
+  user_id?: string | null;
   name: string;
   description: string | null;
   created_at: string;
@@ -66,6 +75,8 @@ export interface Project {
 
 export interface Meeting {
   id: string;
+  /** Owner of the entry. Undefined in offline demo mode. */
+  user_id?: string | null;
   title: string;
   raw_input: string;
   summary: string | null;
@@ -191,6 +202,10 @@ export interface ExtractedTask extends FactorScores {
 export interface ExtractionResult {
   title: string;
   summary: string;
+  /** Best-fitting life-area for the whole entry (Work/Personal/Hobby/custom). */
+  suggested_area: string | null;
+  /** Concise project name that groups this entry's tasks, or null if none fits. */
+  suggested_project: string | null;
   discussion_points: string[];
   stakeholders: string[];
   daily_objective: string;
