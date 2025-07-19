@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { Plus, CalendarClock } from "lucide-react";
-import { listAllTasks, listMeetings } from "@/lib/store";
+import { listAllDependencies, listAllTasks, listMeetings } from "@/lib/store";
 import { PageHeader } from "@/components/ui/page-header";
 import { Card, CardHeader } from "@/components/ui/card";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -10,9 +10,10 @@ import { Reveal } from "@/components/motion/reveal";
 import { TodayAgenda } from "@/components/today/today-agenda";
 
 export default async function TodayPage() {
-  const [tasks, meetings] = await Promise.all([
+  const [tasks, meetings, dependencies] = await Promise.all([
     listAllTasks(),
     listMeetings(),
+    listAllDependencies(),
   ]);
 
   const meetingTitles = Object.fromEntries(
@@ -49,7 +50,11 @@ export default async function TodayPage() {
       </Reveal>
 
       <Reveal delay={0.1} className="mt-7">
-        <TodayAgenda tasks={tasks} meetingTitles={meetingTitles} />
+        <TodayAgenda
+          tasks={tasks}
+          meetingTitles={meetingTitles}
+          dependencies={dependencies}
+        />
       </Reveal>
 
       <Reveal delay={0.2} className="mt-5">
