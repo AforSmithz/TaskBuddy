@@ -2,8 +2,16 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Sun, Columns3, FolderKanban, FilePlus2, Sparkles } from "lucide-react";
+import {
+  Sun,
+  Columns3,
+  FolderKanban,
+  FilePlus2,
+  Sparkles,
+  LogOut,
+} from "lucide-react";
 import { cn } from "@/lib/cn";
+import { logoutAction } from "@/lib/auth-actions";
 
 const NAV = [
   { href: "/", label: "Today", icon: Sun, exact: true },
@@ -12,7 +20,23 @@ const NAV = [
   { href: "/create", label: "New Entry", icon: FilePlus2, exact: false },
 ];
 
-export function Sidebar({ demoMode }: { demoMode: boolean }) {
+/** Two-letter initials from a display name, for the account avatar. */
+function initials(name: string): string {
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return "?";
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+}
+
+export function Sidebar({
+  demoMode,
+  userName,
+  userEmail,
+}: {
+  demoMode: boolean;
+  userName: string;
+  userEmail: string;
+}) {
   const pathname = usePathname();
 
   return (
@@ -72,17 +96,27 @@ export function Sidebar({ demoMode }: { demoMode: boolean }) {
           </div>
         )}
         <div className="flex items-center gap-2.5">
-          <span className="flex size-7 items-center justify-center rounded-full bg-[var(--color-surface-raised)] text-[11px] font-medium text-[var(--color-fg-muted)]">
-            AA
+          <span className="flex size-7 shrink-0 items-center justify-center rounded-full bg-[var(--color-surface-raised)] text-[11px] font-medium text-[var(--color-fg-muted)]">
+            {initials(userName)}
           </span>
-          <div className="min-w-0">
+          <div className="min-w-0 flex-1">
             <p className="truncate text-[13px] font-medium text-[var(--color-fg)]">
-              Abiseno Arya
+              {userName}
             </p>
             <p className="truncate text-[11px] text-[var(--color-fg-muted)]">
-              abiseno.arya@gmail.com
+              {userEmail}
             </p>
           </div>
+          <form action={logoutAction}>
+            <button
+              type="submit"
+              title="Sign out"
+              aria-label="Sign out"
+              className="flex size-7 items-center justify-center rounded-md text-[var(--color-fg-subtle)] transition-colors hover:bg-[var(--color-surface-raised)] hover:text-[var(--color-fg)]"
+            >
+              <LogOut className="size-4" />
+            </button>
+          </form>
         </div>
       </div>
     </aside>
