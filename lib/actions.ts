@@ -11,6 +11,7 @@ import {
   updateTask,
 } from "./store";
 import { generateFollowUp } from "./generate";
+import { requireUser } from "./auth";
 import type { DraftClassification, EntryKind, TaskStatus } from "./types";
 
 // Server Actions — the single mutation layer for TaskBuddy.
@@ -43,12 +44,13 @@ export async function createEntryAction(
   _prev: FormState,
   formData: FormData,
 ): Promise<FormState> {
+  await requireUser();
   const kind: EntryKind =
     String(formData.get("mode")) === "plan" ? "plan" : "meeting";
   const notes = String(formData.get("notes") ?? "").trim();
-  // Category may be left on Auto; "Work" is the placeholder until the user
-  // confirms a category in the review step.
-  const area = pick(formData, "area") ?? "Work";
+  // Category may be left on Auto; when it is, TaskBuddy suggests one during
+  // extraction and the user confirms it in the review step.
+  const area = pick(formData, "area");
   const minLen = kind === "plan" ? 12 : 40;
   if (notes.length < minLen) {
     return {
@@ -60,8 +62,13 @@ export async function createEntryAction(
   }
 
   const parentMeetingId = pick(formData, "parentMeetingId");
-  const existingProjectId = pick(formData, "projectId");
   const newProjectName = String(formData.get("newProjectName") ?? "").trim();
+  // "Auto" means let TaskBuddy decide; "" means an explicit "No project";
+  // anything else is an existing project's id.
+  const rawProjectId = String(formData.get("projectId") ?? "");
+  const autoProject = rawProjectId === AUTO;
+  const existingProjectId =
+    rawProjectId && rawProjectId !== AUTO ? rawProjectId : null;
 
   let meetingId: string;
   try {
@@ -71,8 +78,9 @@ export async function createEntryAction(
     }
     meetingId = await createDraft(notes, {
       kind,
-      area,
+      area: area ?? undefined,
       projectId,
+      autoProject: autoProject && !newProjectName,
       parentMeetingId,
     });
   } catch (err) {
@@ -98,6 +106,7 @@ export async function confirmDraftAction(
   declinedTaskIds: string[],
   classification: DraftClassification,
 ): Promise<void> {
+  await requireUser();
   await confirmDraft(meetingId, declinedTaskIds, classification);
   revalidateAll();
   redirect(`/meetings/${meetingId}`);
@@ -105,6 +114,7 @@ export async function confirmDraftAction(
 
 /** Discard a draft entirely (nothing is kept). */
 export async function discardDraftAction(meetingId: string): Promise<void> {
+  await requireUser();
   await discardDraft(meetingId);
   revalidateAll();
   redirect("/create");
@@ -115,6 +125,7 @@ export async function updateTaskStatusAction(
   taskId: string,
   status: TaskStatus,
 ): Promise<void> {
+  await requireUser();
   await updateTask(taskId, { status });
   revalidateAll();
 }
@@ -124,6 +135,7 @@ export async function updateTaskAreaAction(
   taskId: string,
   area: string,
 ): Promise<void> {
+  await requireUser();
   await updateTask(taskId, { area });
   revalidateAll();
 }
@@ -133,6 +145,7 @@ export async function logActualTimeAction(
   taskId: string,
   minutes: number,
 ): Promise<void> {
+  await requireUser();
   await updateTask(taskId, {
     actual_minutes: Math.max(0, Math.round(minutes)),
   });
@@ -143,6 +156,7 @@ export async function logActualTimeAction(
 export async function generateFollowUpAction(
   meetingId: string,
 ): Promise<{ message: string | null; error: string | null }> {
+  await requireUser();
   const meeting = await getMeeting(meetingId);
   if (!meeting) return { message: null, error: "Meeting not found." };
   try {

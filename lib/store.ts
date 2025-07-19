@@ -17,16 +17,30 @@ import { extractEntry } from "./extraction";
 import { computePriority } from "./priority";
 import { generateSchedule } from "./schedule";
 import { SAMPLE_MEETINGS, SAMPLE_PROJECTS } from "./sample-data";
+import { getRequestClient } from "./supabase";
 
 // Central data layer.
 // Uses Supabase when configured; otherwise an in-memory store seeded with
 // sample data so the app is fully demoable without any backend setup.
+// Every Supabase query runs through a request-scoped client carrying the
+// user's session, so Row Level Security scopes reads and writes to that user.
 
 export function isSupabaseConfigured(): boolean {
   return Boolean(
     process.env.NEXT_PUBLIC_SUPABASE_URL &&
-      process.env.SUPABASE_SERVICE_ROLE_KEY,
+      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
   );
+}
+
+type RequestClient = Awaited<ReturnType<typeof getRequestClient>>;
+
+/** Id of the signed-in user, or throw — used to stamp ownership on inserts. */
+async function currentUserId(supabase: RequestClient): Promise<string> {
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) throw new Error("You must be signed in to do that.");
+  return user.id;
 }
 
 // --- In-memory store (survives HMR via globalThis) --------------------------
@@ -73,9 +87,18 @@ interface AssembledMeeting {
 
 export interface AssembleOptions {
   kind?: EntryKind;
-  /** Life-area applied to every extracted task (Today-page tabs). */
+  /**
+   * Life-area applied to every extracted task (Today-page tabs). When omitted,
+   * the area the extractor suggests for the entry is used.
+   */
   area?: string;
   projectId?: string | null;
+  /**
+   * When true and no explicit project is given, attach the entry to the
+   * project the extractor suggests — reusing an existing project of that name
+   * or creating a new one.
+   */
+  autoProject?: boolean;
   parentMeetingId?: string | null;
   status?: EntryStatus;
   createdAt?: string;
@@ -123,10 +146,32 @@ export async function assembleMeeting(
   opts: AssembleOptions = {},
 ): Promise<AssembledMeeting> {
   const kind = opts.kind ?? "meeting";
-  const area = opts.area ?? "Work";
   const createdAt = opts.createdAt ?? new Date().toISOString();
-  const { result } = await extractEntry(rawInput, kind);
   const meetingId = crypto.randomUUID();
+
+  // When the project is left to TaskBuddy, fetch existing projects so the
+  // extractor can reuse one by name and so a suggestion can be resolved below.
+  // Skipped otherwise — notably during seeding, where listProjects() would
+  // re-enter ensureSeeded().
+  const resolveProject = opts.autoProject && !opts.projectId;
+  const projects = resolveProject ? await listProjects() : [];
+  const { result } = await extractEntry(rawInput, kind, {
+    projectNames: projects.map((p) => p.name),
+  });
+
+  // Area: an explicit choice wins; otherwise use the extractor's suggestion.
+  const area = opts.area ?? result.suggested_area ?? "Work";
+
+  // Project: an explicit choice wins; otherwise, when auto-filing, attach to
+  // the suggested project — reusing an existing one of that name if it exists.
+  let projectId = opts.projectId ?? null;
+  if (resolveProject && result.suggested_project) {
+    const name = result.suggested_project.trim();
+    const match = projects.find(
+      (p) => p.name.toLowerCase() === name.toLowerCase(),
+    );
+    projectId = match ? match.id : await createProject(name);
+  }
 
   const meeting: Meeting = {
     id: meetingId,
@@ -141,7 +186,7 @@ export async function assembleMeeting(
     risks: result.risks,
     kind,
     status: opts.status ?? "active",
-    project_id: opts.projectId ?? null,
+    project_id: projectId,
     parent_meeting_id: opts.parentMeetingId ?? null,
     created_at: createdAt,
   };
@@ -236,8 +281,11 @@ export async function createProject(
     created_at: new Date().toISOString(),
   };
   if (isSupabaseConfigured()) {
-    const { supabase } = await import("./supabase");
-    const { error } = await supabase.from("projects").insert(project);
+    const supabase = await getRequestClient();
+    const user_id = await currentUserId(supabase);
+    const { error } = await supabase
+      .from("projects")
+      .insert({ ...project, user_id });
     if (error) throw new Error(`Supabase project insert failed: ${error.message}`);
   } else {
     await ensureSeeded();
@@ -248,7 +296,7 @@ export async function createProject(
 
 export async function listProjects(): Promise<Project[]> {
   if (isSupabaseConfigured()) {
-    const { supabase } = await import("./supabase");
+    const supabase = await getRequestClient();
     const { data } = await supabase
       .from("projects")
       .select("*")
@@ -263,7 +311,7 @@ export async function listProjects(): Promise<Project[]> {
 
 export async function getProject(id: string): Promise<Project | null> {
   if (isSupabaseConfigured()) {
-    const { supabase } = await import("./supabase");
+    const supabase = await getRequestClient();
     const { data } = await supabase
       .from("projects")
       .select("*")
@@ -326,7 +374,7 @@ export async function confirmDraft(
   const area = classification.area.trim() || "Work";
 
   if (isSupabaseConfigured()) {
-    const { supabase } = await import("./supabase");
+    const supabase = await getRequestClient();
     if (declined.size) {
       // Cascades remove dependency edges and schedule blocks for these tasks.
       await supabase
@@ -382,7 +430,7 @@ export async function confirmDraft(
 /** Delete a draft entirely (used when the user discards it during review). */
 export async function discardDraft(meetingId: string): Promise<void> {
   if (isSupabaseConfigured()) {
-    const { supabase } = await import("./supabase");
+    const supabase = await getRequestClient();
     // Child rows cascade on meeting delete.
     await supabase.from("meetings").delete().eq("id", meetingId);
     return;
@@ -399,7 +447,7 @@ export async function discardDraft(meetingId: string): Promise<void> {
 
 export async function listMeetings(): Promise<Meeting[]> {
   if (isSupabaseConfigured()) {
-    const { supabase } = await import("./supabase");
+    const supabase = await getRequestClient();
     const { data } = await supabase
       .from("meetings")
       .select("*")
@@ -415,7 +463,7 @@ export async function listMeetings(): Promise<Meeting[]> {
 
 export async function getMeeting(id: string): Promise<MeetingDetail | null> {
   if (isSupabaseConfigured()) {
-    const { supabase } = await import("./supabase");
+    const supabase = await getRequestClient();
     const { data: meeting } = await supabase
       .from("meetings")
       .select("*")
@@ -468,7 +516,7 @@ export async function getMeeting(id: string): Promise<MeetingDetail | null> {
 /** All tasks belonging to active (non-draft) entries. */
 export async function listAllTasks(): Promise<Task[]> {
   if (isSupabaseConfigured()) {
-    const { supabase } = await import("./supabase");
+    const supabase = await getRequestClient();
     const { data: active } = await supabase
       .from("meetings")
       .select("id")
@@ -490,12 +538,36 @@ export async function listAllTasks(): Promise<Task[]> {
   return db.tasks.filter((t) => !draftIds.has(t.meeting_id));
 }
 
+/** All dependency edges belonging to active (non-draft) entries. */
+export async function listAllDependencies(): Promise<TaskDependency[]> {
+  if (isSupabaseConfigured()) {
+    const supabase = await getRequestClient();
+    const { data: active } = await supabase
+      .from("meetings")
+      .select("id")
+      .eq("status", "active");
+    const ids = ((active as { id: string }[]) ?? []).map((m) => m.id);
+    if (ids.length === 0) return [];
+    const { data } = await supabase
+      .from("task_dependencies")
+      .select("*")
+      .in("meeting_id", ids);
+    return (data as TaskDependency[]) ?? [];
+  }
+  await ensureSeeded();
+  const db = memDB();
+  const draftIds = new Set(
+    db.meetings.filter((m) => m.status === "draft").map((m) => m.id),
+  );
+  return db.deps.filter((d) => !draftIds.has(d.meeting_id));
+}
+
 export async function updateTask(
   id: string,
   patch: Partial<Pick<Task, "status" | "actual_minutes" | "blocked_by" | "area">>,
 ): Promise<Task | null> {
   if (isSupabaseConfigured()) {
-    const { supabase } = await import("./supabase");
+    const supabase = await getRequestClient();
     const { data } = await supabase
       .from("tasks")
       .update(patch)
@@ -542,11 +614,17 @@ async function ensureSeeded(): Promise<void> {
 }
 
 async function persistSupabase(a: AssembledMeeting): Promise<void> {
-  const { supabase } = await import("./supabase");
+  const supabase = await getRequestClient();
+  const user_id = await currentUserId(supabase);
   const err = (label: string, e: { message: string } | null) => {
     if (e) throw new Error(`Supabase ${label} insert failed: ${e.message}`);
   };
-  err("meeting", (await supabase.from("meetings").insert(a.meeting)).error);
+  // Only the meeting carries user_id; child rows inherit ownership through it
+  // (see the RLS policies in supabase/schema.sql).
+  err(
+    "meeting",
+    (await supabase.from("meetings").insert({ ...a.meeting, user_id })).error,
+  );
   if (a.decisions.length)
     err("decisions", (await supabase.from("decisions").insert(a.decisions)).error);
   if (a.questions.length)
