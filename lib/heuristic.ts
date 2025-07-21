@@ -106,6 +106,20 @@ function shorten(sentence: string, max = 80): string {
   return clean.length > max ? clean.slice(0, max - 1).trimEnd() + "…" : clean;
 }
 
+// Life-area keyword cues. Used to suggest Work/Personal/Hobby for an entry
+// when the user leaves the category on "Auto".
+const HOBBY_RE =
+  /\b(learn|learning|practi[cs]e|hobby|guitar|piano|violin|drum|ukulele|instrument|paint|draw|sketch|cook|bak(?:e|ing)|garden|chess|photograph|language|spanish|french|japanese|sing|dance|knit|run(?:ning)?|jog|gym|workout|fitness|yoga|climb|sport|football|tennis|hike|read(?:ing)? books?)\b/i;
+const PERSONAL_RE =
+  /\b(family|kids?|home|house|move|apartment|doctor|dentist|health|budget|finance|saving|tax(?:es)?|wedding|birthday|trip|holiday|vacation|grocer|errand|chores?|personal|relationship|friends?)\b/i;
+
+/** Suggest a life-area for an entry from keyword cues; defaults to "Work". */
+function lifeArea(text: string): string {
+  if (HOBBY_RE.test(text)) return "Hobby";
+  if (PERSONAL_RE.test(text)) return "Personal";
+  return "Work";
+}
+
 function categorize(sentence: string): string {
   const l = sentence.toLowerCase();
   if (/\b(data|dataset|clean|missing values?)\b/.test(l)) return "Data";
@@ -198,9 +212,13 @@ export function heuristicPlan(rawInput: string): ExtractionResult {
     };
   });
 
+  const title = shorten(goal.charAt(0).toUpperCase() + goal.slice(1), 70);
   return {
-    title: shorten(goal.charAt(0).toUpperCase() + goal.slice(1), 70),
+    title,
     summary: `A suggested plan to ${goal}, broken into ${tasks.length} steps over the coming week.`,
+    // A personal goal always warrants its own project to group its steps.
+    suggested_area: lifeArea(rawInput),
+    suggested_project: title,
     discussion_points: [],
     stakeholders: [],
     daily_objective: `Make steady progress toward: ${goal}.`,
@@ -336,6 +354,9 @@ export function heuristicExtract(rawInput: string): ExtractionResult {
   return {
     title,
     summary,
+    suggested_area: lifeArea(text),
+    // A meeting doesn't necessarily form its own project — leave it to the user.
+    suggested_project: null,
     discussion_points: sentences.slice(0, 6).map((s) => shorten(s, 110)),
     stakeholders,
     daily_objective:

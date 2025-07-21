@@ -225,8 +225,8 @@ export function EntryForm({
             <span className="flex items-center gap-1.5">
               <Loader2 className="size-3.5 animate-spin" />
               {mode === "plan"
-                ? "Building your plan…"
-                : "Extracting tasks, scoring priority…"}
+                ? "Building your plan… this can take a few tries"
+                : "Extracting tasks… this can take a few tries"}
             </span>
           ) : (
             <>Tip: press ⌘/Ctrl + Enter to submit</>
