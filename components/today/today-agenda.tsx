@@ -15,7 +15,12 @@ import {
   ArrowRight,
   CheckCircle2,
 } from "lucide-react";
-import { SEED_AREAS, type Task, type TaskStatus } from "@/lib/types";
+import {
+  SEED_AREAS,
+  type Task,
+  type TaskDependency,
+  type TaskStatus,
+} from "@/lib/types";
 import { PriorityBadge } from "@/components/ui/badge";
 import { Card, CardHeader } from "@/components/ui/card";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -32,9 +37,11 @@ type Patch = { taskId: string; status?: TaskStatus; area?: string };
 export function TodayAgenda({
   tasks,
   meetingTitles,
+  dependencies,
 }: {
   tasks: Task[];
   meetingTitles: Record<string, string>;
+  dependencies: TaskDependency[];
 }) {
   const [optimistic, applyOptimistic] = useOptimistic(
     tasks,
@@ -86,7 +93,46 @@ export function TodayAgenda({
     return counts;
   }, [optimistic]);
 
+  // Dependency awareness: a task whose prerequisites aren't done yet can't
+  // actually be started, so it shouldn't be recommended or float to the top.
+  const depInfo = useMemo(() => {
+    const prereqs = new Map<string, string[]>();
+    const dependents = new Map<string, string[]>();
+    const push = (m: Map<string, string[]>, k: string, v: string) => {
+      const list = m.get(k);
+      if (list) list.push(v);
+      else m.set(k, [v]);
+    };
+    for (const d of dependencies) {
+      push(prereqs, d.task_id, d.depends_on_task_id);
+      push(dependents, d.depends_on_task_id, d.task_id);
+    }
+    const titleById = new Map(optimistic.map((t) => [t.id, t.title]));
+    const doneIds = new Set(
+      optimistic.filter((t) => t.status === "done").map((t) => t.id),
+    );
+    // Titles of each open task's prerequisites that aren't done yet.
+    const waiting = new Map<string, string[]>();
+    for (const t of optimistic) {
+      if (t.status === "done") continue;
+      const unmet = (prereqs.get(t.id) ?? [])
+        .filter((id) => titleById.has(id) && !doneIds.has(id))
+        .map((id) => titleById.get(id)!);
+      if (unmet.length) waiting.set(t.id, unmet);
+    }
+    // How many still-open tasks each task would unblock once it's done.
+    const unblockCount = new Map<string, number>();
+    for (const [id, deps] of dependents) {
+      const n = deps.filter(
+        (d) => titleById.has(d) && !doneIds.has(d),
+      ).length;
+      if (n) unblockCount.set(id, n);
+    }
+    return { waiting, unblockCount };
+  }, [optimistic, dependencies]);
+
   const b = useMemo(() => {
+    const isWaiting = (t: Task) => depInfo.waiting.has(t.id);
     const visible =
       tab === "All" ? optimistic : optimistic.filter((t) => t.area === tab);
     const open = visible.filter((t) => t.status !== "done");
@@ -95,7 +141,13 @@ export function TodayAgenda({
       .sort(byPriority);
     const sorted = open
       .filter((t) => t.status !== "blocked")
-      .sort(byPriority);
+      .sort((x, y) => {
+        // Ready-to-start tasks rank above ones still waiting on a
+        // prerequisite, then ties break on priority score.
+        const xw = isWaiting(x) ? 1 : 0;
+        const yw = isWaiting(y) ? 1 : 0;
+        return xw - yw || byPriority(x, y);
+      });
     const overdue = sorted.filter((t) => isOverdue(t.due_date));
     const dueToday = sorted.filter(
       (t) => !isOverdue(t.due_date) && isToday(t.due_date),
@@ -110,11 +162,13 @@ export function TodayAgenda({
       overdue,
       dueToday,
       focus,
-      recommended: sorted[0],
+      // The next task to do: highest priority among those actually startable.
+      recommended: sorted.find((t) => !isWaiting(t)) ?? sorted[0],
     };
-  }, [optimistic, tab]);
+  }, [optimistic, tab, depInfo]);
 
   const rec = b.recommended;
+  const recUnblocks = rec ? depInfo.unblockCount.get(rec.id) ?? 0 : 0;
   const totalOpen = optimistic.filter((t) => t.status !== "done").length;
 
   return (
@@ -185,6 +239,14 @@ export function TodayAgenda({
                   {rec.priority_reason}
                 </p>
               )}
+              {recUnblocks > 0 && (
+                <p className="mt-1.5 flex items-center gap-1.5 text-[12px] font-medium text-[var(--color-accent-fg)]">
+                  <Lock className="size-3.5 shrink-0" />
+                  Do this first — {recUnblocks}{" "}
+                  {recUnblocks === 1 ? "task" : "tasks"} depend
+                  {recUnblocks === 1 ? "s" : ""} on it.
+                </p>
+              )}
               <div className="mt-2.5 flex items-center gap-2">
                 <PriorityBadge
                   label={rec.priority_label}
@@ -231,6 +293,7 @@ export function TodayAgenda({
               tasks={b.overdue}
               meetingTitles={meetingTitles}
               areas={areas}
+              waiting={depInfo.waiting}
               onMove={move}
               onAssignArea={assignArea}
             />
@@ -241,6 +304,7 @@ export function TodayAgenda({
               tasks={b.dueToday}
               meetingTitles={meetingTitles}
               areas={areas}
+              waiting={depInfo.waiting}
               onMove={move}
               onAssignArea={assignArea}
             />
@@ -251,6 +315,7 @@ export function TodayAgenda({
               tasks={b.focus}
               meetingTitles={meetingTitles}
               areas={areas}
+              waiting={depInfo.waiting}
               onMove={move}
               onAssignArea={assignArea}
             />
@@ -328,6 +393,7 @@ function Section({
   tasks,
   meetingTitles,
   areas,
+  waiting,
   onMove,
   onAssignArea,
 }: {
@@ -337,6 +403,7 @@ function Section({
   tasks: Task[];
   meetingTitles: Record<string, string>;
   areas: string[];
+  waiting: Map<string, string[]>;
   onMove: (id: string, status: TaskStatus, from: TaskStatus) => void;
   onAssignArea: (id: string, area: string) => void;
 }) {
@@ -358,6 +425,7 @@ function Section({
               task={t}
               meetingTitle={meetingTitles[t.meeting_id]}
               areas={areas}
+              waitingOn={waiting.get(t.id)}
               onMove={onMove}
               onAssignArea={onAssignArea}
             />

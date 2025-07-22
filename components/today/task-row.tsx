@@ -3,7 +3,7 @@
 import { useState } from "react";
 import Link from "next/link";
 import { motion } from "motion/react";
-import { Check, User, CalendarDays } from "lucide-react";
+import { Check, User, CalendarDays, Lock } from "lucide-react";
 import {
   TASK_STATUSES,
   STATUS_LABELS,
@@ -20,16 +20,20 @@ export function TaskRow({
   task,
   meetingTitle,
   areas,
+  waitingOn,
   onMove,
   onAssignArea,
 }: {
   task: Task;
   meetingTitle?: string;
   areas: string[];
+  /** Titles of prerequisite tasks that aren't done yet, if any. */
+  waitingOn?: string[];
   onMove: (id: string, status: TaskStatus, from: TaskStatus) => void;
   onAssignArea: (id: string, area: string) => void;
 }) {
   const overdue = isOverdue(task.due_date) && task.status !== "done";
+  const waiting = (waitingOn?.length ?? 0) > 0;
   const [addingArea, setAddingArea] = useState(false);
 
   const areaOptions = areas.includes(task.area)
@@ -45,7 +49,12 @@ export function TaskRow({
       exit={{ opacity: 0, scale: 0.97 }}
       transition={{ type: "spring", stiffness: 350, damping: 30 }}
     >
-      <article className="group flex items-center gap-3 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2.5 transition-colors hover:border-[var(--color-border-strong)] hover:shadow-sm">
+      <article
+        className={cn(
+          "group flex items-center gap-3 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2.5 transition-colors hover:border-[var(--color-border-strong)] hover:shadow-sm",
+          waiting && "opacity-65",
+        )}
+      >
         <button
           type="button"
           onClick={() => onMove(task.id, "done", task.status)}
@@ -93,6 +102,16 @@ export function TaskRow({
               {formatMinutes(task.estimated_minutes)}
             </span>
           </div>
+          {waiting && (
+            <p className="mt-1 flex items-center gap-1 text-[11px] font-medium text-[var(--color-status-blocked-fg)]">
+              <Lock className="size-3 shrink-0" />
+              <span className="truncate">
+                {waitingOn!.length === 1
+                  ? `Waiting on “${waitingOn![0]}”`
+                  : `Waiting on ${waitingOn!.length} earlier tasks`}
+              </span>
+            </p>
+          )}
         </div>
 
         {addingArea ? (
