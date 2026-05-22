@@ -58,8 +58,8 @@ export interface DraftClassification {
   projectId: string | null;
   /** Name of a brand-new project to create; empty string when not creating one. */
   newProjectName: string;
-  /** Earlier meeting this entry follows up on, or null. */
-  parentMeetingId: string | null;
+  /** Earlier entry this one follows up on, or null. */
+  parentEntryId: string | null;
 }
 
 // --- Database row shapes ----------------------------------------------------
@@ -70,10 +70,12 @@ export interface Project {
   user_id?: string | null;
   name: string;
   description: string | null;
+  /** The "finish line" the completion forecast is computed against. */
+  deadline: string | null;
   created_at: string;
 }
 
-export interface Meeting {
+export interface Entry {
   id: string;
   /** Owner of the entry. Undefined in offline demo mode. */
   user_id?: string | null;
@@ -89,13 +91,13 @@ export interface Meeting {
   kind: EntryKind;
   status: EntryStatus;
   project_id: string | null;
-  parent_meeting_id: string | null;
+  parent_entry_id: string | null;
   created_at: string;
 }
 
 export interface Decision {
   id: string;
-  meeting_id: string;
+  entry_id: string;
   decision: string;
   source_quote: string | null;
   confidence: string | null;
@@ -104,7 +106,7 @@ export interface Decision {
 
 export interface OpenQuestion {
   id: string;
-  meeting_id: string;
+  entry_id: string;
   question: string;
   related_stakeholder: string | null;
   source_quote: string | null;
@@ -115,7 +117,7 @@ export interface OpenQuestion {
 
 export interface Task {
   id: string;
-  meeting_id: string;
+  entry_id: string;
   title: string;
   description: string | null;
   owner: string | null;
@@ -143,7 +145,7 @@ export interface Task {
 
 export interface TaskDependency {
   id: string;
-  meeting_id: string;
+  entry_id: string;
   task_id: string;
   depends_on_task_id: string;
   reason: string | null;
@@ -151,7 +153,7 @@ export interface TaskDependency {
 
 export interface ScheduleBlock {
   id: string;
-  meeting_id: string;
+  entry_id: string;
   task_id: string | null;
   label: string;
   start_time: string;
@@ -162,12 +164,82 @@ export interface ScheduleBlock {
 
 // --- Composed views ---------------------------------------------------------
 
-export interface MeetingDetail extends Meeting {
+export interface EntryDetail extends Entry {
   decisions: Decision[];
   open_questions: OpenQuestion[];
   tasks: Task[];
   dependencies: TaskDependency[];
   schedule: ScheduleBlock[];
+}
+
+// --- Time budget (the deployable-hours model) -------------------------------
+
+/** One weekday's baseline deployable hours (0=Sun .. 6=Sat). */
+export interface Availability {
+  id?: string;
+  user_id?: string | null;
+  weekday: number;
+  hours: number;
+}
+
+/** A specific date's override of the weekly template. */
+export interface AvailabilityOverride {
+  id?: string;
+  user_id?: string | null;
+  date: string; // ISO date
+  hours: number;
+}
+
+/** A logged event that consumes hours on a date ("friends 6-9pm"). */
+export interface Commitment {
+  id: string;
+  user_id?: string | null;
+  date: string; // ISO date
+  hours: number;
+  label: string | null;
+  created_at: string;
+}
+
+// --- Forecast (the completion-probability engine) ---------------------------
+
+/** The headline output of the forecast for a single project. */
+export interface ForecastResult {
+  /** P(finish all open work before the deadline), 0–1. */
+  probability: number;
+  /** Point-estimate remaining work, minutes. */
+  expectedMinutes: number;
+  /** Deployable minutes between now and the deadline. */
+  deployableMinutes: number;
+  /** deployable − expected; negative means over budget. */
+  slackMinutes: number;
+  openTaskCount: number;
+}
+
+/** A recommended plan change and the probability it would restore. */
+export interface RecoveryMove {
+  taskId: string;
+  title: string;
+  /** Probability if this task were deferred past the deadline. */
+  probabilityAfter: number;
+}
+
+/** A forecast attached to its project — what the UI renders. */
+export interface ProjectForecast extends ForecastResult {
+  projectId: string;
+  projectName: string;
+  deadline: string | null;
+}
+
+/**
+ * An advisory "pit call": a project whose probability dropped after new data,
+ * with the moves that would recover it.
+ */
+export interface PitCall {
+  projectId: string;
+  projectName: string;
+  probabilityBefore: number;
+  probabilityAfter: number;
+  moves: RecoveryMove[];
 }
 
 // --- LLM extraction shape (what the model is asked to return) ---------------
