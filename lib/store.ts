@@ -1,13 +1,18 @@
 import "server-only";
 import type {
+  Availability,
+  AvailabilityOverride,
+  Commitment,
   Decision,
   DraftClassification,
   EntryKind,
   EntryStatus,
-  Meeting,
-  MeetingDetail,
+  Entry,
+  EntryDetail,
   OpenQuestion,
+  PitCall,
   Project,
+  ProjectForecast,
   ScheduleBlock,
   Task,
   TaskDependency,
@@ -16,7 +21,13 @@ import type {
 import { extractEntry } from "./extraction";
 import { computePriority } from "./priority";
 import { generateSchedule } from "./schedule";
-import { SAMPLE_MEETINGS, SAMPLE_PROJECTS } from "./sample-data";
+import {
+  deployableMinutes,
+  forecast,
+  recoveryMoves,
+  type CandidateTask,
+} from "./forecast";
+import { SAMPLE_ENTRIES, SAMPLE_PROJECTS } from "./sample-data";
 import { getRequestClient } from "./supabase";
 
 // Central data layer.
@@ -47,14 +58,22 @@ async function currentUserId(supabase: RequestClient): Promise<string> {
 
 interface MemDB {
   projects: Project[];
-  meetings: Meeting[];
+  entries: Entry[];
   decisions: Decision[];
   questions: OpenQuestion[];
   tasks: Task[];
   deps: TaskDependency[];
   schedule: ScheduleBlock[];
+  availability: Availability[];
+  overrides: AvailabilityOverride[];
+  commitments: Commitment[];
   seeded: boolean;
 }
+
+/** Sensible starting template: ~4 focus-hours on weekdays, nothing on weekends. */
+const DEFAULT_AVAILABILITY: Availability[] = [0, 1, 2, 3, 4, 5, 6].map(
+  (weekday) => ({ weekday, hours: weekday >= 1 && weekday <= 5 ? 4 : 0 }),
+);
 
 const g = globalThis as typeof globalThis & { __taskbuddyDB?: MemDB };
 
@@ -62,22 +81,42 @@ function memDB(): MemDB {
   if (!g.__taskbuddyDB) {
     g.__taskbuddyDB = {
       projects: [],
-      meetings: [],
+      entries: [],
       decisions: [],
       questions: [],
       tasks: [],
       deps: [],
       schedule: [],
+      availability: DEFAULT_AVAILABILITY.map((a) => ({ ...a })),
+      overrides: [],
+      commitments: [],
       seeded: false,
     };
   }
   return g.__taskbuddyDB;
 }
 
-// --- Assembly: raw notes -> fully scored & scheduled meeting ----------------
+/** Today as an ISO `YYYY-MM-DD` date. */
+function todayISO(): string {
+  return new Date().toISOString().slice(0, 10);
+}
 
-interface AssembledMeeting {
-  meeting: Meeting;
+/** Overlay stored weekday hours on the default template so all 7 days exist. */
+function mergeAvailability(stored: Availability[]): Availability[] {
+  const byDay = new Map<number, number>(
+    DEFAULT_AVAILABILITY.map((a) => [a.weekday, a.hours]),
+  );
+  for (const a of stored) byDay.set(a.weekday, a.hours);
+  return [0, 1, 2, 3, 4, 5, 6].map((weekday) => ({
+    weekday,
+    hours: byDay.get(weekday) ?? 0,
+  }));
+}
+
+// --- Assembly: raw notes -> fully scored & scheduled entry ------------------
+
+interface AssembledEntry {
+  entry: Entry;
   decisions: Decision[];
   questions: OpenQuestion[];
   tasks: Task[];
@@ -99,14 +138,14 @@ export interface AssembleOptions {
    * or creating a new one.
    */
   autoProject?: boolean;
-  parentMeetingId?: string | null;
+  parentEntryId?: string | null;
   status?: EntryStatus;
   createdAt?: string;
 }
 
 /** Build the recommended schedule for a set of tasks + dependency edges. */
 function buildSchedule(
-  meetingId: string,
+  entryId: string,
   tasks: Task[],
   deps: TaskDependency[],
 ): ScheduleBlock[] {
@@ -126,7 +165,7 @@ function buildSchedule(
   );
   return planned.map((b) => ({
     id: crypto.randomUUID(),
-    meeting_id: meetingId,
+    entry_id: entryId,
     task_id: b.task_id,
     label: b.label,
     start_time: b.start_time,
@@ -141,13 +180,13 @@ function buildSchedule(
  * extract -> score priority -> resolve dependencies -> generate schedule.
  * Every row is assigned a UUID up front so it can be persisted directly.
  */
-export async function assembleMeeting(
+export async function assembleEntry(
   rawInput: string,
   opts: AssembleOptions = {},
-): Promise<AssembledMeeting> {
+): Promise<AssembledEntry> {
   const kind = opts.kind ?? "meeting";
   const createdAt = opts.createdAt ?? new Date().toISOString();
-  const meetingId = crypto.randomUUID();
+  const entryId = crypto.randomUUID();
 
   // When the project is left to TaskBuddy, fetch existing projects so the
   // extractor can reuse one by name and so a suggestion can be resolved below.
@@ -173,8 +212,8 @@ export async function assembleMeeting(
     projectId = match ? match.id : await createProject(name);
   }
 
-  const meeting: Meeting = {
-    id: meetingId,
+  const entry: Entry = {
+    id: entryId,
     title: result.title,
     raw_input: rawInput,
     summary: result.summary,
@@ -187,13 +226,13 @@ export async function assembleMeeting(
     kind,
     status: opts.status ?? "active",
     project_id: projectId,
-    parent_meeting_id: opts.parentMeetingId ?? null,
+    parent_entry_id: opts.parentEntryId ?? null,
     created_at: createdAt,
   };
 
   const decisions: Decision[] = result.decisions.map((d) => ({
     id: crypto.randomUUID(),
-    meeting_id: meetingId,
+    entry_id: entryId,
     decision: d.decision,
     source_quote: d.source_quote,
     confidence: d.confidence,
@@ -202,7 +241,7 @@ export async function assembleMeeting(
 
   const questions: OpenQuestion[] = result.open_questions.map((q) => ({
     id: crypto.randomUUID(),
-    meeting_id: meetingId,
+    entry_id: entryId,
     question: q.question,
     related_stakeholder: q.related_stakeholder,
     source_quote: q.source_quote,
@@ -219,7 +258,7 @@ export async function assembleMeeting(
     const { score, label } = computePriority(t);
     return {
       id: keyToId.get(t.key)!,
-      meeting_id: meetingId,
+      entry_id: entryId,
       title: t.title,
       description: t.description,
       owner: t.owner,
@@ -254,7 +293,7 @@ export async function assembleMeeting(
       if (dependsOnId && dependsOnId !== taskId) {
         deps.push({
           id: crypto.randomUUID(),
-          meeting_id: meetingId,
+          entry_id: entryId,
           task_id: taskId,
           depends_on_task_id: dependsOnId,
           reason: null,
@@ -263,9 +302,9 @@ export async function assembleMeeting(
     }
   }
 
-  const schedule = buildSchedule(meetingId, tasks, deps);
+  const schedule = buildSchedule(entryId, tasks, deps);
 
-  return { meeting, decisions, questions, tasks, deps, schedule };
+  return { entry, decisions, questions, tasks, deps, schedule };
 }
 
 // --- Projects ---------------------------------------------------------------
@@ -278,6 +317,7 @@ export async function createProject(
     id: crypto.randomUUID(),
     name,
     description,
+    deadline: null,
     created_at: new Date().toISOString(),
   };
   if (isSupabaseConfigured()) {
@@ -330,7 +370,7 @@ export async function createDraft(
   rawInput: string,
   opts: AssembleOptions = {},
 ): Promise<string> {
-  const assembled = await assembleMeeting(rawInput, {
+  const assembled = await assembleEntry(rawInput, {
     ...opts,
     status: "draft",
   });
@@ -339,14 +379,14 @@ export async function createDraft(
   } else {
     await ensureSeeded();
     const db = memDB();
-    db.meetings.unshift(assembled.meeting);
+    db.entries.unshift(assembled.entry);
     db.decisions.push(...assembled.decisions);
     db.questions.push(...assembled.questions);
     db.tasks.push(...assembled.tasks);
     db.deps.push(...assembled.deps);
     db.schedule.push(...assembled.schedule);
   }
-  return assembled.meeting.id;
+  return assembled.entry.id;
 }
 
 /**
@@ -355,7 +395,7 @@ export async function createDraft(
  * schedule from the survivors, and flip the entry to active.
  */
 export async function confirmDraft(
-  meetingId: string,
+  entryId: string,
   declinedTaskIds: string[],
   classification: DraftClassification,
 ): Promise<void> {
@@ -366,10 +406,10 @@ export async function confirmDraft(
   const projectId = classification.newProjectName
     ? await createProject(classification.newProjectName)
     : classification.projectId;
-  const parentMeetingId =
-    classification.parentMeetingId &&
-    classification.parentMeetingId !== meetingId
-      ? classification.parentMeetingId
+  const parentEntryId =
+    classification.parentEntryId &&
+    classification.parentEntryId !== entryId
+      ? classification.parentEntryId
       : null;
   const area = classification.area.trim() || "Work";
 
@@ -382,111 +422,111 @@ export async function confirmDraft(
         .delete()
         .in("id", [...declined]);
     }
-    await supabase.from("tasks").update({ area }).eq("meeting_id", meetingId);
+    await supabase.from("tasks").update({ area }).eq("entry_id", entryId);
     const [{ data: tasks }, { data: deps }] = await Promise.all([
-      supabase.from("tasks").select("*").eq("meeting_id", meetingId),
+      supabase.from("tasks").select("*").eq("entry_id", entryId),
       supabase
         .from("task_dependencies")
         .select("*")
-        .eq("meeting_id", meetingId),
+        .eq("entry_id", entryId),
     ]);
     const schedule = buildSchedule(
-      meetingId,
+      entryId,
       (tasks as Task[]) ?? [],
       (deps as TaskDependency[]) ?? [],
     );
-    await supabase.from("schedule_blocks").delete().eq("meeting_id", meetingId);
+    await supabase.from("schedule_blocks").delete().eq("entry_id", entryId);
     if (schedule.length)
       await supabase.from("schedule_blocks").insert(schedule);
     await supabase
-      .from("meetings")
+      .from("entries")
       .update({
         status: "active",
         project_id: projectId,
-        parent_meeting_id: parentMeetingId,
+        parent_entry_id: parentEntryId,
       })
-      .eq("id", meetingId);
+      .eq("id", entryId);
     return;
   }
 
   await ensureSeeded();
   const db = memDB();
-  const meeting = db.meetings.find((m) => m.id === meetingId);
-  if (!meeting) return;
+  const entry = db.entries.find((m) => m.id === entryId);
+  if (!entry) return;
   db.tasks = db.tasks.filter((t) => !declined.has(t.id));
   db.deps = db.deps.filter(
     (d) => !declined.has(d.task_id) && !declined.has(d.depends_on_task_id),
   );
-  const survivors = db.tasks.filter((t) => t.meeting_id === meetingId);
+  const survivors = db.tasks.filter((t) => t.entry_id === entryId);
   for (const t of survivors) t.area = area;
-  const deps = db.deps.filter((d) => d.meeting_id === meetingId);
-  db.schedule = db.schedule.filter((s) => s.meeting_id !== meetingId);
-  db.schedule.push(...buildSchedule(meetingId, survivors, deps));
-  meeting.status = "active";
-  meeting.project_id = projectId;
-  meeting.parent_meeting_id = parentMeetingId;
+  const deps = db.deps.filter((d) => d.entry_id === entryId);
+  db.schedule = db.schedule.filter((s) => s.entry_id !== entryId);
+  db.schedule.push(...buildSchedule(entryId, survivors, deps));
+  entry.status = "active";
+  entry.project_id = projectId;
+  entry.parent_entry_id = parentEntryId;
 }
 
 /** Delete a draft entirely (used when the user discards it during review). */
-export async function discardDraft(meetingId: string): Promise<void> {
+export async function discardDraft(entryId: string): Promise<void> {
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
-    // Child rows cascade on meeting delete.
-    await supabase.from("meetings").delete().eq("id", meetingId);
+    // Child rows cascade on entry delete.
+    await supabase.from("entries").delete().eq("id", entryId);
     return;
   }
   await ensureSeeded();
   const db = memDB();
-  db.meetings = db.meetings.filter((m) => m.id !== meetingId);
-  db.decisions = db.decisions.filter((d) => d.meeting_id !== meetingId);
-  db.questions = db.questions.filter((q) => q.meeting_id !== meetingId);
-  db.tasks = db.tasks.filter((t) => t.meeting_id !== meetingId);
-  db.deps = db.deps.filter((d) => d.meeting_id !== meetingId);
-  db.schedule = db.schedule.filter((s) => s.meeting_id !== meetingId);
+  db.entries = db.entries.filter((m) => m.id !== entryId);
+  db.decisions = db.decisions.filter((d) => d.entry_id !== entryId);
+  db.questions = db.questions.filter((q) => q.entry_id !== entryId);
+  db.tasks = db.tasks.filter((t) => t.entry_id !== entryId);
+  db.deps = db.deps.filter((d) => d.entry_id !== entryId);
+  db.schedule = db.schedule.filter((s) => s.entry_id !== entryId);
 }
 
-export async function listMeetings(): Promise<Meeting[]> {
+export async function listEntries(): Promise<Entry[]> {
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
     const { data } = await supabase
-      .from("meetings")
+      .from("entries")
       .select("*")
       .eq("status", "active")
       .order("created_at", { ascending: false });
-    return (data as Meeting[]) ?? [];
+    return (data as Entry[]) ?? [];
   }
   await ensureSeeded();
-  return [...memDB().meetings]
+  return [...memDB().entries]
     .filter((m) => m.status === "active")
     .sort((a, b) => b.created_at.localeCompare(a.created_at));
 }
 
-export async function getMeeting(id: string): Promise<MeetingDetail | null> {
+export async function getEntry(id: string): Promise<EntryDetail | null> {
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
-    const { data: meeting } = await supabase
-      .from("meetings")
+    const { data: entry } = await supabase
+      .from("entries")
       .select("*")
       .eq("id", id)
       .maybeSingle();
-    if (!meeting) return null;
+    if (!entry) return null;
     const [decisions, questions, tasks, deps, schedule] = await Promise.all([
-      supabase.from("decisions").select("*").eq("meeting_id", id),
-      supabase.from("open_questions").select("*").eq("meeting_id", id),
+      supabase.from("decisions").select("*").eq("entry_id", id),
+      supabase.from("open_questions").select("*").eq("entry_id", id),
       supabase
         .from("tasks")
         .select("*")
-        .eq("meeting_id", id)
+        .eq("entry_id", id)
         .order("sort_index"),
-      supabase.from("task_dependencies").select("*").eq("meeting_id", id),
+      supabase.from("task_dependencies").select("*").eq("entry_id", id),
       supabase
         .from("schedule_blocks")
         .select("*")
-        .eq("meeting_id", id)
+        .eq("entry_id", id)
         .order("sort_index"),
     ]);
     return {
-      ...(meeting as Meeting),
+      ...(entry as Entry),
       decisions: (decisions.data as Decision[]) ?? [],
       open_questions: (questions.data as OpenQuestion[]) ?? [],
       tasks: (tasks.data as Task[]) ?? [],
@@ -497,18 +537,18 @@ export async function getMeeting(id: string): Promise<MeetingDetail | null> {
 
   await ensureSeeded();
   const db = memDB();
-  const meeting = db.meetings.find((m) => m.id === id);
-  if (!meeting) return null;
+  const entry = db.entries.find((m) => m.id === id);
+  if (!entry) return null;
   return {
-    ...meeting,
-    decisions: db.decisions.filter((d) => d.meeting_id === id),
-    open_questions: db.questions.filter((q) => q.meeting_id === id),
+    ...entry,
+    decisions: db.decisions.filter((d) => d.entry_id === id),
+    open_questions: db.questions.filter((q) => q.entry_id === id),
     tasks: db.tasks
-      .filter((t) => t.meeting_id === id)
+      .filter((t) => t.entry_id === id)
       .sort((a, b) => a.sort_index - b.sort_index),
-    dependencies: db.deps.filter((d) => d.meeting_id === id),
+    dependencies: db.deps.filter((d) => d.entry_id === id),
     schedule: db.schedule
-      .filter((s) => s.meeting_id === id)
+      .filter((s) => s.entry_id === id)
       .sort((a, b) => a.sort_index - b.sort_index),
   };
 }
@@ -518,7 +558,7 @@ export async function listAllTasks(): Promise<Task[]> {
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
     const { data: active } = await supabase
-      .from("meetings")
+      .from("entries")
       .select("id")
       .eq("status", "active");
     const ids = ((active as { id: string }[]) ?? []).map((m) => m.id);
@@ -526,16 +566,16 @@ export async function listAllTasks(): Promise<Task[]> {
     const { data } = await supabase
       .from("tasks")
       .select("*")
-      .in("meeting_id", ids)
+      .in("entry_id", ids)
       .order("created_at", { ascending: false });
     return (data as Task[]) ?? [];
   }
   await ensureSeeded();
   const db = memDB();
   const draftIds = new Set(
-    db.meetings.filter((m) => m.status === "draft").map((m) => m.id),
+    db.entries.filter((m) => m.status === "draft").map((m) => m.id),
   );
-  return db.tasks.filter((t) => !draftIds.has(t.meeting_id));
+  return db.tasks.filter((t) => !draftIds.has(t.entry_id));
 }
 
 /** All dependency edges belonging to active (non-draft) entries. */
@@ -543,7 +583,7 @@ export async function listAllDependencies(): Promise<TaskDependency[]> {
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
     const { data: active } = await supabase
-      .from("meetings")
+      .from("entries")
       .select("id")
       .eq("status", "active");
     const ids = ((active as { id: string }[]) ?? []).map((m) => m.id);
@@ -551,15 +591,15 @@ export async function listAllDependencies(): Promise<TaskDependency[]> {
     const { data } = await supabase
       .from("task_dependencies")
       .select("*")
-      .in("meeting_id", ids);
+      .in("entry_id", ids);
     return (data as TaskDependency[]) ?? [];
   }
   await ensureSeeded();
   const db = memDB();
   const draftIds = new Set(
-    db.meetings.filter((m) => m.status === "draft").map((m) => m.id),
+    db.entries.filter((m) => m.status === "draft").map((m) => m.id),
   );
-  return db.deps.filter((d) => !draftIds.has(d.meeting_id));
+  return db.deps.filter((d) => !draftIds.has(d.entry_id));
 }
 
 export async function updateTask(
@@ -593,14 +633,14 @@ async function ensureSeeded(): Promise<void> {
   if (!seedPromise) {
     seedPromise = (async () => {
       db.projects.push(...SAMPLE_PROJECTS);
-      for (const sample of SAMPLE_MEETINGS) {
-        const assembled = await assembleMeeting(sample.notes, {
+      for (const sample of SAMPLE_ENTRIES) {
+        const assembled = await assembleEntry(sample.notes, {
           kind: sample.kind,
           area: sample.area,
           projectId: sample.projectId,
           createdAt: sample.createdAt,
         });
-        db.meetings.push(assembled.meeting);
+        db.entries.push(assembled.entry);
         db.decisions.push(...assembled.decisions);
         db.questions.push(...assembled.questions);
         db.tasks.push(...assembled.tasks);
@@ -613,17 +653,17 @@ async function ensureSeeded(): Promise<void> {
   await seedPromise;
 }
 
-async function persistSupabase(a: AssembledMeeting): Promise<void> {
+async function persistSupabase(a: AssembledEntry): Promise<void> {
   const supabase = await getRequestClient();
   const user_id = await currentUserId(supabase);
   const err = (label: string, e: { message: string } | null) => {
     if (e) throw new Error(`Supabase ${label} insert failed: ${e.message}`);
   };
-  // Only the meeting carries user_id; child rows inherit ownership through it
+  // Only the entry carries user_id; child rows inherit ownership through it
   // (see the RLS policies in supabase/schema.sql).
   err(
-    "meeting",
-    (await supabase.from("meetings").insert({ ...a.meeting, user_id })).error,
+    "entry",
+    (await supabase.from("entries").insert({ ...a.entry, user_id })).error,
   );
   if (a.decisions.length)
     err("decisions", (await supabase.from("decisions").insert(a.decisions)).error);
@@ -644,4 +684,274 @@ async function persistSupabase(a: AssembledMeeting): Promise<void> {
       "schedule_blocks",
       (await supabase.from("schedule_blocks").insert(a.schedule)).error,
     );
+}
+
+// --- Time budget ------------------------------------------------------------
+
+/** Set (or clear) a project's deadline — the forecast's finish line. */
+export async function setProjectDeadline(
+  projectId: string,
+  deadline: string | null,
+): Promise<void> {
+  if (isSupabaseConfigured()) {
+    const supabase = await getRequestClient();
+    await supabase.from("projects").update({ deadline }).eq("id", projectId);
+    return;
+  }
+  await ensureSeeded();
+  const p = memDB().projects.find((x) => x.id === projectId);
+  if (p) p.deadline = deadline;
+}
+
+/** The user's weekly availability template — all 7 weekdays, defaults merged in. */
+export async function getAvailability(): Promise<Availability[]> {
+  if (isSupabaseConfigured()) {
+    const supabase = await getRequestClient();
+    const { data } = await supabase.from("availability").select("*");
+    return mergeAvailability((data as Availability[]) ?? []);
+  }
+  await ensureSeeded();
+  return mergeAvailability(memDB().availability);
+}
+
+/** Upsert one or more weekdays of the availability template. */
+export async function setAvailability(
+  rows: { weekday: number; hours: number }[],
+): Promise<void> {
+  if (isSupabaseConfigured()) {
+    const supabase = await getRequestClient();
+    const user_id = await currentUserId(supabase);
+    const payload = rows.map((r) => ({
+      user_id,
+      weekday: r.weekday,
+      hours: Math.max(0, r.hours),
+    }));
+    const { error } = await supabase
+      .from("availability")
+      .upsert(payload, { onConflict: "user_id,weekday" });
+    if (error)
+      throw new Error(`Supabase availability upsert failed: ${error.message}`);
+    return;
+  }
+  await ensureSeeded();
+  const db = memDB();
+  for (const r of rows) {
+    const existing = db.availability.find((a) => a.weekday === r.weekday);
+    if (existing) existing.hours = Math.max(0, r.hours);
+    else db.availability.push({ weekday: r.weekday, hours: Math.max(0, r.hours) });
+  }
+}
+
+/** Override the template for one specific date. */
+export async function setOverride(date: string, hours: number): Promise<void> {
+  if (isSupabaseConfigured()) {
+    const supabase = await getRequestClient();
+    const user_id = await currentUserId(supabase);
+    const { error } = await supabase
+      .from("availability_overrides")
+      .upsert(
+        { user_id, date, hours: Math.max(0, hours) },
+        { onConflict: "user_id,date" },
+      );
+    if (error)
+      throw new Error(`Supabase override upsert failed: ${error.message}`);
+    return;
+  }
+  await ensureSeeded();
+  const db = memDB();
+  const ex = db.overrides.find((o) => o.date === date);
+  if (ex) ex.hours = Math.max(0, hours);
+  else db.overrides.push({ date, hours: Math.max(0, hours) });
+}
+
+/** Upcoming logged commitments (today onward). */
+export async function listCommitments(): Promise<Commitment[]> {
+  const today = todayISO();
+  if (isSupabaseConfigured()) {
+    const supabase = await getRequestClient();
+    const { data } = await supabase
+      .from("commitments")
+      .select("*")
+      .gte("date", today)
+      .order("date");
+    return (data as Commitment[]) ?? [];
+  }
+  await ensureSeeded();
+  return memDB()
+    .commitments.filter((c) => c.date >= today)
+    .sort((a, b) => a.date.localeCompare(b.date));
+}
+
+/** Effective time-budget inputs for the forecast engine. */
+async function getTimeBudget(): Promise<{
+  availability: Availability[];
+  overrides: AvailabilityOverride[];
+  commitments: Commitment[];
+}> {
+  if (isSupabaseConfigured()) {
+    const supabase = await getRequestClient();
+    const [avail, over, comm] = await Promise.all([
+      supabase.from("availability").select("*"),
+      supabase.from("availability_overrides").select("*"),
+      supabase.from("commitments").select("*"),
+    ]);
+    return {
+      availability: mergeAvailability((avail.data as Availability[]) ?? []),
+      overrides: (over.data as AvailabilityOverride[]) ?? [],
+      commitments: (comm.data as Commitment[]) ?? [],
+    };
+  }
+  await ensureSeeded();
+  const db = memDB();
+  return {
+    availability: mergeAvailability(db.availability),
+    overrides: db.overrides,
+    commitments: db.commitments,
+  };
+}
+
+// --- Forecast ---------------------------------------------------------------
+
+interface ForecastGather {
+  projects: Project[];
+  tasksByProject: Map<string, CandidateTask[]>;
+  availability: Availability[];
+  overrides: AvailabilityOverride[];
+  commitments: Commitment[];
+  today: string;
+}
+
+/** Collect deadlined projects, their open tasks, and the time budget. */
+async function gatherForecast(): Promise<ForecastGather> {
+  const [projects, entries, tasks, budget] = await Promise.all([
+    listProjects(),
+    listEntries(),
+    listAllTasks(),
+    getTimeBudget(),
+  ]);
+  const projectOfEntry = new Map(entries.map((e) => [e.id, e.project_id]));
+  const tasksByProject = new Map<string, CandidateTask[]>();
+  for (const t of tasks) {
+    if (t.status === "done") continue;
+    const pid = projectOfEntry.get(t.entry_id);
+    if (!pid) continue;
+    const list = tasksByProject.get(pid) ?? [];
+    list.push({
+      id: t.id,
+      title: t.title,
+      estimated_minutes: t.estimated_minutes,
+      priority_score: t.priority_score,
+    });
+    tasksByProject.set(pid, list);
+  }
+  return {
+    projects: projects.filter((p) => p.deadline),
+    tasksByProject,
+    availability: budget.availability,
+    overrides: budget.overrides,
+    commitments: budget.commitments,
+    today: todayISO(),
+  };
+}
+
+/** Run the forecast for every deadlined project under a given commitment set. */
+function buildForecasts(
+  g: ForecastGather,
+  commitments: Pick<Commitment, "date" | "hours">[],
+): ProjectForecast[] {
+  return g.projects.map((p) => {
+    const dep = deployableMinutes({
+      today: g.today,
+      deadline: p.deadline,
+      availability: g.availability,
+      overrides: g.overrides,
+      commitments,
+    });
+    const tasks = g.tasksByProject.get(p.id) ?? [];
+    const result = forecast(
+      tasks.map((t) => t.estimated_minutes),
+      dep,
+    );
+    return {
+      projectId: p.id,
+      projectName: p.name,
+      deadline: p.deadline,
+      ...result,
+    };
+  });
+}
+
+/** Live forecast for every project that has a deadline. */
+export async function forecastProjects(): Promise<ProjectForecast[]> {
+  const g = await gatherForecast();
+  return buildForecasts(g, g.commitments);
+}
+
+/** Live forecast for a single project, or null if it has no deadline. */
+export async function forecastProject(
+  projectId: string,
+): Promise<ProjectForecast | null> {
+  const g = await gatherForecast();
+  const one = g.projects.find((p) => p.id === projectId);
+  if (!one) return null;
+  return buildForecasts({ ...g, projects: [one] }, g.commitments)[0] ?? null;
+}
+
+/**
+ * Log a commitment and return any "pit calls" it triggers: projects whose
+ * completion probability dropped, each with the moves that would recover it.
+ */
+export async function logCommitment(
+  date: string,
+  hours: number,
+  label: string | null,
+): Promise<PitCall[]> {
+  const g = await gatherForecast();
+  const before = buildForecasts(g, g.commitments);
+  const after = buildForecasts(g, [
+    ...g.commitments,
+    { date, hours: Math.max(0, hours) },
+  ]);
+
+  // Persist the commitment.
+  const row: Commitment = {
+    id: crypto.randomUUID(),
+    date,
+    hours: Math.max(0, hours),
+    label: label?.trim() || null,
+    created_at: new Date().toISOString(),
+  };
+  if (isSupabaseConfigured()) {
+    const supabase = await getRequestClient();
+    const user_id = await currentUserId(supabase);
+    const { error } = await supabase
+      .from("commitments")
+      .insert({ ...row, user_id });
+    if (error)
+      throw new Error(`Supabase commitment insert failed: ${error.message}`);
+  } else {
+    await ensureSeeded();
+    memDB().commitments.push(row);
+  }
+
+  // A pit call fires when a project's probability drops meaningfully.
+  const pitCalls: PitCall[] = [];
+  for (const a of after) {
+    const b = before.find((x) => x.projectId === a.projectId);
+    if (!b) continue;
+    if (a.probability < b.probability - 0.02) {
+      const moves = recoveryMoves(
+        g.tasksByProject.get(a.projectId) ?? [],
+        a.deployableMinutes,
+      );
+      pitCalls.push({
+        projectId: a.projectId,
+        projectName: a.projectName,
+        probabilityBefore: b.probability,
+        probabilityAfter: a.probability,
+        moves,
+      });
+    }
+  }
+  return pitCalls;
 }
