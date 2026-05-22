@@ -3,7 +3,7 @@ import { CalendarDays, ListChecks, ChevronRight, Target } from "lucide-react";
 import { formatDate } from "@/lib/format";
 import type { EntryKind } from "@/lib/types";
 
-export function MeetingListItem({
+export function EntryListItem({
   id,
   title,
   summary,
@@ -22,7 +22,7 @@ export function MeetingListItem({
 }) {
   return (
     <Link
-      href={`/meetings/${id}`}
+      href={`/entries/${id}`}
       className="group flex items-center gap-4 px-5 py-3.5 transition-colors hover:bg-[var(--color-surface-raised)]"
     >
       <div className="min-w-0 flex-1">

@@ -5,7 +5,7 @@ import { Mail, Copy, Check, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { generateFollowUpAction } from "@/lib/actions";
 
-export function FollowUp({ meetingId }: { meetingId: string }) {
+export function FollowUp({ entryId }: { entryId: string }) {
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
@@ -14,7 +14,7 @@ export function FollowUp({ meetingId }: { meetingId: string }) {
   function generate() {
     startTransition(async () => {
       setError(null);
-      const res = await generateFollowUpAction(meetingId);
+      const res = await generateFollowUpAction(entryId);
       if (res.error) setError(res.error);
       else setMessage(res.message);
     });

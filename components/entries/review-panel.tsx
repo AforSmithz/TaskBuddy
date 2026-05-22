@@ -14,8 +14,8 @@ import {
 import {
   SEED_AREAS,
   type DraftClassification,
-  type Meeting,
-  type MeetingDetail,
+  type Entry,
+  type EntryDetail,
   type Project,
   type Task,
 } from "@/lib/types";
@@ -31,15 +31,15 @@ const NEW_AREA = "__new_area__";
 const NEW_PROJECT = "__new_project__";
 
 export function ReviewPanel({
-  meeting,
+  entry,
   projects,
-  meetings,
+  entries,
 }: {
-  meeting: MeetingDetail;
+  entry: EntryDetail;
   projects: Project[];
-  meetings: Meeting[];
+  entries: Entry[];
 }) {
-  const tasks = meeting.tasks;
+  const tasks = entry.tasks;
   // A task is accepted unless its id is in this set.
   const [declined, setDeclined] = useState<Set<string>>(new Set());
   const [pending, startTransition] = useTransition();
@@ -50,20 +50,20 @@ export function ReviewPanel({
   const [area, setArea] = useState(initialArea);
   const [addingArea, setAddingArea] = useState(false);
   const [customArea, setCustomArea] = useState("");
-  const [projectId, setProjectId] = useState(meeting.project_id ?? "");
+  const [projectId, setProjectId] = useState(entry.project_id ?? "");
   const [addingProject, setAddingProject] = useState(false);
   const [newProjectName, setNewProjectName] = useState("");
-  const [parentMeetingId, setParentMeetingId] = useState(
-    meeting.parent_meeting_id ?? "",
+  const [parentEntryId, setParentEntryId] = useState(
+    entry.parent_entry_id ?? "",
   );
 
-  const relatedCandidates = meetings.filter(
+  const relatedCandidates = entries.filter(
     (m) =>
       m.kind === "meeting" &&
-      m.id !== meeting.id &&
+      m.id !== entry.id &&
       (!projectId || m.project_id === projectId),
   );
-  const showRelated = meeting.kind === "meeting" && relatedCandidates.length > 0;
+  const showRelated = entry.kind === "meeting" && relatedCandidates.length > 0;
 
   const acceptedCount = tasks.length - declined.size;
 
@@ -85,16 +85,16 @@ export function ReviewPanel({
       area: (addingArea ? customArea : area).trim() || "Work",
       projectId: addingProject ? null : projectId || null,
       newProjectName: addingProject ? newProjectName.trim() : "",
-      parentMeetingId: showRelated ? parentMeetingId || null : null,
+      parentEntryId: showRelated ? parentEntryId || null : null,
     };
     startTransition(async () => {
-      await confirmDraftAction(meeting.id, [...declined], classification);
+      await confirmDraftAction(entry.id, [...declined], classification);
     });
   }
 
   function discard() {
     startTransition(async () => {
-      await discardDraftAction(meeting.id);
+      await discardDraftAction(entry.id);
     });
   }
 
@@ -185,8 +185,8 @@ export function ReviewPanel({
               </FieldLabel>
               <Select
                 id="review-parent"
-                value={parentMeetingId}
-                onChange={(e) => setParentMeetingId(e.target.value)}
+                value={parentEntryId}
+                onChange={(e) => setParentEntryId(e.target.value)}
               >
                 <option value="">Not a follow-up</option>
                 {relatedCandidates.map((m) => (

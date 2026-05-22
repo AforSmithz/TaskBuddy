@@ -36,11 +36,11 @@ type Patch = { taskId: string; status?: TaskStatus; area?: string };
 
 export function TodayAgenda({
   tasks,
-  meetingTitles,
+  entryTitles,
   dependencies,
 }: {
   tasks: Task[];
-  meetingTitles: Record<string, string>;
+  entryTitles: Record<string, string>;
   dependencies: TaskDependency[];
 }) {
   const [optimistic, applyOptimistic] = useOptimistic(
@@ -253,10 +253,10 @@ export function TodayAgenda({
                   score={rec.priority_score}
                 />
                 <Link
-                  href={`/meetings/${rec.meeting_id}`}
+                  href={`/entries/${rec.entry_id}`}
                   className="inline-flex items-center gap-1 text-[13px] font-medium text-[var(--color-accent-fg)] hover:underline"
                 >
-                  Open meeting
+                  Open entry
                   <ArrowRight className="size-3.5 transition-transform duration-200 group-hover:translate-x-0.5" />
                 </Link>
               </div>
@@ -279,7 +279,7 @@ export function TodayAgenda({
               }
               description={
                 tab === "All"
-                  ? "No open tasks right now. Create a meeting to capture more work."
+                  ? "No open tasks right now. Create an entry to capture more work."
                   : `Assign a task to ${tab} from its area menu to see it here.`
               }
             />
@@ -291,7 +291,7 @@ export function TodayAgenda({
               icon={AlertTriangle}
               tone="text-[var(--color-danger)]"
               tasks={b.overdue}
-              meetingTitles={meetingTitles}
+              entryTitles={entryTitles}
               areas={areas}
               waiting={depInfo.waiting}
               onMove={move}
@@ -302,7 +302,7 @@ export function TodayAgenda({
               icon={Sun}
               tone="text-[var(--color-accent-fg)]"
               tasks={b.dueToday}
-              meetingTitles={meetingTitles}
+              entryTitles={entryTitles}
               areas={areas}
               waiting={depInfo.waiting}
               onMove={move}
@@ -313,7 +313,7 @@ export function TodayAgenda({
               icon={Flame}
               tone="text-[var(--color-fg)]"
               tasks={b.focus}
-              meetingTitles={meetingTitles}
+              entryTitles={entryTitles}
               areas={areas}
               waiting={depInfo.waiting}
               onMove={move}
@@ -334,7 +334,7 @@ export function TodayAgenda({
                   <TaskRow
                     key={t.id}
                     task={t}
-                    meetingTitle={meetingTitles[t.meeting_id]}
+                    entryTitle={entryTitles[t.entry_id]}
                     areas={areas}
                     onMove={move}
                     onAssignArea={assignArea}
@@ -391,7 +391,7 @@ function Section({
   icon: Icon,
   tone,
   tasks,
-  meetingTitles,
+  entryTitles,
   areas,
   waiting,
   onMove,
@@ -401,7 +401,7 @@ function Section({
   icon: LucideIcon;
   tone: string;
   tasks: Task[];
-  meetingTitles: Record<string, string>;
+  entryTitles: Record<string, string>;
   areas: string[];
   waiting: Map<string, string[]>;
   onMove: (id: string, status: TaskStatus, from: TaskStatus) => void;
@@ -423,7 +423,7 @@ function Section({
             <TaskRow
               key={t.id}
               task={t}
-              meetingTitle={meetingTitles[t.meeting_id]}
+              entryTitle={entryTitles[t.entry_id]}
               areas={areas}
               waitingOn={waiting.get(t.id)}
               onMove={onMove}

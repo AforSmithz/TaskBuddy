@@ -14,28 +14,28 @@ import {
   Lightbulb,
   FolderKanban,
 } from "lucide-react";
-import { getMeeting, getProject } from "@/lib/store";
+import { getEntry, getProject } from "@/lib/store";
 import { formatDate } from "@/lib/format";
 import { Card, CardHeader, CardBody } from "@/components/ui/card";
 import { Pill } from "@/components/ui/badge";
-import { TaskList } from "@/components/meetings/task-list";
-import { ScheduleTimeline } from "@/components/meetings/schedule-timeline";
-import { FollowUp } from "@/components/meetings/follow-up";
+import { TaskList } from "@/components/entries/task-list";
+import { ScheduleTimeline } from "@/components/entries/schedule-timeline";
+import { FollowUp } from "@/components/entries/follow-up";
 
-export default async function MeetingPage({
+export default async function EntryPage({
   params,
 }: {
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
-  const meeting = await getMeeting(id);
-  if (!meeting) notFound();
+  const entry = await getEntry(id);
+  if (!entry) notFound();
   // Drafts are not yet live — send them to the review gate.
-  if (meeting.status === "draft") redirect(`/meetings/${id}/review`);
+  if (entry.status === "draft") redirect(`/entries/${id}/review`);
 
-  const isPlan = meeting.kind === "plan";
-  const project = meeting.project_id
-    ? await getProject(meeting.project_id)
+  const isPlan = entry.kind === "plan";
+  const project = entry.project_id
+    ? await getProject(entry.project_id)
     : null;
 
   const countPill = (n: number) => <Pill>{n}</Pill>;
@@ -71,19 +71,19 @@ export default async function MeetingPage({
           )}
         </div>
         <h1 className="mt-1 text-2xl font-bold tracking-[-0.02em] text-[var(--color-fg)]">
-          {meeting.title}
+          {entry.title}
         </h1>
         <p className="mt-1 text-[13px] text-[var(--color-fg-muted)]">
-          {isPlan ? "Created" : "Captured"} {formatDate(meeting.created_at)}
-          {meeting.stakeholders.length > 0 &&
-            ` · ${meeting.stakeholders.join(", ")}`}
+          {isPlan ? "Created" : "Captured"} {formatDate(entry.created_at)}
+          {entry.stakeholders.length > 0 &&
+            ` · ${entry.stakeholders.join(", ")}`}
         </p>
       </div>
 
       {/* Summary */}
       <Card className="mt-5">
         <CardBody className="space-y-4">
-          {meeting.daily_objective && (
+          {entry.daily_objective && (
             <div className="flex items-start gap-3 rounded-sm bg-[var(--color-accent-subtle)] px-4 py-3">
               <Target className="mt-0.5 size-4 shrink-0 text-[var(--color-accent)]" />
               <div>
@@ -91,19 +91,19 @@ export default async function MeetingPage({
                   Today&apos;s objective
                 </p>
                 <p className="mt-0.5 text-[14px] text-[var(--color-fg)]">
-                  {meeting.daily_objective}
+                  {entry.daily_objective}
                 </p>
               </div>
             </div>
           )}
-          {meeting.summary && (
+          {entry.summary && (
             <p className="text-[14px] leading-relaxed text-[var(--color-fg)]">
-              {meeting.summary}
+              {entry.summary}
             </p>
           )}
-          {meeting.discussion_points.length > 0 && (
+          {entry.discussion_points.length > 0 && (
             <ul className="space-y-1">
-              {meeting.discussion_points.map((p, i) => (
+              {entry.discussion_points.map((p, i) => (
                 <li
                   key={i}
                   className="flex items-start gap-2 text-[13px] text-[var(--color-fg-muted)]"
@@ -124,9 +124,9 @@ export default async function MeetingPage({
             <CardHeader
               title="Tasks"
               icon={<ListChecks className="size-4" />}
-              action={countPill(meeting.tasks.length)}
+              action={countPill(entry.tasks.length)}
             />
-            <TaskList tasks={meeting.tasks} />
+            <TaskList tasks={entry.tasks} />
           </Card>
 
           {!isPlan && (
@@ -134,13 +134,13 @@ export default async function MeetingPage({
             <CardHeader
               title="Decision log"
               icon={<GitBranch className="size-4" />}
-              action={countPill(meeting.decisions.length)}
+              action={countPill(entry.decisions.length)}
             />
-            {meeting.decisions.length === 0 ? (
-              <Empty text="No decisions were recorded in this meeting." />
+            {entry.decisions.length === 0 ? (
+              <Empty text="No decisions were recorded in this entry." />
             ) : (
               <div className="divide-y divide-[var(--color-border)]">
-                {meeting.decisions.map((d) => (
+                {entry.decisions.map((d) => (
                   <div key={d.id} className="px-5 py-3.5">
                     <p className="text-[14px] font-medium text-[var(--color-fg)]">
                       {d.decision}
@@ -166,13 +166,13 @@ export default async function MeetingPage({
             <CardHeader
               title="Open questions"
               icon={<HelpCircle className="size-4" />}
-              action={countPill(meeting.open_questions.length)}
+              action={countPill(entry.open_questions.length)}
             />
-            {meeting.open_questions.length === 0 ? (
+            {entry.open_questions.length === 0 ? (
               <Empty text="No unresolved questions — everything is clear." />
             ) : (
               <div className="divide-y divide-[var(--color-border)]">
-                {meeting.open_questions.map((q) => (
+                {entry.open_questions.map((q) => (
                   <div key={q.id} className="px-5 py-3.5">
                     <p className="text-[14px] font-medium text-[var(--color-fg)]">
                       {q.question}
@@ -200,7 +200,7 @@ export default async function MeetingPage({
               title="Recommended schedule"
               icon={<CalendarClock className="size-4" />}
             />
-            <ScheduleTimeline blocks={meeting.schedule} />
+            <ScheduleTimeline blocks={entry.schedule} />
           </Card>
 
           <Card>
@@ -212,17 +212,17 @@ export default async function MeetingPage({
               <PlannerList
                 label="Key deliverables"
                 icon={<Flag className="size-3.5" />}
-                items={meeting.key_deliverables}
+                items={entry.key_deliverables}
               />
               <PlannerList
                 label="Assumptions"
                 icon={<Lightbulb className="size-3.5" />}
-                items={meeting.assumptions}
+                items={entry.assumptions}
               />
               <PlannerList
                 label="Risks"
                 icon={<AlertTriangle className="size-3.5" />}
-                items={meeting.risks}
+                items={entry.risks}
               />
             </CardBody>
           </Card>
@@ -232,7 +232,7 @@ export default async function MeetingPage({
               title="Follow-up message"
               icon={<Mail className="size-4" />}
             />
-            <FollowUp meetingId={meeting.id} />
+            <FollowUp entryId={entry.id} />
           </Card>
         </div>
       </div>

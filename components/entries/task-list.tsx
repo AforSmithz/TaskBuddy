@@ -125,7 +125,7 @@ export function TaskList({ tasks }: { tasks: Task[] }) {
   if (optimistic.length === 0) {
     return (
       <p className="px-5 py-8 text-center text-[13px] text-[var(--color-fg-subtle)]">
-        No tasks were extracted from this meeting.
+        No tasks were extracted from this entry.
       </p>
     );
   }

@@ -18,14 +18,14 @@ const NEW_AREA = "__new_area__";
 
 export function TaskRow({
   task,
-  meetingTitle,
+  entryTitle,
   areas,
   waitingOn,
   onMove,
   onAssignArea,
 }: {
   task: Task;
-  meetingTitle?: string;
+  entryTitle?: string;
   areas: string[];
   /** Titles of prerequisite tasks that aren't done yet, if any. */
   waitingOn?: string[];
@@ -68,7 +68,7 @@ export function TaskRow({
           <div className="flex items-center gap-2">
             <PriorityBadge label={task.priority_label} />
             <Link
-              href={`/meetings/${task.meeting_id}`}
+              href={`/entries/${task.entry_id}`}
               className="min-w-0 truncate text-[13px] font-medium text-[var(--color-fg)] hover:text-[var(--color-accent)]"
             >
               {task.title}
@@ -76,9 +76,9 @@ export function TaskRow({
           </div>
           <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px] text-[var(--color-fg-muted)]">
             <Pill>{task.area}</Pill>
-            {meetingTitle && (
+            {entryTitle && (
               <span className="truncate text-[var(--color-fg-subtle)]">
-                {meetingTitle}
+                {entryTitle}
               </span>
             )}
             {task.owner && (

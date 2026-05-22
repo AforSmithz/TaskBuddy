@@ -1,13 +1,13 @@
 import { Card, CardBody } from "@/components/ui/card";
 import { EntryForm } from "@/components/create/entry-form";
-import { listMeetings, listProjects } from "@/lib/store";
+import { listEntries, listProjects } from "@/lib/store";
 
 export const metadata = { title: "New Entry — TaskBuddy" };
 
 export default async function CreatePage() {
-  const [projects, meetings] = await Promise.all([
+  const [projects, entries] = await Promise.all([
     listProjects(),
-    listMeetings(),
+    listEntries(),
   ]);
 
   return (
@@ -22,7 +22,7 @@ export default async function CreatePage() {
       </div>
       <Card>
         <CardBody className="p-6">
-          <EntryForm projects={projects} meetings={meetings} />
+          <EntryForm projects={projects} entries={entries} />
         </CardBody>
       </Card>
     </main>

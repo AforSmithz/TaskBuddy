@@ -3,7 +3,7 @@
 import { useActionState, useState } from "react";
 import { Loader2, AlertCircle, Wand2, FileText, Target } from "lucide-react";
 import { createEntryAction, type FormState } from "@/lib/actions";
-import { SEED_AREAS, type EntryKind, type Meeting, type Project } from "@/lib/types";
+import { SEED_AREAS, type EntryKind, type Entry, type Project } from "@/lib/types";
 import { Textarea, TextField, FieldLabel, Select } from "@/components/ui/text-field";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
@@ -31,10 +31,10 @@ Plan a small launch party for the team next Friday.`,
 
 export function EntryForm({
   projects,
-  meetings,
+  entries,
 }: {
   projects: Project[];
-  meetings: Meeting[];
+  entries: Entry[];
 }) {
   const [state, formAction, pending] = useActionState(
     createEntryAction,
@@ -48,7 +48,7 @@ export function EntryForm({
 
   const minLen = mode === "plan" ? 12 : 40;
   const tooShort = chars > 0 && chars < minLen;
-  const projectMeetings = meetings.filter(
+  const projectEntries = entries.filter(
     (m) =>
       m.kind === "meeting" &&
       (!projectId || projectId === AUTO || m.project_id === projectId),
@@ -153,19 +153,19 @@ export function EntryForm({
       </div>
 
       {/* Related meeting — transcript mode only */}
-      {mode === "meeting" && projectMeetings.length > 0 && (
+      {mode === "meeting" && projectEntries.length > 0 && (
         <div>
-          <FieldLabel htmlFor="parentMeetingId">
+          <FieldLabel htmlFor="parentEntryId">
             Related to an earlier meeting (optional)
           </FieldLabel>
           <Select
-            id="parentMeetingId"
-            name="parentMeetingId"
+            id="parentEntryId"
+            name="parentEntryId"
             defaultValue={AUTO}
           >
             <option value={AUTO}>Auto — let TaskBuddy decide</option>
             <option value="">Not a follow-up</option>
-            {projectMeetings.map((m) => (
+            {projectEntries.map((m) => (
               <option key={m.id} value={m.id}>
                 {m.title}
               </option>

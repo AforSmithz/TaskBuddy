@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { Plus, Columns3 } from "lucide-react";
-import { listAllTasks, listMeetings } from "@/lib/store";
+import { listAllTasks, listEntries } from "@/lib/store";
 import { PageHeader } from "@/components/ui/page-header";
 import { EmptyState } from "@/components/ui/empty-state";
 import { buttonClasses } from "@/components/ui/button";
@@ -10,13 +10,13 @@ import { Reveal } from "@/components/motion/reveal";
 export const metadata = { title: "Board — TaskBuddy" };
 
 export default async function BoardPage() {
-  const [tasks, meetings] = await Promise.all([
+  const [tasks, entries] = await Promise.all([
     listAllTasks(),
-    listMeetings(),
+    listEntries(),
   ]);
 
-  const meetingTitles = Object.fromEntries(
-    meetings.map((m) => [m.id, m.title]),
+  const entryTitles = Object.fromEntries(
+    entries.map((m) => [m.id, m.title]),
   );
 
   return (
@@ -53,7 +53,7 @@ export default async function BoardPage() {
             />
           </Reveal>
         ) : (
-          <KanbanBoard tasks={tasks} meetingTitles={meetingTitles} />
+          <KanbanBoard tasks={tasks} entryTitles={entryTitles} />
         )}
       </div>
     </main>

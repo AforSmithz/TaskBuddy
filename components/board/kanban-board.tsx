@@ -39,10 +39,10 @@ function group(tasks: Task[]): Grouped {
 
 export function KanbanBoard({
   tasks,
-  meetingTitles,
+  entryTitles,
 }: {
   tasks: Task[];
-  meetingTitles: Record<string, string>;
+  entryTitles: Record<string, string>;
 }) {
   const [optimistic, applyOptimistic] = useOptimistic(
     group(tasks),
@@ -144,7 +144,7 @@ export function KanbanBoard({
                       <KanbanCard
                         key={task.id}
                         task={task}
-                        meetingTitle={meetingTitles[task.meeting_id]}
+                        entryTitle={entryTitles[task.entry_id]}
                         onMove={move}
                       />
                     ))
@@ -161,11 +161,11 @@ export function KanbanBoard({
 
 function KanbanCard({
   task,
-  meetingTitle,
+  entryTitle,
   onMove,
 }: {
   task: Task;
-  meetingTitle?: string;
+  entryTitle?: string;
   onMove: (id: string, status: TaskStatus, from: TaskStatus) => void;
 }) {
   return (
@@ -199,16 +199,16 @@ function KanbanCard({
       </div>
 
       <Link
-        href={`/meetings/${task.meeting_id}`}
+        href={`/entries/${task.entry_id}`}
         draggable={false}
         className="mt-2 block text-[13px] font-medium leading-snug text-[var(--color-fg)] hover:text-[var(--color-accent)]"
       >
         {task.title}
       </Link>
 
-      {meetingTitle && (
+      {entryTitle && (
         <p className="mt-1 truncate text-[11px] text-[var(--color-fg-subtle)]">
-          {meetingTitle}
+          {entryTitle}
         </p>
       )}
 

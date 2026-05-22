@@ -10,10 +10,10 @@ export default function NotFound() {
       </div>
       <div className="space-y-1">
         <p className="text-[15px] font-semibold text-[var(--color-fg)]">
-          Meeting not found
+          Entry not found
         </p>
         <p className="max-w-sm text-[13px] text-[var(--color-fg-muted)]">
-          This meeting may have been removed, or the link is incorrect.
+          This entry may have been removed, or the link is incorrect.
         </p>
       </div>
       <Link href="/" className={buttonClasses("secondary", "sm")}>

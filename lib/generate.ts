@@ -1,4 +1,4 @@
-import type { MeetingDetail, Task } from "./types";
+import type { EntryDetail, Task } from "./types";
 import { isLLMConfigured } from "./extraction";
 
 // Follow-up message + end-of-day summary generators.
@@ -6,16 +6,16 @@ import { isLLMConfigured } from "./extraction";
 
 // --- Follow-up message ------------------------------------------------------
 
-export async function generateFollowUp(meeting: MeetingDetail): Promise<string> {
-  const myTasks = meeting.tasks
+export async function generateFollowUp(entry: EntryDetail): Promise<string> {
+  const myTasks = entry.tasks
     .filter((t) => t.status !== "done")
     .slice(0, 5)
     .map((t) => t.title);
-  const questions = meeting.open_questions
+  const questions = entry.open_questions
     .filter((q) => q.status !== "resolved")
     .slice(0, 4)
     .map((q) => q.question);
-  const blockers = meeting.tasks
+  const blockers = entry.tasks
     .filter((t) => t.status === "blocked" || t.blocked_by)
     .slice(0, 3)
     .map((t) => `${t.title} (${t.blocked_by ?? "blocked"})`);
@@ -33,7 +33,7 @@ export async function generateFollowUp(meeting: MeetingDetail): Promise<string> 
         {
           role: "user",
           content:
-            `Meeting: ${meeting.title}\n` +
+            `Meeting: ${entry.title}\n` +
             `My upcoming tasks: ${myTasks.join("; ") || "none"}\n` +
             `Open questions to confirm: ${questions.join("; ") || "none"}\n` +
             `Blockers: ${blockers.join("; ") || "none"}\n\n` +
@@ -46,7 +46,7 @@ export async function generateFollowUp(meeting: MeetingDetail): Promise<string> 
     }
   }
 
-  return templateFollowUp(meeting.title, myTasks, questions, blockers);
+  return templateFollowUp(entry.title, myTasks, questions, blockers);
 }
 
 function templateFollowUp(

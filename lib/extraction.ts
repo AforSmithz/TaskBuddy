@@ -213,7 +213,7 @@ function normalize(r: ExtractionResult): ExtractionResult {
     return v.length > 0 ? v : null;
   };
   return {
-    title: r.title || "Untitled meeting",
+    title: r.title || "Untitled entry",
     summary: r.summary || "",
     suggested_area: str(r.suggested_area),
     suggested_project: str(r.suggested_project),

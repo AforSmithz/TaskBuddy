@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { Plus, FolderKanban, ListChecks, ChevronRight } from "lucide-react";
-import { listAllTasks, listMeetings, listProjects } from "@/lib/store";
+import { listAllTasks, listEntries, listProjects } from "@/lib/store";
 import { PageHeader } from "@/components/ui/page-header";
 import { Card } from "@/components/ui/card";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -10,30 +10,30 @@ import { Reveal } from "@/components/motion/reveal";
 export const metadata = { title: "Projects — TaskBuddy" };
 
 export default async function ProjectsPage() {
-  const [projects, meetings, tasks] = await Promise.all([
+  const [projects, entries, tasks] = await Promise.all([
     listProjects(),
-    listMeetings(),
+    listEntries(),
     listAllTasks(),
   ]);
 
-  const meetingsByProject = new Map<string, number>();
-  for (const m of meetings) {
+  const entriesByProject = new Map<string, number>();
+  for (const m of entries) {
     if (m.project_id)
-      meetingsByProject.set(
+      entriesByProject.set(
         m.project_id,
-        (meetingsByProject.get(m.project_id) ?? 0) + 1,
+        (entriesByProject.get(m.project_id) ?? 0) + 1,
       );
   }
 
-  const projectOfMeeting = new Map(meetings.map((m) => [m.id, m.project_id]));
+  const projectOfEntry = new Map(entries.map((m) => [m.id, m.project_id]));
   const tasksByProject = new Map<string, { total: number; open: number }>();
   for (const t of tasks) {
-    const pid = projectOfMeeting.get(t.meeting_id);
+    const pid = projectOfEntry.get(t.entry_id);
     if (!pid) continue;
-    const entry = tasksByProject.get(pid) ?? { total: 0, open: 0 };
-    entry.total += 1;
-    if (t.status !== "done") entry.open += 1;
-    tasksByProject.set(pid, entry);
+    const counts = tasksByProject.get(pid) ?? { total: 0, open: 0 };
+    counts.total += 1;
+    if (t.status !== "done") counts.open += 1;
+    tasksByProject.set(pid, counts);
   }
 
   return (
@@ -73,7 +73,7 @@ export default async function ProjectsPage() {
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             {projects.map((p) => {
               const counts = tasksByProject.get(p.id) ?? { total: 0, open: 0 };
-              const entryCount = meetingsByProject.get(p.id) ?? 0;
+              const entryCount = entriesByProject.get(p.id) ?? 0;
               return (
                 <Link key={p.id} href={`/projects/${p.id}`}>
                   <Card className="group h-full p-5 transition-colors hover:border-[var(--color-border-strong)]">
