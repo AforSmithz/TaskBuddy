@@ -6,9 +6,10 @@ import {
   CalendarClock,
   ListChecks,
   Gauge,
+  Clock,
 } from "lucide-react";
 import {
-  forecastProject,
+  forecastProjectWithRecovery,
   getProject,
   listAllTasks,
   listEntries,
@@ -20,6 +21,8 @@ import { EntryListItem } from "@/components/entries/entry-list-item";
 import { TaskList } from "@/components/entries/task-list";
 import { ForecastMeter } from "@/components/forecast/forecast-meter";
 import { DeadlineEditor } from "@/components/forecast/deadline-editor";
+import { RecoveryCallout } from "@/components/forecast/recovery-callout";
+import { DeferredTasks } from "@/components/forecast/deferred-tasks";
 
 export default async function ProjectPage({
   params,
@@ -27,19 +30,25 @@ export default async function ProjectPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
-  const [project, entries, tasks, forecast] = await Promise.all([
+  const [project, entries, tasks, fr] = await Promise.all([
     getProject(id),
     listEntries(),
     listAllTasks(),
-    forecastProject(id),
+    forecastProjectWithRecovery(id),
   ]);
   if (!project) notFound();
+  const { forecast, recovery } = fr;
 
   const projectEntries = entries.filter((m) => m.project_id === id);
   const entryIds = new Set(projectEntries.map((m) => m.id));
-  const projectTasks = tasks
+  const allProjectTasks = tasks
     .filter((t) => entryIds.has(t.entry_id))
     .sort((a, b) => (b.priority_score ?? 0) - (a.priority_score ?? 0));
+
+  // Deferred tasks are pushed past the deadline; surface them separately so
+  // they don't clutter the active list, but keep them reversible.
+  const deferredTasks = allProjectTasks.filter((t) => t.deferred);
+  const projectTasks = allProjectTasks.filter((t) => !t.deferred);
 
   const openCount = projectTasks.filter((t) => t.status !== "done").length;
   const countById = new Map<string, { total: number; open: number }>();
@@ -74,6 +83,13 @@ export default async function ProjectPage({
           </p>
         </div>
       </div>
+
+      {/* Proactive recovery — surfaced only when the project is off track. */}
+      {recovery && (
+        <div className="mt-5">
+          <RecoveryCallout plan={recovery} />
+        </div>
+      )}
 
       {/* Completion forecast — the strategist's headline number. */}
       <Card className="mt-5">
@@ -148,6 +164,20 @@ export default async function ProjectPage({
           </Card>
         </div>
       </div>
+
+      {/* Deferred — work pushed past the deadline by a recovery move. Reversible. */}
+      {deferredTasks.length > 0 && (
+        <Card className="mt-5">
+          <CardHeader
+            title="Deferred"
+            icon={<Clock className="size-4" />}
+            action={<Pill>{deferredTasks.length}</Pill>}
+          />
+          <DeferredTasks
+            tasks={deferredTasks.map((t) => ({ id: t.id, title: t.title }))}
+          />
+        </Card>
+      )}
     </main>
   );
 }

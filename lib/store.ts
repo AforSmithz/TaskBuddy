@@ -4,15 +4,19 @@ import type {
   AvailabilityOverride,
   Commitment,
   Decision,
+  DivergenceReason,
   DraftClassification,
   EntryKind,
   EntryStatus,
   Entry,
   EntryDetail,
+  ForecastResult,
   OpenQuestion,
   PitCall,
   Project,
   ProjectForecast,
+  RecoveryPlan,
+  RescheduleMove,
   ScheduleBlock,
   Task,
   TaskDependency,
@@ -20,9 +24,14 @@ import type {
 } from "./types";
 import { extractEntry } from "./extraction";
 import { computePriority } from "./priority";
-import { generateSchedule } from "./schedule";
+import {
+  generateSchedule,
+  type DependencyEdge,
+  type SchedulableTask,
+} from "./schedule";
 import {
   deployableMinutes,
+  earliestAchievableDeadline,
   forecast,
   recoveryMoves,
   type CandidateTask,
@@ -280,6 +289,7 @@ export async function assembleEntry(
       source_quote: t.source_quote,
       is_ai_suggested: t.is_ai_suggested,
       blocked_by: t.blocked_by,
+      deferred: false,
       sort_index: i,
       created_at: createdAt,
     };
@@ -604,7 +614,9 @@ export async function listAllDependencies(): Promise<TaskDependency[]> {
 
 export async function updateTask(
   id: string,
-  patch: Partial<Pick<Task, "status" | "actual_minutes" | "blocked_by" | "area">>,
+  patch: Partial<
+    Pick<Task, "status" | "actual_minutes" | "blocked_by" | "area" | "deferred">
+  >,
 ): Promise<Task | null> {
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
@@ -814,7 +826,14 @@ async function getTimeBudget(): Promise<{
 
 interface ForecastGather {
   projects: Project[];
+  /** Open (not done, not deferred) tasks per project — the forecast input. */
   tasksByProject: Map<string, CandidateTask[]>;
+  /** All tasks per project (any status) — for divergence detection & sequencing. */
+  allTasksByProject: Map<string, Task[]>;
+  /** Dependency edges keyed by entry — for the re-sequence recommendation. */
+  deps: TaskDependency[];
+  /** entry_id → owning project_id, for mapping tasks to projects. */
+  projectOfEntry: Map<string, string | null>;
   availability: Availability[];
   overrides: AvailabilityOverride[];
   commitments: Commitment[];
@@ -823,18 +842,25 @@ interface ForecastGather {
 
 /** Collect deadlined projects, their open tasks, and the time budget. */
 async function gatherForecast(): Promise<ForecastGather> {
-  const [projects, entries, tasks, budget] = await Promise.all([
+  const [projects, entries, tasks, deps, budget] = await Promise.all([
     listProjects(),
     listEntries(),
     listAllTasks(),
+    listAllDependencies(),
     getTimeBudget(),
   ]);
   const projectOfEntry = new Map(entries.map((e) => [e.id, e.project_id]));
   const tasksByProject = new Map<string, CandidateTask[]>();
+  const allTasksByProject = new Map<string, Task[]>();
   for (const t of tasks) {
-    if (t.status === "done") continue;
     const pid = projectOfEntry.get(t.entry_id);
     if (!pid) continue;
+    const all = allTasksByProject.get(pid) ?? [];
+    all.push(t);
+    allTasksByProject.set(pid, all);
+    // Done work is finished; deferred work was pushed past this deadline — neither
+    // counts against the time budget.
+    if (t.status === "done" || t.deferred) continue;
     const list = tasksByProject.get(pid) ?? [];
     list.push({
       id: t.id,
@@ -847,6 +873,9 @@ async function gatherForecast(): Promise<ForecastGather> {
   return {
     projects: projects.filter((p) => p.deadline),
     tasksByProject,
+    allTasksByProject,
+    deps,
+    projectOfEntry,
     availability: budget.availability,
     overrides: budget.overrides,
     commitments: budget.commitments,
@@ -881,20 +910,36 @@ function buildForecasts(
   });
 }
 
-/** Live forecast for every project that has a deadline. */
-export async function forecastProjects(): Promise<ProjectForecast[]> {
+/**
+ * Live forecasts + proactive recovery plans for the Today dashboard. Runs a
+ * single gather (both were previously computed off separate gathers).
+ */
+export async function forecastDashboard(): Promise<{
+  forecasts: ProjectForecast[];
+  recoveries: RecoveryPlan[];
+}> {
   const g = await gatherForecast();
-  return buildForecasts(g, g.commitments);
+  const forecasts = buildForecasts(g, g.commitments);
+  const recoveries = g.projects
+    .map((p) => buildRecoveryPlan(g, p))
+    .filter((plan): plan is RecoveryPlan => plan !== null);
+  return { forecasts, recoveries };
 }
 
-/** Live forecast for a single project, or null if it has no deadline. */
-export async function forecastProject(
-  projectId: string,
-): Promise<ProjectForecast | null> {
+/**
+ * Forecast + recovery for a single project (project page), off one gather.
+ * Both are null when the project has no deadline / doesn't exist.
+ */
+export async function forecastProjectWithRecovery(projectId: string): Promise<{
+  forecast: ProjectForecast | null;
+  recovery: RecoveryPlan | null;
+}> {
   const g = await gatherForecast();
-  const one = g.projects.find((p) => p.id === projectId);
-  if (!one) return null;
-  return buildForecasts({ ...g, projects: [one] }, g.commitments)[0] ?? null;
+  const project = g.projects.find((p) => p.id === projectId);
+  if (!project) return { forecast: null, recovery: null };
+  const projectForecast =
+    buildForecasts({ ...g, projects: [project] }, g.commitments)[0] ?? null;
+  return { forecast: projectForecast, recovery: buildRecoveryPlan(g, project) };
 }
 
 /**
@@ -934,24 +979,201 @@ export async function logCommitment(
     memDB().commitments.push(row);
   }
 
+  // The commitment set the forecast now reflects (used for re-date suggestions).
+  const newCommitments = [...g.commitments, { date, hours: Math.max(0, hours) }];
+
   // A pit call fires when a project's probability drops meaningfully.
   const pitCalls: PitCall[] = [];
   for (const a of after) {
     const b = before.find((x) => x.projectId === a.projectId);
     if (!b) continue;
     if (a.probability < b.probability - 0.02) {
-      const moves = recoveryMoves(
-        g.tasksByProject.get(a.projectId) ?? [],
-        a.deployableMinutes,
-      );
+      const candidates = g.tasksByProject.get(a.projectId) ?? [];
+      const moves = recoveryMoves(candidates, a.deployableMinutes);
+
+      // Offer a re-date when the project is now below target, and only ever a
+      // later date than its current deadline.
+      let reschedule: RescheduleMove | null = null;
+      if (a.probability < RECOVERY_TARGET && a.deadline) {
+        const rd = earliestAchievableDeadline(
+          candidates.map((t) => t.estimated_minutes),
+          {
+            today: g.today,
+            availability: g.availability,
+            overrides: g.overrides,
+            commitments: newCommitments,
+          },
+          RECOVERY_TARGET,
+        );
+        if (rd && rd.deadline > a.deadline.slice(0, 10)) {
+          reschedule = { deadline: rd.deadline, probabilityAfter: rd.probability };
+        }
+      }
+
       pitCalls.push({
         projectId: a.projectId,
         projectName: a.projectName,
         probabilityBefore: b.probability,
         probabilityAfter: a.probability,
         moves,
+        reschedule,
       });
     }
   }
   return pitCalls;
+}
+
+// --- Divergence detection & recovery ----------------------------------------
+
+/** Probability target a recovery plan aims to restore the project to. */
+const RECOVERY_TARGET = 0.8;
+/** A deadline within this many days counts as "imminent". */
+const IMMINENT_DAYS = 3;
+
+/** Whole days from ISO date `a` to ISO date `b` (UTC, b − a). */
+function daysBetween(a: string, b: string): number {
+  const da = Date.parse(`${a.slice(0, 10)}T00:00:00Z`);
+  const db = Date.parse(`${b.slice(0, 10)}T00:00:00Z`);
+  return Math.round((db - da) / 86_400_000);
+}
+
+/**
+ * Decide whether a project is off-track, and why, from signals that already
+ * exist in the forecast and task data. Pure — caller supplies `today`.
+ */
+export function detectDivergence(
+  fc: ForecastResult,
+  deadline: string | null,
+  tasks: Task[],
+  today: string,
+): DivergenceReason[] {
+  const reasons: DivergenceReason[] = [];
+  const open = tasks.filter((t) => t.status !== "done" && !t.deferred);
+  const hasOpen = open.length > 0;
+
+  // Timing signals — these mean the deadline itself is in jeopardy (critical).
+  if (deadline) {
+    const dl = deadline.slice(0, 10);
+    if (dl < today && hasOpen) {
+      reasons.push({
+        kind: "deadline_past",
+        severity: "critical",
+        detail: `Deadline passed ${-daysBetween(today, deadline)} day(s) ago`,
+      });
+    } else if (dl >= today && hasOpen && fc.probability < RECOVERY_TARGET) {
+      // The headline probability is itself the signal — near deadline or far.
+      // Surface the day count too when the deadline is also imminent.
+      const days = daysBetween(today, deadline);
+      const pct = Math.round(fc.probability * 100);
+      reasons.push({
+        kind: "at_risk",
+        severity: "critical",
+        detail:
+          days <= IMMINENT_DAYS
+            ? `Deadline in ${days} day(s); only ${pct}% likely on time`
+            : `${pct}% likely to finish on time`,
+      });
+    }
+  }
+
+  if (fc.slackMinutes < 0 && fc.openTaskCount > 0) {
+    reasons.push({
+      kind: "over_budget",
+      severity: "critical",
+      detail: `${Math.ceil(-fc.slackMinutes / 60)}h more work than the budget allows`,
+    });
+  }
+
+  // Attention signals — worth surfacing, but not on their own a missed deadline.
+  const overdue = open.filter((t) => t.due_date && t.due_date.slice(0, 10) < today);
+  if (overdue.length > 0) {
+    reasons.push({
+      kind: "overdue_tasks",
+      severity: "warning",
+      detail: `${overdue.length} overdue task${overdue.length === 1 ? "" : "s"}`,
+    });
+  }
+
+  const blocked = open.filter((t) => t.status === "blocked");
+  if (blocked.length > 0) {
+    reasons.push({
+      kind: "blocked_tasks",
+      severity: "warning",
+      detail: `${blocked.length} blocked task${blocked.length === 1 ? "" : "s"}`,
+    });
+  }
+
+  return reasons;
+}
+
+/**
+ * Assemble a recovery plan for one project from an already-gathered forecast
+ * state. Returns null when on-track or the project has no deadline. Pure given
+ * the gather — no I/O — so it can run for many projects off a single gather.
+ */
+function buildRecoveryPlan(g: ForecastGather, project: Project): RecoveryPlan | null {
+  if (!project.deadline) return null;
+  const projectId = project.id;
+  const candidates = g.tasksByProject.get(projectId) ?? [];
+  const estimates = candidates.map((t) => t.estimated_minutes);
+  const budget = {
+    today: g.today,
+    availability: g.availability,
+    overrides: g.overrides,
+    commitments: g.commitments,
+  };
+  const deployable = deployableMinutes({ ...budget, deadline: project.deadline });
+  const fc = forecast(estimates, deployable);
+
+  const allTasks = g.allTasksByProject.get(projectId) ?? [];
+  const reasons = detectDivergence(fc, project.deadline, allTasks, g.today);
+  if (reasons.length === 0) return null;
+
+  // Defer lowest-priority work first (best probability recovery first).
+  const defer = recoveryMoves(candidates, deployable);
+
+  // Re-date only when the current deadline can't already clear the target, and
+  // only ever suggest a *later* date (pulling it earlier never helps).
+  let reschedule: RecoveryPlan["reschedule"] = null;
+  if (fc.probability < RECOVERY_TARGET) {
+    const rd = earliestAchievableDeadline(estimates, budget, RECOVERY_TARGET);
+    if (rd && rd.deadline > project.deadline.slice(0, 10)) {
+      reschedule = { deadline: rd.deadline, probabilityAfter: rd.probability };
+    }
+  }
+
+  // Dependency-aware order to tackle the open work (advisory): reuse the
+  // schedule generator's ordering, flattened to a task sequence.
+  const schedTasks: SchedulableTask[] = allTasks
+    .filter((t) => t.status !== "done" && !t.deferred)
+    .map((t) => ({
+      id: t.id,
+      title: t.title,
+      estimated_minutes: t.estimated_minutes,
+      priority_score: t.priority_score ?? 0,
+      impact_score: t.impact_score,
+      status: t.status,
+    }));
+  const schedIds = new Set(schedTasks.map((t) => t.id));
+  const edges: DependencyEdge[] = g.deps
+    .filter((d) => schedIds.has(d.task_id) && schedIds.has(d.depends_on_task_id))
+    .map((d) => ({ task_id: d.task_id, depends_on_task_id: d.depends_on_task_id }));
+  const seen = new Set<string>();
+  const sequence: { taskId: string; title: string }[] = [];
+  for (const b of generateSchedule(schedTasks, edges)) {
+    if (b.task_id && !seen.has(b.task_id)) {
+      seen.add(b.task_id);
+      sequence.push({ taskId: b.task_id, title: b.label });
+    }
+  }
+
+  return {
+    projectId: project.id,
+    projectName: project.name,
+    currentProbability: fc.probability,
+    reasons,
+    defer,
+    reschedule,
+    sequence,
+  };
 }

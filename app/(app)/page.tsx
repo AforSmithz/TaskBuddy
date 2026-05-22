@@ -1,7 +1,7 @@
 import Link from "next/link";
-import { Plus, CalendarClock, Gauge } from "lucide-react";
+import { Plus, CalendarClock, Gauge, AlertTriangle } from "lucide-react";
 import {
-  forecastProjects,
+  forecastDashboard,
   getAvailability,
   listAllDependencies,
   listAllTasks,
@@ -15,17 +15,19 @@ import { EntryListItem } from "@/components/entries/entry-list-item";
 import { Reveal } from "@/components/motion/reveal";
 import { TodayAgenda } from "@/components/today/today-agenda";
 import { ProbabilityPill } from "@/components/forecast/forecast-meter";
+import { RecoveryCallout } from "@/components/forecast/recovery-callout";
 import { TimeBudget } from "@/components/forecast/time-budget";
 
 export default async function TodayPage() {
-  const [tasks, entries, dependencies, forecasts, availability] =
+  const [tasks, entries, dependencies, dashboard, availability] =
     await Promise.all([
       listAllTasks(),
       listEntries(),
       listAllDependencies(),
-      forecastProjects(),
+      forecastDashboard(),
       getAvailability(),
     ]);
+  const { forecasts, recoveries } = dashboard;
 
   const todayISO = new Date().toISOString().slice(0, 10);
 
@@ -61,6 +63,22 @@ export default async function TodayPage() {
           }
         />
       </Reveal>
+
+      {recoveries.length > 0 && (
+        <Reveal delay={0.05} className="mt-7">
+          <Card>
+            <CardHeader
+              title="Needs attention"
+              icon={<AlertTriangle className="size-4 text-[var(--color-danger)]" />}
+            />
+            <div className="space-y-3 p-3">
+              {recoveries.map((plan) => (
+                <RecoveryCallout key={plan.projectId} plan={plan} />
+              ))}
+            </div>
+          </Card>
+        </Reveal>
+      )}
 
       <Reveal delay={0.1} className="mt-7">
         <TodayAgenda

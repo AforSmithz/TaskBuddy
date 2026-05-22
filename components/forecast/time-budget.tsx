@@ -9,11 +9,19 @@ import {
   ArrowRight,
   Loader2,
   Check,
+  CalendarClock,
 } from "lucide-react";
 import type { Availability, PitCall } from "@/lib/types";
-import { setAvailabilityAction, logCommitmentAction } from "@/lib/actions";
+import {
+  setAvailabilityAction,
+  logCommitmentAction,
+  deferTaskAction,
+  setProjectDeadlineAction,
+} from "@/lib/actions";
 import { Card, CardHeader, CardBody } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
 import { band, formatPct } from "@/components/forecast/forecast-meter";
+import { formatDate } from "@/lib/format";
 import { cn } from "@/lib/cn";
 
 const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
@@ -212,6 +220,31 @@ export function TimeBudget({
 }
 
 function PitCallCard({ pc }: { pc: PitCall }) {
+  const [pending, startTransition] = useTransition();
+  const [busy, setBusy] = useState<string | null>(null);
+  const [appliedTasks, setAppliedTasks] = useState<Set<string>>(new Set());
+  const [rescheduled, setRescheduled] = useState(false);
+
+  function applyDefer(taskId: string) {
+    setBusy(taskId);
+    startTransition(async () => {
+      await deferTaskAction(taskId, true);
+      setAppliedTasks((s) => new Set(s).add(taskId));
+      setBusy(null);
+    });
+  }
+
+  function applyReschedule(deadline: string) {
+    setBusy("reschedule");
+    startTransition(async () => {
+      await setProjectDeadlineAction(pc.projectId, deadline);
+      setRescheduled(true);
+      setBusy(null);
+    });
+  }
+
+  const moves = pc.moves.filter((m) => !appliedTasks.has(m.taskId));
+
   return (
     <div className="rounded-md border border-[var(--color-border)] border-l-2 border-l-[var(--color-danger)] bg-[var(--color-surface-raised)] p-3.5">
       <div className="flex items-start gap-2.5">
@@ -235,12 +268,13 @@ function PitCallCard({ pc }: { pc: PitCall }) {
               {formatPct(pc.probabilityAfter)}
             </span>
           </p>
-          {pc.moves.length > 0 ? (
+
+          {moves.length > 0 && (
             <div className="mt-2 space-y-1">
               <p className="text-[11px] font-medium uppercase tracking-wide text-[var(--color-fg-subtle)]">
                 Recover by
               </p>
-              {pc.moves.map((m) => (
+              {moves.map((m) => (
                 <div
                   key={m.taskId}
                   className="flex items-center gap-1.5 text-[12px] text-[var(--color-fg-muted)]"
@@ -252,13 +286,52 @@ function PitCallCard({ pc }: { pc: PitCall }) {
                   <span className="shrink-0 font-semibold tabular-nums text-[var(--color-status-done)]">
                     → {formatPct(m.probabilityAfter)}
                   </span>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    loading={busy === m.taskId}
+                    disabled={pending}
+                    onClick={() => applyDefer(m.taskId)}
+                  >
+                    Defer
+                  </Button>
                 </div>
               ))}
             </div>
-          ) : (
+          )}
+
+          {pc.reschedule && !rescheduled && (
+            <div className="mt-2 flex items-center gap-1.5 text-[12px] text-[var(--color-fg-muted)]">
+              <CalendarClock className="size-3 shrink-0" />
+              <span className="min-w-0 flex-1 truncate">
+                {moves.length > 0 ? "Or move deadline to " : "Move deadline to "}
+                {formatDate(pc.reschedule.deadline)}
+              </span>
+              <span className="shrink-0 font-semibold tabular-nums text-[var(--color-status-done)]">
+                → {formatPct(pc.reschedule.probabilityAfter)}
+              </span>
+              <Button
+                variant="secondary"
+                size="sm"
+                loading={busy === "reschedule"}
+                disabled={pending}
+                onClick={() => applyReschedule(pc.reschedule!.deadline)}
+              >
+                Move
+              </Button>
+            </div>
+          )}
+
+          {rescheduled && (
+            <p className="mt-2 flex items-center gap-1.5 text-[12px] text-[var(--color-status-done)]">
+              <Check className="size-3.5" /> Deadline moved.
+            </p>
+          )}
+
+          {moves.length === 0 && !pc.reschedule && !rescheduled && (
             <p className="mt-1 text-[12px] text-[var(--color-fg-muted)]">
-              No single deferral recovers it — consider extending the deadline
-              or adding hours.
+              No single deferral recovers it — consider adding hours or splitting
+              the work.
             </p>
           )}
         </div>

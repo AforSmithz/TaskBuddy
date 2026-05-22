@@ -149,6 +149,19 @@ export async function updateTaskAreaAction(
   revalidateAll();
 }
 
+/**
+ * Defer a task past the current deadline (or restore it). Deferred tasks stop
+ * counting against the forecast; reversible via `deferred: false`.
+ */
+export async function deferTaskAction(
+  taskId: string,
+  deferred: boolean,
+): Promise<void> {
+  await requireUser();
+  await updateTask(taskId, { deferred });
+  revalidateAll();
+}
+
 /** Record actual time spent on a task (estimated vs actual tracking). */
 export async function logActualTimeAction(
   taskId: string,

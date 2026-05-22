@@ -227,3 +227,49 @@ export function recoveryMoves(
     .sort((a, b) => b.probabilityAfter - a.probabilityAfter)
     .slice(0, limit);
 }
+
+// --- Re-dating (the answer for a blown / at-risk deadline) ------------------
+
+/**
+ * The earliest deadline at which the remaining work clears `target` probability.
+ *
+ * Returns the honest "you can't make May 29, but May 31 → 80%" answer, or null
+ * if no date within `maxDays` reaches the target (not enough hours to deploy).
+ *
+ * Probability is non-decreasing in the deadline — a later date can only add
+ * deployable time, never remove it — so we binary-search the earliest day that
+ * clears the target rather than scanning all `maxDays` (≈8 forecasts, not 180).
+ */
+export function earliestAchievableDeadline(
+  estimates: number[],
+  budget: Omit<DeployableInput, "deadline">,
+  target = 0.8,
+  options: ForecastOptions = {},
+  maxDays = 180,
+): { deadline: string; probability: number } | null {
+  const open = estimates.filter((e) => e > 0);
+  // No work left — today already clears any target.
+  if (open.length === 0) return { deadline: budget.today, probability: 1 };
+
+  const start = parseISODate(budget.today);
+  const probAt = (day: number): { iso: string; probability: number } => {
+    const d = new Date(start);
+    d.setUTCDate(d.getUTCDate() + day);
+    const iso = toISODate(d);
+    const deployable = deployableMinutes({ ...budget, deadline: iso });
+    return { iso, probability: forecast(open, deployable, options).probability };
+  };
+
+  // Even the furthest allowed date can't clear the bar — out of reach.
+  if (probAt(maxDays).probability < target) return null;
+
+  let lo = 0;
+  let hi = maxDays;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (probAt(mid).probability >= target) hi = mid;
+    else lo = mid + 1;
+  }
+  const { iso, probability } = probAt(lo);
+  return { deadline: iso, probability };
+}

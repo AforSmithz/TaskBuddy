@@ -105,6 +105,7 @@ create table if not exists tasks (
   source_quote      text,
   is_ai_suggested   boolean not null default false,
   blocked_by        text,                          -- human-readable blocker note
+  deferred          boolean not null default false, -- pushed past the deadline by a recovery move
   sort_index        integer default 0,
   created_at        timestamptz not null default now()
 );

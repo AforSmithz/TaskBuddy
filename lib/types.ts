@@ -139,6 +139,8 @@ export interface Task {
   source_quote: string | null;
   is_ai_suggested: boolean;
   blocked_by: string | null;
+  /** Pushed past the current deadline by a recovery move; excluded from the forecast. */
+  deferred: boolean;
   sort_index: number;
   created_at: string;
 }
@@ -240,6 +242,49 @@ export interface PitCall {
   probabilityBefore: number;
   probabilityAfter: number;
   moves: RecoveryMove[];
+  /** Earliest deadline that would restore the target probability, if any. */
+  reschedule: RescheduleMove | null;
+}
+
+/** Why a project was flagged off-track — one human-readable divergence signal. */
+export interface DivergenceReason {
+  kind:
+    | "over_budget" // negative slack: the open work doesn't fit the time budget
+    | "deadline_past" // the deadline is already behind us
+    | "at_risk" // open work is below the target probability of finishing on time
+    | "overdue_tasks" // open tasks whose due_date has passed
+    | "blocked_tasks"; // open tasks stuck in `blocked`
+  /** "critical" = the deadline itself is in jeopardy; "warning" = needs attention but on time. */
+  severity: "critical" | "warning";
+  detail: string;
+}
+
+/** A move that re-dates the project to the earliest deadline that clears the target. */
+export interface RescheduleMove {
+  /** ISO date of the earliest achievable deadline. */
+  deadline: string;
+  /** Probability the project would have at that deadline. */
+  probabilityAfter: number;
+}
+
+/**
+ * A proactive recovery plan: the deterministic moves that would put an
+ * off-track project back on track. Surfaced for the user to approve — never
+ * auto-applied.
+ */
+export interface RecoveryPlan {
+  projectId: string;
+  projectName: string;
+  /** Current completion probability (before any move). */
+  currentProbability: number;
+  /** Why we flagged the project. */
+  reasons: DivergenceReason[];
+  /** Defer these (lowest-priority-first) to recover; best improvement first. */
+  defer: RecoveryMove[];
+  /** Earliest deadline clearing the target probability, or null if out of reach. */
+  reschedule: RescheduleMove | null;
+  /** Dependency-aware order to tackle the remaining open work (advisory). */
+  sequence: { taskId: string; title: string }[];
 }
 
 // --- LLM extraction shape (what the model is asked to return) ---------------
