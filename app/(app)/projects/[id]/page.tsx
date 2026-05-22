@@ -5,13 +5,21 @@ import {
   FolderKanban,
   CalendarClock,
   ListChecks,
+  Gauge,
 } from "lucide-react";
-import { getProject, listAllTasks, listMeetings } from "@/lib/store";
-import { Card, CardHeader } from "@/components/ui/card";
+import {
+  forecastProject,
+  getProject,
+  listAllTasks,
+  listEntries,
+} from "@/lib/store";
+import { Card, CardHeader, CardBody } from "@/components/ui/card";
 import { Pill } from "@/components/ui/badge";
 import { EmptyState } from "@/components/ui/empty-state";
-import { MeetingListItem } from "@/components/meetings/meeting-list-item";
-import { TaskList } from "@/components/meetings/task-list";
+import { EntryListItem } from "@/components/entries/entry-list-item";
+import { TaskList } from "@/components/entries/task-list";
+import { ForecastMeter } from "@/components/forecast/forecast-meter";
+import { DeadlineEditor } from "@/components/forecast/deadline-editor";
 
 export default async function ProjectPage({
   params,
@@ -19,26 +27,27 @@ export default async function ProjectPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
-  const [project, meetings, tasks] = await Promise.all([
+  const [project, entries, tasks, forecast] = await Promise.all([
     getProject(id),
-    listMeetings(),
+    listEntries(),
     listAllTasks(),
+    forecastProject(id),
   ]);
   if (!project) notFound();
 
-  const projectMeetings = meetings.filter((m) => m.project_id === id);
-  const meetingIds = new Set(projectMeetings.map((m) => m.id));
+  const projectEntries = entries.filter((m) => m.project_id === id);
+  const entryIds = new Set(projectEntries.map((m) => m.id));
   const projectTasks = tasks
-    .filter((t) => meetingIds.has(t.meeting_id))
+    .filter((t) => entryIds.has(t.entry_id))
     .sort((a, b) => (b.priority_score ?? 0) - (a.priority_score ?? 0));
 
   const openCount = projectTasks.filter((t) => t.status !== "done").length;
   const countById = new Map<string, { total: number; open: number }>();
   for (const t of projectTasks) {
-    const e = countById.get(t.meeting_id) ?? { total: 0, open: 0 };
+    const e = countById.get(t.entry_id) ?? { total: 0, open: 0 };
     e.total += 1;
     if (t.status !== "done") e.open += 1;
-    countById.set(t.meeting_id, e);
+    countById.set(t.entry_id, e);
   }
 
   return (
@@ -61,10 +70,31 @@ export default async function ProjectPage({
           </h1>
           <p className="mt-0.5 text-[13px] text-[var(--color-fg-muted)]">
             {project.description ??
-              `${projectMeetings.length} entries · ${openCount} open tasks`}
+              `${projectEntries.length} entries · ${openCount} open tasks`}
           </p>
         </div>
       </div>
+
+      {/* Completion forecast — the strategist's headline number. */}
+      <Card className="mt-5">
+        <CardBody className="space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <p className="flex items-center gap-2 text-[13px] font-semibold text-[var(--color-fg)]">
+              <Gauge className="size-4 text-[var(--color-accent)]" />
+              Completion forecast
+            </p>
+            <DeadlineEditor projectId={project.id} deadline={project.deadline} />
+          </div>
+          {forecast ? (
+            <ForecastMeter forecast={forecast} deadline={forecast.deadline} />
+          ) : (
+            <p className="text-[13px] text-[var(--color-fg-muted)]">
+              Set a deadline to see the live probability of finishing this
+              project&apos;s open work in time.
+            </p>
+          )}
+        </CardBody>
+      </Card>
 
       <div className="mt-5 grid grid-cols-1 gap-5 lg:grid-cols-3">
         <div className="lg:col-span-2">
@@ -91,18 +121,18 @@ export default async function ProjectPage({
             <CardHeader
               title="Entries"
               icon={<CalendarClock className="size-4" />}
-              action={<Pill>{projectMeetings.length}</Pill>}
+              action={<Pill>{projectEntries.length}</Pill>}
             />
-            {projectMeetings.length === 0 ? (
+            {projectEntries.length === 0 ? (
               <p className="px-5 py-8 text-center text-[13px] text-[var(--color-fg-subtle)]">
                 No meetings or plans in this project.
               </p>
             ) : (
               <div className="divide-y divide-[var(--color-border)]">
-                {projectMeetings.map((m) => {
+                {projectEntries.map((m) => {
                   const c = countById.get(m.id) ?? { total: 0, open: 0 };
                   return (
-                    <MeetingListItem
+                    <EntryListItem
                       key={m.id}
                       id={m.id}
                       title={m.title}

@@ -1,31 +1,44 @@
 import Link from "next/link";
-import { Plus, CalendarClock } from "lucide-react";
-import { listAllDependencies, listAllTasks, listMeetings } from "@/lib/store";
+import { Plus, CalendarClock, Gauge } from "lucide-react";
+import {
+  forecastProjects,
+  getAvailability,
+  listAllDependencies,
+  listAllTasks,
+  listEntries,
+} from "@/lib/store";
 import { PageHeader } from "@/components/ui/page-header";
 import { Card, CardHeader } from "@/components/ui/card";
 import { EmptyState } from "@/components/ui/empty-state";
 import { buttonClasses } from "@/components/ui/button";
-import { MeetingListItem } from "@/components/meetings/meeting-list-item";
+import { EntryListItem } from "@/components/entries/entry-list-item";
 import { Reveal } from "@/components/motion/reveal";
 import { TodayAgenda } from "@/components/today/today-agenda";
+import { ProbabilityPill } from "@/components/forecast/forecast-meter";
+import { TimeBudget } from "@/components/forecast/time-budget";
 
 export default async function TodayPage() {
-  const [tasks, meetings, dependencies] = await Promise.all([
-    listAllTasks(),
-    listMeetings(),
-    listAllDependencies(),
-  ]);
+  const [tasks, entries, dependencies, forecasts, availability] =
+    await Promise.all([
+      listAllTasks(),
+      listEntries(),
+      listAllDependencies(),
+      forecastProjects(),
+      getAvailability(),
+    ]);
 
-  const meetingTitles = Object.fromEntries(
-    meetings.map((m) => [m.id, m.title]),
+  const todayISO = new Date().toISOString().slice(0, 10);
+
+  const entryTitles = Object.fromEntries(
+    entries.map((m) => [m.id, m.title]),
   );
 
-  const taskCountByMeeting = new Map<string, { total: number; open: number }>();
+  const taskCountByEntry = new Map<string, { total: number; open: number }>();
   for (const t of tasks) {
-    const entry = taskCountByMeeting.get(t.meeting_id) ?? { total: 0, open: 0 };
-    entry.total += 1;
-    if (t.status !== "done") entry.open += 1;
-    taskCountByMeeting.set(t.meeting_id, entry);
+    const counts = taskCountByEntry.get(t.entry_id) ?? { total: 0, open: 0 };
+    counts.total += 1;
+    if (t.status !== "done") counts.open += 1;
+    taskCountByEntry.set(t.entry_id, counts);
   }
 
   const today = new Date().toLocaleDateString("en-US", {
@@ -52,9 +65,38 @@ export default async function TodayPage() {
       <Reveal delay={0.1} className="mt-7">
         <TodayAgenda
           tasks={tasks}
-          meetingTitles={meetingTitles}
+          entryTitles={entryTitles}
           dependencies={dependencies}
         />
+      </Reveal>
+
+      <Reveal delay={0.15} className="mt-5">
+        <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
+          <TimeBudget availability={availability} today={todayISO} />
+          <Card>
+            <CardHeader title="On track" icon={<Gauge className="size-4" />} />
+            {forecasts.length === 0 ? (
+              <div className="p-5">
+                <EmptyState
+                  icon={Gauge}
+                  title="No deadlines set"
+                  description="Give a project a deadline to forecast your odds of finishing it in time."
+                />
+              </div>
+            ) : (
+              <div className="space-y-2 p-3">
+                {forecasts.map((f) => (
+                  <ProbabilityPill
+                    key={f.projectId}
+                    projectId={f.projectId}
+                    name={f.projectName}
+                    probability={f.probability}
+                  />
+                ))}
+              </div>
+            )}
+          </Card>
+        </div>
       </Reveal>
 
       <Reveal delay={0.2} className="mt-5">
@@ -63,7 +105,7 @@ export default async function TodayPage() {
             title="Recent activity"
             icon={<CalendarClock className="size-4" />}
           />
-          {meetings.length === 0 ? (
+          {entries.length === 0 ? (
             <EmptyState
               icon={CalendarClock}
               title="Nothing here yet"
@@ -80,13 +122,13 @@ export default async function TodayPage() {
             />
           ) : (
             <div className="divide-y divide-[var(--color-border)]">
-              {meetings.map((m) => {
-                const counts = taskCountByMeeting.get(m.id) ?? {
+              {entries.map((m) => {
+                const counts = taskCountByEntry.get(m.id) ?? {
                   total: 0,
                   open: 0,
                 };
                 return (
-                  <MeetingListItem
+                  <EntryListItem
                     key={m.id}
                     id={m.id}
                     title={m.title}
