@@ -7,12 +7,21 @@ import {
   createDraft,
   createProject,
   discardDraft,
-  getMeeting,
+  getEntry,
+  logCommitment,
+  setAvailability,
+  setOverride,
+  setProjectDeadline,
   updateTask,
 } from "./store";
 import { generateFollowUp } from "./generate";
 import { requireUser } from "./auth";
-import type { DraftClassification, EntryKind, TaskStatus } from "./types";
+import type {
+  DraftClassification,
+  EntryKind,
+  PitCall,
+  TaskStatus,
+} from "./types";
 
 // Server Actions — the single mutation layer for TaskBuddy.
 
@@ -32,7 +41,7 @@ function pick(formData: FormData, name: string): string | null {
 function revalidateAll() {
   revalidatePath("/");
   revalidatePath("/board");
-  revalidatePath("/meetings", "layout");
+  revalidatePath("/entries", "layout");
   revalidatePath("/projects", "layout");
 }
 
@@ -61,7 +70,7 @@ export async function createEntryAction(
     };
   }
 
-  const parentMeetingId = pick(formData, "parentMeetingId");
+  const parentEntryId = pick(formData, "parentEntryId");
   const newProjectName = String(formData.get("newProjectName") ?? "").trim();
   // "Auto" means let TaskBuddy decide; "" means an explicit "No project";
   // anything else is an existing project's id.
@@ -70,18 +79,18 @@ export async function createEntryAction(
   const existingProjectId =
     rawProjectId && rawProjectId !== AUTO ? rawProjectId : null;
 
-  let meetingId: string;
+  let entryId: string;
   try {
     let projectId = existingProjectId;
     if (newProjectName) {
       projectId = await createProject(newProjectName);
     }
-    meetingId = await createDraft(notes, {
+    entryId = await createDraft(notes, {
       kind,
       area: area ?? undefined,
       projectId,
       autoProject: autoProject && !newProjectName,
-      parentMeetingId,
+      parentEntryId,
     });
   } catch (err) {
     console.error("createEntry failed:", err);
@@ -94,7 +103,7 @@ export async function createEntryAction(
   }
 
   // redirect() throws internally, so it must run outside the try/catch.
-  redirect(`/meetings/${meetingId}/review`);
+  redirect(`/entries/${entryId}/review`);
 }
 
 /**
@@ -102,20 +111,20 @@ export async function createEntryAction(
  * filing the user confirmed in the review step, and go live.
  */
 export async function confirmDraftAction(
-  meetingId: string,
+  entryId: string,
   declinedTaskIds: string[],
   classification: DraftClassification,
 ): Promise<void> {
   await requireUser();
-  await confirmDraft(meetingId, declinedTaskIds, classification);
+  await confirmDraft(entryId, declinedTaskIds, classification);
   revalidateAll();
-  redirect(`/meetings/${meetingId}`);
+  redirect(`/entries/${entryId}`);
 }
 
 /** Discard a draft entirely (nothing is kept). */
-export async function discardDraftAction(meetingId: string): Promise<void> {
+export async function discardDraftAction(entryId: string): Promise<void> {
   await requireUser();
-  await discardDraft(meetingId);
+  await discardDraft(entryId);
   revalidateAll();
   redirect("/create");
 }
@@ -152,15 +161,73 @@ export async function logActualTimeAction(
   revalidateAll();
 }
 
-/** Generate a follow-up message for a meeting's open questions and blockers. */
+// --- Time budget & forecast -------------------------------------------------
+
+/** Set or clear a project's deadline (the forecast's finish line). */
+export async function setProjectDeadlineAction(
+  projectId: string,
+  deadline: string | null,
+): Promise<void> {
+  await requireUser();
+  await setProjectDeadline(projectId, deadline || null);
+  revalidatePath("/");
+  revalidatePath("/projects", "layout");
+}
+
+/** Update the weekly availability template. */
+export async function setAvailabilityAction(
+  rows: { weekday: number; hours: number }[],
+): Promise<void> {
+  await requireUser();
+  await setAvailability(rows);
+  revalidatePath("/");
+  revalidatePath("/projects", "layout");
+}
+
+/** Override deployable hours for one specific date. */
+export async function setOverrideAction(
+  date: string,
+  hours: number,
+): Promise<void> {
+  await requireUser();
+  await setOverride(date, hours);
+  revalidatePath("/");
+  revalidatePath("/projects", "layout");
+}
+
+/**
+ * Log a commitment ("friends 6-9pm") and return the pit calls it triggers —
+ * projects whose completion probability dropped, with recovery moves.
+ */
+export async function logCommitmentAction(
+  date: string,
+  hours: number,
+  label: string | null,
+): Promise<{ pitCalls: PitCall[]; error: string | null }> {
+  await requireUser();
+  try {
+    const pitCalls = await logCommitment(date, hours, label);
+    revalidatePath("/");
+    revalidatePath("/projects", "layout");
+    return { pitCalls, error: null };
+  } catch (err) {
+    console.error("logCommitment failed:", err);
+    return {
+      pitCalls: [],
+      error: err instanceof Error ? err.message : "Failed to log commitment.",
+    };
+  }
+}
+
+/** Generate a follow-up message for an entry's open questions and blockers. */
 export async function generateFollowUpAction(
-  meetingId: string,
+  entryId: string,
 ): Promise<{ message: string | null; error: string | null }> {
   await requireUser();
-  const meeting = await getMeeting(meetingId);
-  if (!meeting) return { message: null, error: "Meeting not found." };
+  const entry = await getEntry(entryId);
+  if (!entry) return { message: null, error: "Entry not found." };
   try {
-    const message = await generateFollowUp(meeting);
+    const message = await generateFollowUp(entry);
     return { message, error: null };
   } catch (err) {
     console.error("generateFollowUp failed:", err);

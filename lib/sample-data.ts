@@ -4,7 +4,7 @@
 
 import type { EntryKind, Project } from "./types";
 
-export interface SampleMeeting {
+export interface SampleEntry {
   notes: string;
   createdAt: string;
   kind: EntryKind;
@@ -20,17 +20,19 @@ export const SAMPLE_PROJECTS: Project[] = [
     id: ANALYTICS_PROJECT_ID,
     name: "Q2 Analytics Initiative",
     description: "Dashboard delivery and the supporting mobile launch work.",
+    deadline: "2026-05-29",
     created_at: "2026-05-15T09:00:00.000Z",
   },
   {
     id: PIANO_PROJECT_ID,
     name: "Learning Piano",
     description: "A personal goal to pick up the basics of piano.",
+    deadline: null,
     created_at: "2026-05-17T17:30:00.000Z",
   },
 ];
 
-export const SAMPLE_MEETINGS: SampleMeeting[] = [
+export const SAMPLE_ENTRIES: SampleEntry[] = [
   {
     createdAt: "2026-05-16T09:00:00.000Z",
     kind: "meeting",
