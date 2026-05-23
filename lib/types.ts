@@ -463,3 +463,42 @@ export interface ModificationSuggestion {
   /** One-line explanation of the reshaping strategy. */
   rationale: string;
 }
+
+// --- LLM strategist (whole-plan re-route) -----------------------------------
+
+/**
+ * One task in an alternative plan. Same shape as a `SuggestedTask` minus the
+ * gap/area bookkeeping — the whole plan shares one area, applied on accept.
+ * Carries its own estimate + 1-5 factor ratings so it scores through
+ * `computePriority` exactly like an extracted task.
+ */
+export interface ReroutePart extends FactorScores {
+  title: string;
+  description: string;
+  estimated_minutes: number;
+  due_date: string | null;
+  blocked_by: string | null;
+  priority_reason: string;
+}
+
+/**
+ * The strategist's boldest move: a complete alternative plan that hits the same
+ * deliverable by a fundamentally different approach (buy vs build, a managed
+ * service vs custom, a template vs from-scratch). It replaces the entire current
+ * open plan — surfaced as an all-or-nothing draft, not a per-task pick. As with
+ * the other moves, the probability is always computed by `forecast()`; the LLM
+ * proposes the approach, never the likelihood.
+ */
+export interface RerouteSuggestion {
+  projectId: string;
+  /** Short name of the alternative approach (e.g. "Use a managed auth provider"). */
+  approach: string;
+  /** One sentence: how the new route differs and why it fits the budget. */
+  rationale: string;
+  /** The replacement tasks — the new approach. */
+  tasks: ReroutePart[];
+  /** Current open tasks this plan swaps out (deferred on accept), for the before/after. */
+  replaces: { taskId: string; title: string; estimated_minutes: number }[];
+  /** Completion probability after switching to this plan — from `forecast()`. */
+  previewProbability: number;
+}
