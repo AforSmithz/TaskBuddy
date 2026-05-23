@@ -10,10 +10,13 @@ import { Reveal } from "@/components/motion/reveal";
 export const metadata = { title: "Board — TaskBuddy" };
 
 export default async function BoardPage() {
-  const [tasks, entries] = await Promise.all([
+  const [allTasks, entries] = await Promise.all([
     listAllTasks(),
     listEntries(),
   ]);
+  // Deferred tasks are parked out of scope for their deadline — hide them from
+  // the board too (they live in the project's Deferred section, reversible).
+  const tasks = allTasks.filter((t) => !t.deferred);
 
   const entryTitles = Object.fromEntries(
     entries.map((m) => [m.id, m.title]),

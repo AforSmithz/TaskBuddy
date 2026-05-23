@@ -19,7 +19,7 @@ import { RecoveryCallout } from "@/components/forecast/recovery-callout";
 import { TimeBudget } from "@/components/forecast/time-budget";
 
 export default async function TodayPage() {
-  const [tasks, entries, dependencies, dashboard, availability] =
+  const [allTasks, entries, dependencies, dashboard, availability] =
     await Promise.all([
       listAllTasks(),
       listEntries(),
@@ -28,6 +28,9 @@ export default async function TodayPage() {
       getAvailability(),
     ]);
   const { forecasts, recoveries } = dashboard;
+  // Deferred tasks are parked out of scope for their deadline — keep them out of
+  // the active working views too (they live in the project's Deferred section).
+  const tasks = allTasks.filter((t) => !t.deferred);
 
   const todayISO = new Date().toISOString().slice(0, 10);
 
