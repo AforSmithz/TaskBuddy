@@ -11,6 +11,7 @@ import type {
   Entry,
   EntryDetail,
   EstimationModel,
+  FactorScores,
   ForecastResult,
   OpenQuestion,
   PitCall,
@@ -21,6 +22,7 @@ import type {
   SuggestedTask,
   Task,
   TaskDependency,
+  TaskModification,
   TaskStatus,
 } from "./types";
 import { ON_TRACK_PROBABILITY, isOnTrack } from "./types";
@@ -591,7 +593,16 @@ export async function updateTask(
   patch: Partial<
     Pick<
       Task,
-      "status" | "actual_minutes" | "blocked_by" | "area" | "deferred" | "due_date"
+      | "status"
+      | "actual_minutes"
+      | "blocked_by"
+      | "area"
+      | "deferred"
+      | "due_date"
+      // Reshaped in place by the strategist's scope-down move.
+      | "title"
+      | "description"
+      | "estimated_minutes"
     >
   >,
 ): Promise<Task | null> {
@@ -1286,12 +1297,171 @@ export async function addCorrectiveTasks(
   if (!project) return;
 
   const createdAt = new Date().toISOString();
+  const taskRows = tasks.map((t, i) =>
+    buildRecoveryTaskRow(
+      { ...t, status: t.blocked_by ? "blocked" : "todo" },
+      "",
+      i,
+      createdAt,
+    ),
+  );
+  await persistRecoveryEntry(
+    project,
+    "AI-suggested corrective tasks to fill gaps in the plan.",
+    taskRows,
+    createdAt,
+  );
+}
+
+// --- LLM strategist: modify existing tasks ----------------------------------
+
+/**
+ * Deterministic preview: the probability the project would have if these
+ * modifications were applied — each reshaped task's original estimate removed
+ * and its replacements' estimates added. The forecast scores it, never the LLM.
+ * Pure given the context, so the strategist can call it without I/O.
+ */
+export function previewProbabilityWithModifications(
+  ctx: RecoveryContext,
+  mods: TaskModification[],
+): number {
+  const reshaped = new Set(mods.map((m) => m.taskId));
+  const estimates = [
+    ...ctx.openTasks
+      .filter((t) => !reshaped.has(t.id))
+      .map((t) => t.estimated_minutes),
+    ...mods.flatMap((m) => m.replacements.map((r) => r.estimated_minutes)),
+  ];
+  return forecast(estimates, ctx.deployable, forecastOptions(ctx.model)).probability;
+}
+
+/**
+ * Apply user-accepted task modifications:
+ * - "scope_down" rewrites the existing task in place (lighter title, trimmed
+ *   description, smaller estimate) — reversible by editing the task.
+ * - "split" defers the original monolith (so it leaves the forecast and the
+ *   working views, reversibly) and persists the smaller steps under a synthetic
+ *   recovery entry, mirroring `addCorrectiveTasks`.
+ */
+export async function applyTaskModifications(
+  projectId: string,
+  mods: TaskModification[],
+): Promise<void> {
+  if (mods.length === 0) return;
+  const project = await getProject(projectId);
+  if (!project) return;
+
+  const createdAt = new Date().toISOString();
+  const newRows: Task[] = [];
+
+  for (const mod of mods) {
+    if (mod.kind === "scope_down") {
+      const part = mod.replacements[0];
+      if (!part) continue;
+      await updateTask(mod.taskId, {
+        title: part.title,
+        description: part.description,
+        estimated_minutes: part.estimated_minutes,
+      });
+    } else {
+      // Split: the monolith is replaced by its steps. Defer it out of the
+      // forecast (reversible); the steps inherit its life-area (updateTask
+      // returns the row, so we read the area straight off it).
+      const original = await updateTask(mod.taskId, { deferred: true });
+      const area = original?.area ?? "Work";
+      mod.replacements.forEach((part) =>
+        newRows.push(
+          buildRecoveryTaskRow(
+            { ...part, area, status: "todo" },
+            "",
+            newRows.length,
+            createdAt,
+          ),
+        ),
+      );
+    }
+  }
+
+  await persistRecoveryEntry(
+    project,
+    "Tasks reshaped to fit the budget.",
+    newRows,
+    createdAt,
+  );
+}
+
+// --- Recovery-entry persistence (shared by Generate + Modify) ---------------
+
+/** A factor-bearing row to file under a recovery entry. */
+type RecoveryTaskInput = FactorScores & {
+  title: string;
+  description: string;
+  estimated_minutes: number;
+  due_date?: string | null;
+  blocked_by?: string | null;
+  priority_reason: string;
+  area: string;
+  status: TaskStatus;
+};
+
+/** Build a persistable Task row from strategist output, scored deterministically. */
+function buildRecoveryTaskRow(
+  input: RecoveryTaskInput,
+  entryId: string,
+  sortIndex: number,
+  createdAt: string,
+): Task {
+  const { score, label } = computePriority(input);
+  return {
+    id: crypto.randomUUID(),
+    entry_id: entryId,
+    title: input.title,
+    description: input.description,
+    owner: null,
+    category: null,
+    area: input.area,
+    status: input.status,
+    due_date: input.due_date ?? null,
+    estimated_minutes: input.estimated_minutes,
+    actual_minutes: 0,
+    urgency_score: input.urgency,
+    impact_score: input.impact,
+    effort_score: input.effort,
+    dependency_score: input.dependency,
+    risk_score: input.risk,
+    confidence_score: input.confidence,
+    priority_score: score,
+    priority_label: label,
+    priority_reason: input.priority_reason,
+    source_quote: null,
+    is_ai_suggested: true,
+    blocked_by: input.blocked_by ?? null,
+    deferred: false,
+    sort_index: sortIndex,
+    created_at: createdAt,
+  };
+}
+
+/**
+ * Persist task rows under a synthetic recovery entry (kind "plan") owned by the
+ * project — the same vehicle Generate uses, so reshaped/added tasks inherit the
+ * project through the entry with no schema change. No-op when there are no rows.
+ */
+async function persistRecoveryEntry(
+  project: Project,
+  summary: string,
+  taskRows: Task[],
+  createdAt: string,
+): Promise<void> {
+  if (taskRows.length === 0) return;
   const entryId = crypto.randomUUID();
+  for (const row of taskRows) row.entry_id = entryId;
+
   const entry: Entry = {
     id: entryId,
     title: `Recovery — ${project.name}`,
     raw_input: "",
-    summary: "AI-suggested corrective tasks to fill gaps in the plan.",
+    summary,
     discussion_points: [],
     stakeholders: [],
     daily_objective: "",
@@ -1300,42 +1470,10 @@ export async function addCorrectiveTasks(
     risks: [],
     kind: "plan",
     status: "active",
-    project_id: projectId,
+    project_id: project.id,
     parent_entry_id: null,
     created_at: createdAt,
   };
-
-  const taskRows: Task[] = tasks.map((t, i) => {
-    const { score, label } = computePriority(t);
-    return {
-      id: crypto.randomUUID(),
-      entry_id: entryId,
-      title: t.title,
-      description: t.description,
-      owner: null,
-      category: null,
-      area: t.area,
-      status: (t.blocked_by ? "blocked" : "todo") as TaskStatus,
-      due_date: t.due_date,
-      estimated_minutes: t.estimated_minutes,
-      actual_minutes: 0,
-      urgency_score: t.urgency,
-      impact_score: t.impact,
-      effort_score: t.effort,
-      dependency_score: t.dependency,
-      risk_score: t.risk,
-      confidence_score: t.confidence,
-      priority_score: score,
-      priority_label: label,
-      priority_reason: t.priority_reason,
-      source_quote: null,
-      is_ai_suggested: true,
-      blocked_by: t.blocked_by,
-      deferred: false,
-      sort_index: i,
-      created_at: createdAt,
-    };
-  });
 
   const assembled: AssembledEntry = {
     entry,
