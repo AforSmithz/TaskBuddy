@@ -217,6 +217,24 @@ export interface ForecastResult {
   openTaskCount: number;
 }
 
+/**
+ * The user's learned estimation bias, fit from completed tasks. Models the true
+ * duration of a task as `estimate × factor`, where `log(factor)` is normal with
+ * mean `meanLog` and std dev `sigma`. `meanLog > 0` means you systematically run
+ * over your estimates; `< 0` means you finish under.
+ */
+export interface EstimationModel {
+  /** Mean of `log(actual / estimated)` over completed tasks — the systematic bias. */
+  meanLog: number;
+  /** Std dev of `log(actual / estimated)` — how spread out your estimation error is. */
+  sigma: number;
+  /** Completed tasks (with both estimated + actual time) the model was fit on. */
+  sampleSize: number;
+}
+
+/** Below this many samples we don't trust a fitted model — fall back to defaults. */
+export const MIN_ESTIMATION_SAMPLES = 5;
+
 /** A recommended plan change and the probability it would restore. */
 export interface RecoveryMove {
   taskId: string;
