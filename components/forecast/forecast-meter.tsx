@@ -1,6 +1,6 @@
 import Link from "next/link";
 import type { EstimationModel, ForecastResult } from "@/lib/types";
-import { MIN_ESTIMATION_SAMPLES } from "@/lib/types";
+import { MIN_ESTIMATION_SAMPLES, isOnTrack } from "@/lib/types";
 import { formatDate, formatMinutes } from "@/lib/format";
 import { cn } from "@/lib/cn";
 
@@ -11,7 +11,7 @@ export type Band = "track" | "risk" | "off";
 
 /** Map a probability to its on-track band. */
 export function band(probability: number): Band {
-  if (probability >= 0.75) return "track";
+  if (isOnTrack(probability)) return "track";
   if (probability >= 0.4) return "risk";
   return "off";
 }

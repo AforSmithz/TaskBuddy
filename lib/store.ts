@@ -22,6 +22,7 @@ import type {
   TaskDependency,
   TaskStatus,
 } from "./types";
+import { ON_TRACK_PROBABILITY, isOnTrack } from "./types";
 import { extractEntry } from "./extraction";
 import { estimationModel } from "./generate";
 import { computePriority } from "./priority";
@@ -979,7 +980,7 @@ export async function logCommitment(
       // Offer a re-date when the project is now below target, and only ever a
       // later date than its current deadline.
       let reschedule: RescheduleMove | null = null;
-      if (a.probability < RECOVERY_TARGET && a.deadline) {
+      if (!isOnTrack(a.probability) && a.deadline) {
         const rd = earliestAchievableDeadline(
           candidates.map((t) => t.estimated_minutes),
           {
@@ -1011,8 +1012,12 @@ export async function logCommitment(
 
 // --- Divergence detection & recovery ----------------------------------------
 
-/** Probability target a recovery plan aims to restore the project to. */
-const RECOVERY_TARGET = 0.8;
+/**
+ * Probability target a recovery plan aims to restore the project to — the same
+ * line the forecast meter calls "on track" (see `isOnTrack`), so the callout
+ * and the meter never disagree about whether a project is in trouble.
+ */
+const RECOVERY_TARGET = ON_TRACK_PROBABILITY;
 /** A deadline within this many days counts as "imminent". */
 const IMMINENT_DAYS = 3;
 
@@ -1046,7 +1051,7 @@ export function detectDivergence(
         severity: "critical",
         detail: `Deadline passed ${-daysBetween(today, deadline)} day(s) ago`,
       });
-    } else if (dl >= today && hasOpen && fc.probability < RECOVERY_TARGET) {
+    } else if (dl >= today && hasOpen && !isOnTrack(fc.probability)) {
       // The headline probability is itself the signal — near deadline or far.
       // Surface the day count too when the deadline is also imminent.
       const days = daysBetween(today, deadline);
@@ -1116,13 +1121,18 @@ function buildRecoveryPlan(g: ForecastGather, project: Project): RecoveryPlan | 
   const reasons = detectDivergence(fc, project.deadline, allTasks, g.today);
   if (reasons.length === 0) return null;
 
+  // Probability-recovery moves (defer / re-date) only make sense when the
+  // project is actually off the on-track line. An on-track project flagged just
+  // for a blocked or overdue task gets the inline actions below, not these.
+  const offTrack = !isOnTrack(fc.probability);
+
   // Defer lowest-priority work first (best probability recovery first).
-  const defer = recoveryMoves(candidates, deployable, opts);
+  const defer = offTrack ? recoveryMoves(candidates, deployable, opts) : [];
 
   // Re-date only when the current deadline can't already clear the target, and
   // only ever suggest a *later* date (pulling it earlier never helps).
   let reschedule: RecoveryPlan["reschedule"] = null;
-  if (fc.probability < RECOVERY_TARGET) {
+  if (offTrack) {
     const rd = earliestAchievableDeadline(estimates, budget, RECOVERY_TARGET, opts);
     if (rd && rd.deadline > project.deadline.slice(0, 10)) {
       reschedule = { deadline: rd.deadline, probabilityAfter: rd.probability };
