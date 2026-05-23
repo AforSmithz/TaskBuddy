@@ -369,3 +369,41 @@ export interface ExtractionResult {
   }[];
   tasks: ExtractedTask[];
 }
+
+// --- LLM strategist (corrective task generation) ----------------------------
+
+/** What kind of hole a corrective task fills. */
+export type GapKind = "rework" | "unblock" | "de_risk";
+
+/**
+ * A net-new corrective task the strategist proposes to fill a real gap in an
+ * off-track project — rework after a failed review, an unblock action, or work
+ * to de-risk a task that's blowing its estimate. Carries the same 1-5 factor
+ * ratings as an extracted task so it scores through `computePriority`.
+ */
+export interface SuggestedTask extends FactorScores {
+  title: string;
+  description: string;
+  estimated_minutes: number;
+  due_date: string | null;
+  blocked_by: string | null;
+  priority_reason: string;
+  /** Life-area to file the task under (inherited from the project's tasks). */
+  area: string;
+  gap_kind: GapKind;
+}
+
+/**
+ * The strategist's advisory output for one off-track project: net-new tasks to
+ * fill genuine gaps, plus the probability the project would have if they were
+ * added. The probability is always computed by `forecast()` — the LLM proposes
+ * the tasks, never the likelihood.
+ */
+export interface RecoverySuggestion {
+  projectId: string;
+  tasks: SuggestedTask[];
+  /** Completion probability after adding the suggested tasks — from `forecast()`. */
+  previewProbability: number;
+  /** One-line explanation of the gap these tasks fill. */
+  rationale: string;
+}
