@@ -14,7 +14,7 @@ import { buttonClasses } from "@/components/ui/button";
 import { EntryListItem } from "@/components/entries/entry-list-item";
 import { Reveal } from "@/components/motion/reveal";
 import { TodayAgenda } from "@/components/today/today-agenda";
-import { ProbabilityPill } from "@/components/forecast/forecast-meter";
+import { ProbabilityPill, ForecastCalibration } from "@/components/forecast/forecast-meter";
 import { RecoveryCallout } from "@/components/forecast/recovery-callout";
 import { TimeBudget } from "@/components/forecast/time-budget";
 
@@ -27,7 +27,7 @@ export default async function TodayPage() {
       forecastDashboard(),
       getAvailability(),
     ]);
-  const { forecasts, recoveries } = dashboard;
+  const { forecasts, recoveries, model } = dashboard;
   // Deferred tasks are parked out of scope for their deadline — keep them out of
   // the active working views too (they live in the project's Deferred section).
   const tasks = allTasks.filter((t) => !t.deferred);
@@ -114,6 +114,7 @@ export default async function TodayPage() {
                     probability={f.probability}
                   />
                 ))}
+                <ForecastCalibration model={model} />
               </div>
             )}
           </Card>

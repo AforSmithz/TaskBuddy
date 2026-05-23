@@ -19,7 +19,7 @@ import { Pill } from "@/components/ui/badge";
 import { EmptyState } from "@/components/ui/empty-state";
 import { EntryListItem } from "@/components/entries/entry-list-item";
 import { TaskList } from "@/components/entries/task-list";
-import { ForecastMeter } from "@/components/forecast/forecast-meter";
+import { ForecastMeter, ForecastCalibration } from "@/components/forecast/forecast-meter";
 import { DeadlineEditor } from "@/components/forecast/deadline-editor";
 import { RecoveryCallout } from "@/components/forecast/recovery-callout";
 import { DeferredTasks } from "@/components/forecast/deferred-tasks";
@@ -37,7 +37,7 @@ export default async function ProjectPage({
     forecastProjectWithRecovery(id),
   ]);
   if (!project) notFound();
-  const { forecast, recovery } = fr;
+  const { forecast, recovery, model } = fr;
 
   const projectEntries = entries.filter((m) => m.project_id === id);
   const entryIds = new Set(projectEntries.map((m) => m.id));
@@ -102,7 +102,10 @@ export default async function ProjectPage({
             <DeadlineEditor projectId={project.id} deadline={project.deadline} />
           </div>
           {forecast ? (
-            <ForecastMeter forecast={forecast} deadline={forecast.deadline} />
+            <>
+              <ForecastMeter forecast={forecast} deadline={forecast.deadline} />
+              <ForecastCalibration model={model} />
+            </>
           ) : (
             <p className="text-[13px] text-[var(--color-fg-muted)]">
               Set a deadline to see the live probability of finishing this

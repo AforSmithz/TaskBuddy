@@ -1,5 +1,6 @@
 import Link from "next/link";
-import type { ForecastResult } from "@/lib/types";
+import type { EstimationModel, ForecastResult } from "@/lib/types";
+import { MIN_ESTIMATION_SAMPLES } from "@/lib/types";
 import { formatDate, formatMinutes } from "@/lib/format";
 import { cn } from "@/lib/cn";
 
@@ -93,6 +94,30 @@ export function ForecastMeter({
         </span>
       </div>
     </div>
+  );
+}
+
+/**
+ * One-line note explaining that the forecast is tilted by the user's own
+ * estimation history. Renders nothing until there's enough history to trust
+ * (below `MIN_ESTIMATION_SAMPLES` the forecast runs on the unbiased default).
+ */
+export function ForecastCalibration({ model }: { model: EstimationModel }) {
+  if (model.sampleSize < MIN_ESTIMATION_SAMPLES) return null;
+
+  // Median factor = exp(meanLog): how a typical estimate maps to reality.
+  const skew = Math.round((Math.exp(model.meanLog) - 1) * 100);
+  const phrase =
+    Math.abs(skew) < 1
+      ? "your estimates are spot-on"
+      : skew > 0
+        ? `you run ~${skew}% over`
+        : `you finish ~${Math.abs(skew)}% under`;
+
+  return (
+    <p className="text-[12px] text-[var(--color-fg-subtle)]">
+      Calibrated to your history ({model.sampleSize} tasks): {phrase}.
+    </p>
   );
 }
 
