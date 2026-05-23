@@ -10,6 +10,7 @@ import type {
   EntryStatus,
   Entry,
   EntryDetail,
+  EstimationModel,
   ForecastResult,
   OpenQuestion,
   PitCall,
@@ -23,6 +24,7 @@ import type {
   TaskStatus,
 } from "./types";
 import { extractEntry } from "./extraction";
+import { estimationModel } from "./generate";
 import { computePriority } from "./priority";
 import {
   generateSchedule,
@@ -837,6 +839,8 @@ interface ForecastGather {
   deps: TaskDependency[];
   /** entry_id → owning project_id, for mapping tasks to projects. */
   projectOfEntry: Map<string, string | null>;
+  /** The user's estimation bias, fit from all completed tasks — calibrates the forecast. */
+  model: EstimationModel;
   availability: Availability[];
   overrides: AvailabilityOverride[];
   commitments: Commitment[];
@@ -879,11 +883,18 @@ async function gatherForecast(): Promise<ForecastGather> {
     allTasksByProject,
     deps,
     projectOfEntry,
+    // Fit once over every completed task — the bias is the user's, not a project's.
+    model: estimationModel(tasks),
     availability: budget.availability,
     overrides: budget.overrides,
     commitments: budget.commitments,
     today: todayISO(),
   };
+}
+
+/** Forecast options carrying the learned estimation bias (sigma + meanLog). */
+function forecastOptions(model: EstimationModel) {
+  return { sigma: model.sigma, meanLog: model.meanLog };
 }
 
 /** Run the forecast for every deadlined project under a given commitment set. */
@@ -903,6 +914,7 @@ function buildForecasts(
     const result = forecast(
       tasks.map((t) => t.estimated_minutes),
       dep,
+      forecastOptions(g.model),
     );
     return {
       projectId: p.id,
@@ -920,13 +932,14 @@ function buildForecasts(
 export async function forecastDashboard(): Promise<{
   forecasts: ProjectForecast[];
   recoveries: RecoveryPlan[];
+  model: EstimationModel;
 }> {
   const g = await gatherForecast();
   const forecasts = buildForecasts(g, g.commitments);
   const recoveries = g.projects
     .map((p) => buildRecoveryPlan(g, p))
     .filter((plan): plan is RecoveryPlan => plan !== null);
-  return { forecasts, recoveries };
+  return { forecasts, recoveries, model: g.model };
 }
 
 /**
@@ -936,13 +949,18 @@ export async function forecastDashboard(): Promise<{
 export async function forecastProjectWithRecovery(projectId: string): Promise<{
   forecast: ProjectForecast | null;
   recovery: RecoveryPlan | null;
+  model: EstimationModel;
 }> {
   const g = await gatherForecast();
   const project = g.projects.find((p) => p.id === projectId);
-  if (!project) return { forecast: null, recovery: null };
+  if (!project) return { forecast: null, recovery: null, model: g.model };
   const projectForecast =
     buildForecasts({ ...g, projects: [project] }, g.commitments)[0] ?? null;
-  return { forecast: projectForecast, recovery: buildRecoveryPlan(g, project) };
+  return {
+    forecast: projectForecast,
+    recovery: buildRecoveryPlan(g, project),
+    model: g.model,
+  };
 }
 
 /**
@@ -992,7 +1010,7 @@ export async function logCommitment(
     if (!b) continue;
     if (a.probability < b.probability - 0.02) {
       const candidates = g.tasksByProject.get(a.projectId) ?? [];
-      const moves = recoveryMoves(candidates, a.deployableMinutes);
+      const moves = recoveryMoves(candidates, a.deployableMinutes, forecastOptions(g.model));
 
       // Offer a re-date when the project is now below target, and only ever a
       // later date than its current deadline.
@@ -1007,6 +1025,7 @@ export async function logCommitment(
             commitments: newCommitments,
           },
           RECOVERY_TARGET,
+          forecastOptions(g.model),
         );
         if (rd && rd.deadline > a.deadline.slice(0, 10)) {
           reschedule = { deadline: rd.deadline, probabilityAfter: rd.probability };
@@ -1126,20 +1145,21 @@ function buildRecoveryPlan(g: ForecastGather, project: Project): RecoveryPlan | 
     commitments: g.commitments,
   };
   const deployable = deployableMinutes({ ...budget, deadline: project.deadline });
-  const fc = forecast(estimates, deployable);
+  const opts = forecastOptions(g.model);
+  const fc = forecast(estimates, deployable, opts);
 
   const allTasks = g.allTasksByProject.get(projectId) ?? [];
   const reasons = detectDivergence(fc, project.deadline, allTasks, g.today);
   if (reasons.length === 0) return null;
 
   // Defer lowest-priority work first (best probability recovery first).
-  const defer = recoveryMoves(candidates, deployable);
+  const defer = recoveryMoves(candidates, deployable, opts);
 
   // Re-date only when the current deadline can't already clear the target, and
   // only ever suggest a *later* date (pulling it earlier never helps).
   let reschedule: RecoveryPlan["reschedule"] = null;
   if (fc.probability < RECOVERY_TARGET) {
-    const rd = earliestAchievableDeadline(estimates, budget, RECOVERY_TARGET);
+    const rd = earliestAchievableDeadline(estimates, budget, RECOVERY_TARGET, opts);
     if (rd && rd.deadline > project.deadline.slice(0, 10)) {
       reschedule = { deadline: rd.deadline, probabilityAfter: rd.probability };
     }
