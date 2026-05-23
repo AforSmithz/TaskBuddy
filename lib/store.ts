@@ -1076,7 +1076,12 @@ export function detectDivergence(
   }
 
   // Attention signals — worth surfacing, but not on their own a missed deadline.
-  const overdue = open.filter((t) => t.due_date && t.due_date.slice(0, 10) < today);
+  // A blocked task that's also past due is counted as blocked only (it surfaces
+  // in its own bucket), so this matches the Today agenda and never double-lists.
+  const overdue = open.filter(
+    (t) =>
+      t.status !== "blocked" && t.due_date && t.due_date.slice(0, 10) < today,
+  );
   if (overdue.length > 0) {
     reasons.push({
       kind: "overdue_tasks",
@@ -1163,8 +1168,13 @@ function buildRecoveryPlan(g: ForecastGather, project: Project): RecoveryPlan | 
   // The actual flagged tasks behind the overdue/blocked reasons, so the callout
   // can offer inline actions (reschedule / unblock) rather than just a count.
   const openTasks = allTasks.filter((t) => t.status !== "done" && !t.deferred);
+  // Blocked tasks live only in the blocked bucket, even when also past due, so a
+  // single task is never listed twice (mirrors the overdue reason count above).
   const overdue = openTasks
-    .filter((t) => t.due_date && t.due_date.slice(0, 10) < g.today)
+    .filter(
+      (t) =>
+        t.status !== "blocked" && t.due_date && t.due_date.slice(0, 10) < g.today,
+    )
     .map((t) => ({ taskId: t.id, title: t.title, dueDate: t.due_date }));
   const blocked = openTasks
     .filter((t) => t.status === "blocked")
