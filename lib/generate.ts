@@ -1,4 +1,6 @@
-import type { EntryDetail, Task } from "./types";
+import type { EntryDetail, EstimationModel, Task } from "./types";
+import { MIN_ESTIMATION_SAMPLES } from "./types";
+import { DEFAULT_SIGMA } from "./forecast";
 import { isLLMConfigured } from "./extraction";
 
 // Follow-up message + end-of-day summary generators.
@@ -115,6 +117,48 @@ export function buildEODSummary(tasks: Task[]): EODSummary {
     tomorrow_focus: tomorrow,
     planning_accuracy: planningAccuracy(completed),
   };
+}
+
+// --- Learned estimation bias ------------------------------------------------
+
+/**
+ * Fit the user's estimation bias from completed tasks — the statistical core
+ * the forecast calibrates against (`planningAccuracy` above is its plain-English
+ * cousin for the daily summary).
+ *
+ * For each done task with both an estimate and a logged actual, we take
+ * `log(actual / estimated)`. Working in log space keeps the factor multiplicative
+ * and symmetric (running 2× over and 2× under are equal-and-opposite), which is
+ * exactly what the forecast's log-normal sampler expects. We return the mean
+ * (systematic bias) and std dev (spread). Below `MIN_ESTIMATION_SAMPLES` there
+ * isn't enough signal to trust, so we fall back to the unbiased default.
+ */
+export function estimationModel(tasks: Task[]): EstimationModel {
+  const logs: number[] = [];
+  for (const t of tasks) {
+    if (t.status === "done" && t.estimated_minutes > 0 && t.actual_minutes > 0) {
+      logs.push(Math.log(t.actual_minutes / t.estimated_minutes));
+    }
+  }
+  const sampleSize = logs.length;
+
+  if (sampleSize < MIN_ESTIMATION_SAMPLES) {
+    // Not enough history — unbiased default (E[factor] = 1) at the default spread.
+    return {
+      meanLog: -(DEFAULT_SIGMA * DEFAULT_SIGMA) / 2,
+      sigma: DEFAULT_SIGMA,
+      sampleSize,
+    };
+  }
+
+  const meanLog = logs.reduce((s, x) => s + x, 0) / sampleSize;
+  const variance =
+    logs.reduce((s, x) => s + (x - meanLog) ** 2, 0) / (sampleSize - 1);
+  // Floor sigma so a run of near-identical ratios can't collapse the forecast
+  // into false certainty.
+  const sigma = Math.max(Math.sqrt(variance), 0.05);
+
+  return { meanLog, sigma, sampleSize };
 }
 
 function planningAccuracy(completed: Task[]): string {
