@@ -21,9 +21,9 @@ import type {
 
 const MINUTES_PER_HOUR = 60;
 const DEFAULT_ITERATIONS = 5000;
-// Estimate uncertainty (log-normal sigma). Until we learn a user's personal
-// estimation bias from history (Phase 2), assume everyone runs moderately over.
-const DEFAULT_SIGMA = 0.35;
+// Estimate uncertainty (log-normal sigma) used when we don't yet have enough of
+// a user's own history to fit one (see `estimationModel`). A moderate spread.
+export const DEFAULT_SIGMA = 0.35;
 
 // --- Date helpers -----------------------------------------------------------
 
@@ -126,14 +126,22 @@ function seedFrom(estimates: number[], deployable: number): number {
 export interface ForecastOptions {
   iterations?: number;
   sigma?: number;
+  /**
+   * Mean of `log(factor)` — the learned estimation bias. Omitted ⇒ `-sigma²/2`,
+   * which makes `E[factor] = 1` (estimates unbiased on average). A positive
+   * value shifts the whole distribution up: the user typically runs over.
+   */
+  meanLog?: number;
 }
 
 /**
  * Probability that the remaining work fits in the deployable time.
  *
- * Each task's true duration is modelled as `estimate × factor`, where `factor`
- * is log-normal with mean 1 (so estimates are unbiased on average but spread
- * either way). We sample the whole set many times and count how often the
+ * Each task's true duration is modelled as `estimate × factor`, where
+ * `log(factor)` is normal with mean `meanLog` and std dev `sigma`. By default
+ * `meanLog = -sigma²/2`, so `E[factor] = 1` (estimates unbiased on average,
+ * spread either way). Passing a fitted `meanLog` tilts it toward the user's
+ * real history. We sample the whole set many times and count how often the
  * total lands within budget.
  */
 export function forecast(
@@ -157,14 +165,15 @@ export function forecast(
 
   const iterations = options.iterations ?? DEFAULT_ITERATIONS;
   const sigma = options.sigma ?? DEFAULT_SIGMA;
-  const drift = (sigma * sigma) / 2; // keeps E[factor] = 1
+  // Default mean keeps E[factor] = 1 (unbiased); a fitted meanLog overrides it.
+  const meanLog = options.meanLog ?? -(sigma * sigma) / 2;
   const rng = mulberry32(seedFrom(open, deployable));
 
   let made = 0;
   for (let i = 0; i < iterations; i++) {
     let total = 0;
     for (const est of open) {
-      total += est * Math.exp(sigma * nextNormal(rng) - drift);
+      total += est * Math.exp(meanLog + sigma * nextNormal(rng));
     }
     if (total <= deployable) made++;
   }
