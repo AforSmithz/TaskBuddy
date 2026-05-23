@@ -18,6 +18,7 @@ import type {
   ProjectForecast,
   RecoveryPlan,
   RescheduleMove,
+  SuggestedTask,
   Task,
   TaskDependency,
   TaskStatus,
@@ -1191,4 +1192,164 @@ function buildRecoveryPlan(g: ForecastGather, project: Project): RecoveryPlan | 
     overdue,
     blocked,
   };
+}
+
+// --- LLM strategist: corrective tasks ---------------------------------------
+
+/** Everything the strategist needs to propose corrective tasks for one project. */
+export interface RecoveryContext {
+  project: Project;
+  /** Open (not done, not deferred) tasks — full rows, for prompt context. */
+  openTasks: Task[];
+  /** Deployable minutes from today through the deadline. */
+  deployable: number;
+  /** Why the project was flagged off-track. */
+  reasons: DivergenceReason[];
+  /** Current completion probability, before any suggested task. */
+  currentProbability: number;
+  /** The user's learned estimation bias — the same one the forecast uses. */
+  model: EstimationModel;
+  /** Life-area to file new tasks under (from existing tasks; "Work" by default). */
+  area: string;
+}
+
+/**
+ * Gather everything the LLM strategist needs to propose corrective tasks for
+ * one project — off the same forecast gather the deterministic recovery plan
+ * uses. Returns null when the project has no deadline or isn't flagged
+ * off-track, so the strategist never runs on a healthy project.
+ */
+export async function getRecoveryContext(
+  projectId: string,
+): Promise<RecoveryContext | null> {
+  const g = await gatherForecast();
+  const project = g.projects.find((p) => p.id === projectId);
+  if (!project || !project.deadline) return null;
+
+  const candidates = g.tasksByProject.get(projectId) ?? [];
+  const deployable = deployableMinutes({
+    today: g.today,
+    deadline: project.deadline,
+    availability: g.availability,
+    overrides: g.overrides,
+    commitments: g.commitments,
+  });
+  const fc = forecast(
+    candidates.map((t) => t.estimated_minutes),
+    deployable,
+    forecastOptions(g.model),
+  );
+
+  const allTasks = g.allTasksByProject.get(projectId) ?? [];
+  const reasons = detectDivergence(fc, project.deadline, allTasks, g.today);
+  if (reasons.length === 0) return null;
+
+  const openTasks = allTasks.filter((t) => t.status !== "done" && !t.deferred);
+  return {
+    project,
+    openTasks,
+    deployable,
+    reasons,
+    currentProbability: fc.probability,
+    model: g.model,
+    area: openTasks[0]?.area ?? "Work",
+  };
+}
+
+/**
+ * Deterministic preview: the probability the project would have if these
+ * suggested tasks were added to its open work. The forecast scores it — never
+ * the LLM. Pure given the context, so the strategist can call it without I/O.
+ */
+export function previewProbabilityWithTasks(
+  ctx: RecoveryContext,
+  tasks: SuggestedTask[],
+): number {
+  const estimates = [
+    ...ctx.openTasks.map((t) => t.estimated_minutes),
+    ...tasks.map((t) => t.estimated_minutes),
+  ];
+  return forecast(estimates, ctx.deployable, forecastOptions(ctx.model)).probability;
+}
+
+/**
+ * Persist user-accepted corrective tasks under a synthetic recovery entry
+ * (kind "plan") owned by the project. Tasks inherit the project through the
+ * entry, exactly like extracted tasks — no schema change.
+ */
+export async function addCorrectiveTasks(
+  projectId: string,
+  tasks: SuggestedTask[],
+): Promise<void> {
+  if (tasks.length === 0) return;
+  const project = await getProject(projectId);
+  if (!project) return;
+
+  const createdAt = new Date().toISOString();
+  const entryId = crypto.randomUUID();
+  const entry: Entry = {
+    id: entryId,
+    title: `Recovery — ${project.name}`,
+    raw_input: "",
+    summary: "AI-suggested corrective tasks to fill gaps in the plan.",
+    discussion_points: [],
+    stakeholders: [],
+    daily_objective: "",
+    key_deliverables: [],
+    assumptions: [],
+    risks: [],
+    kind: "plan",
+    status: "active",
+    project_id: projectId,
+    parent_entry_id: null,
+    created_at: createdAt,
+  };
+
+  const taskRows: Task[] = tasks.map((t, i) => {
+    const { score, label } = computePriority(t);
+    return {
+      id: crypto.randomUUID(),
+      entry_id: entryId,
+      title: t.title,
+      description: t.description,
+      owner: null,
+      category: null,
+      area: t.area,
+      status: (t.blocked_by ? "blocked" : "todo") as TaskStatus,
+      due_date: t.due_date,
+      estimated_minutes: t.estimated_minutes,
+      actual_minutes: 0,
+      urgency_score: t.urgency,
+      impact_score: t.impact,
+      effort_score: t.effort,
+      dependency_score: t.dependency,
+      risk_score: t.risk,
+      confidence_score: t.confidence,
+      priority_score: score,
+      priority_label: label,
+      priority_reason: t.priority_reason,
+      source_quote: null,
+      is_ai_suggested: true,
+      blocked_by: t.blocked_by,
+      deferred: false,
+      sort_index: i,
+      created_at: createdAt,
+    };
+  });
+
+  const assembled: AssembledEntry = {
+    entry,
+    decisions: [],
+    questions: [],
+    tasks: taskRows,
+    deps: [],
+  };
+  if (isSupabaseConfigured()) {
+    await persistSupabase(assembled);
+  } else {
+    await ensureSeeded();
+    const db = memDB();
+    db.entries.unshift(entry);
+    db.tasks.push(...taskRows);
+  }
 }
