@@ -18,7 +18,6 @@ import type {
   ProjectForecast,
   RecoveryPlan,
   RescheduleMove,
-  ScheduleBlock,
   Task,
   TaskDependency,
   TaskStatus,
@@ -28,7 +27,9 @@ import { estimationModel } from "./generate";
 import { computePriority } from "./priority";
 import {
   generateSchedule,
+  orderSchedulableTasks,
   type DependencyEdge,
+  type ScheduleDay,
   type SchedulableTask,
 } from "./schedule";
 import {
@@ -74,7 +75,6 @@ interface MemDB {
   questions: OpenQuestion[];
   tasks: Task[];
   deps: TaskDependency[];
-  schedule: ScheduleBlock[];
   availability: Availability[];
   overrides: AvailabilityOverride[];
   commitments: Commitment[];
@@ -97,7 +97,6 @@ function memDB(): MemDB {
       questions: [],
       tasks: [],
       deps: [],
-      schedule: [],
       availability: DEFAULT_AVAILABILITY.map((a) => ({ ...a })),
       overrides: [],
       commitments: [],
@@ -132,7 +131,6 @@ interface AssembledEntry {
   questions: OpenQuestion[];
   tasks: Task[];
   deps: TaskDependency[];
-  schedule: ScheduleBlock[];
 }
 
 export interface AssembleOptions {
@@ -154,42 +152,12 @@ export interface AssembleOptions {
   createdAt?: string;
 }
 
-/** Build the recommended schedule for a set of tasks + dependency edges. */
-function buildSchedule(
-  entryId: string,
-  tasks: Task[],
-  deps: TaskDependency[],
-): ScheduleBlock[] {
-  const planned = generateSchedule(
-    tasks.map((t) => ({
-      id: t.id,
-      title: t.title,
-      estimated_minutes: t.estimated_minutes,
-      priority_score: t.priority_score ?? 0,
-      impact_score: t.impact_score,
-      status: t.status,
-    })),
-    deps.map((d) => ({
-      task_id: d.task_id,
-      depends_on_task_id: d.depends_on_task_id,
-    })),
-  );
-  return planned.map((b) => ({
-    id: crypto.randomUUID(),
-    entry_id: entryId,
-    task_id: b.task_id,
-    label: b.label,
-    start_time: b.start_time,
-    end_time: b.end_time,
-    reason: b.reason,
-    sort_index: b.sort_index,
-  }));
-}
-
 /**
  * Runs the full pipeline on raw input:
- * extract -> score priority -> resolve dependencies -> generate schedule.
- * Every row is assigned a UUID up front so it can be persisted directly.
+ * extract -> score priority -> resolve dependencies.
+ * Every row is assigned a UUID up front so it can be persisted directly. The
+ * recommended schedule is *not* part of this — it's a derived view computed on
+ * read from live tasks + availability (see `getEntrySchedule`).
  */
 export async function assembleEntry(
   rawInput: string,
@@ -314,9 +282,7 @@ export async function assembleEntry(
     }
   }
 
-  const schedule = buildSchedule(entryId, tasks, deps);
-
-  return { entry, decisions, questions, tasks, deps, schedule };
+  return { entry, decisions, questions, tasks, deps };
 }
 
 // --- Projects ---------------------------------------------------------------
@@ -396,15 +362,14 @@ export async function createDraft(
     db.questions.push(...assembled.questions);
     db.tasks.push(...assembled.tasks);
     db.deps.push(...assembled.deps);
-    db.schedule.push(...assembled.schedule);
   }
   return assembled.entry.id;
 }
 
 /**
  * Finalise a draft: drop the declined tasks, apply the filing the user
- * confirmed in the review step (category, project, follow-up), rebuild the
- * schedule from the survivors, and flip the entry to active.
+ * confirmed in the review step (category, project, follow-up), and flip the
+ * entry to active. The schedule is derived on read, so nothing to rebuild here.
  */
 export async function confirmDraft(
   entryId: string,
@@ -428,28 +393,13 @@ export async function confirmDraft(
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
     if (declined.size) {
-      // Cascades remove dependency edges and schedule blocks for these tasks.
+      // Cascades remove dependency edges for these tasks.
       await supabase
         .from("tasks")
         .delete()
         .in("id", [...declined]);
     }
     await supabase.from("tasks").update({ area }).eq("entry_id", entryId);
-    const [{ data: tasks }, { data: deps }] = await Promise.all([
-      supabase.from("tasks").select("*").eq("entry_id", entryId),
-      supabase
-        .from("task_dependencies")
-        .select("*")
-        .eq("entry_id", entryId),
-    ]);
-    const schedule = buildSchedule(
-      entryId,
-      (tasks as Task[]) ?? [],
-      (deps as TaskDependency[]) ?? [],
-    );
-    await supabase.from("schedule_blocks").delete().eq("entry_id", entryId);
-    if (schedule.length)
-      await supabase.from("schedule_blocks").insert(schedule);
     await supabase
       .from("entries")
       .update({
@@ -471,9 +421,6 @@ export async function confirmDraft(
   );
   const survivors = db.tasks.filter((t) => t.entry_id === entryId);
   for (const t of survivors) t.area = area;
-  const deps = db.deps.filter((d) => d.entry_id === entryId);
-  db.schedule = db.schedule.filter((s) => s.entry_id !== entryId);
-  db.schedule.push(...buildSchedule(entryId, survivors, deps));
   entry.status = "active";
   entry.project_id = projectId;
   entry.parent_entry_id = parentEntryId;
@@ -494,7 +441,6 @@ export async function discardDraft(entryId: string): Promise<void> {
   db.questions = db.questions.filter((q) => q.entry_id !== entryId);
   db.tasks = db.tasks.filter((t) => t.entry_id !== entryId);
   db.deps = db.deps.filter((d) => d.entry_id !== entryId);
-  db.schedule = db.schedule.filter((s) => s.entry_id !== entryId);
 }
 
 export async function listEntries(): Promise<Entry[]> {
@@ -522,7 +468,7 @@ export async function getEntry(id: string): Promise<EntryDetail | null> {
       .eq("id", id)
       .maybeSingle();
     if (!entry) return null;
-    const [decisions, questions, tasks, deps, schedule] = await Promise.all([
+    const [decisions, questions, tasks, deps] = await Promise.all([
       supabase.from("decisions").select("*").eq("entry_id", id),
       supabase.from("open_questions").select("*").eq("entry_id", id),
       supabase
@@ -531,11 +477,6 @@ export async function getEntry(id: string): Promise<EntryDetail | null> {
         .eq("entry_id", id)
         .order("sort_index"),
       supabase.from("task_dependencies").select("*").eq("entry_id", id),
-      supabase
-        .from("schedule_blocks")
-        .select("*")
-        .eq("entry_id", id)
-        .order("sort_index"),
     ]);
     return {
       ...(entry as Entry),
@@ -543,7 +484,6 @@ export async function getEntry(id: string): Promise<EntryDetail | null> {
       open_questions: (questions.data as OpenQuestion[]) ?? [],
       tasks: (tasks.data as Task[]) ?? [],
       dependencies: (deps.data as TaskDependency[]) ?? [],
-      schedule: (schedule.data as ScheduleBlock[]) ?? [],
     };
   }
 
@@ -559,10 +499,40 @@ export async function getEntry(id: string): Promise<EntryDetail | null> {
       .filter((t) => t.entry_id === id)
       .sort((a, b) => a.sort_index - b.sort_index),
     dependencies: db.deps.filter((d) => d.entry_id === id),
-    schedule: db.schedule
-      .filter((s) => s.entry_id === id)
-      .sort((a, b) => a.sort_index - b.sort_index),
   };
+}
+
+/**
+ * The recommended schedule for an entry, derived live from its open tasks +
+ * current availability. Multi-day, anchored at today; never persisted, so it
+ * always reflects the latest estimates and time budget.
+ */
+export async function getEntrySchedule(
+  entry: EntryDetail,
+): Promise<ScheduleDay[]> {
+  const budget = await getTimeBudget();
+  const tasks: SchedulableTask[] = entry.tasks.map((t) => ({
+    id: t.id,
+    title: t.title,
+    estimated_minutes: t.estimated_minutes,
+    priority_score: t.priority_score ?? 0,
+    impact_score: t.impact_score,
+    status: t.status,
+  }));
+  const deps: DependencyEdge[] = entry.dependencies.map((d) => ({
+    task_id: d.task_id,
+    depends_on_task_id: d.depends_on_task_id,
+  }));
+  return generateSchedule(
+    tasks,
+    deps,
+    {
+      availability: budget.availability,
+      overrides: budget.overrides,
+      commitments: budget.commitments,
+    },
+    todayISO(),
+  );
 }
 
 /** All tasks belonging to active (non-draft) entries. */
@@ -662,7 +632,6 @@ async function ensureSeeded(): Promise<void> {
         db.questions.push(...assembled.questions);
         db.tasks.push(...assembled.tasks);
         db.deps.push(...assembled.deps);
-        db.schedule.push(...assembled.schedule);
       }
       db.seeded = true;
     })();
@@ -695,11 +664,6 @@ async function persistSupabase(a: AssembledEntry): Promise<void> {
     err(
       "task_dependencies",
       (await supabase.from("task_dependencies").insert(a.deps)).error,
-    );
-  if (a.schedule.length)
-    err(
-      "schedule_blocks",
-      (await supabase.from("schedule_blocks").insert(a.schedule)).error,
     );
 }
 
@@ -1181,14 +1145,10 @@ function buildRecoveryPlan(g: ForecastGather, project: Project): RecoveryPlan | 
   const edges: DependencyEdge[] = g.deps
     .filter((d) => schedIds.has(d.task_id) && schedIds.has(d.depends_on_task_id))
     .map((d) => ({ task_id: d.task_id, depends_on_task_id: d.depends_on_task_id }));
-  const seen = new Set<string>();
-  const sequence: { taskId: string; title: string }[] = [];
-  for (const b of generateSchedule(schedTasks, edges)) {
-    if (b.task_id && !seen.has(b.task_id)) {
-      seen.add(b.task_id);
-      sequence.push({ taskId: b.task_id, title: b.label });
-    }
-  }
+  const sequence = orderSchedulableTasks(schedTasks, edges).map((t) => ({
+    taskId: t.id,
+    title: t.title,
+  }));
 
   // The actual flagged tasks behind the overdue/blocked reasons, so the callout
   // can offer inline actions (reschedule / unblock) rather than just a count.
