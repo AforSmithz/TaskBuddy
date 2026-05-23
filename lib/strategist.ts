@@ -1,10 +1,20 @@
 import "server-only";
 
-import type { GapKind, RecoverySuggestion, SuggestedTask } from "./types";
+import type {
+  GapKind,
+  ModificationKind,
+  ModificationPart,
+  ModificationSuggestion,
+  RecoverySuggestion,
+  SuggestedTask,
+  TaskModification,
+} from "./types";
+import type { Task } from "./types";
 import type { ChatMessage } from "./openrouter";
 import { isLLMConfigured } from "./extraction";
 import {
   getRecoveryContext,
+  previewProbabilityWithModifications,
   previewProbabilityWithTasks,
   type RecoveryContext,
 } from "./store";
@@ -215,6 +225,251 @@ function normalizeTasks(raw: unknown, ctx: RecoveryContext): SuggestedTask[] {
       confidence: score(t.confidence),
     });
     if (out.length >= MAX_SUGGESTIONS) break;
+  }
+
+  return out;
+}
+
+// LLM strategist — Step 2: Modify.
+//
+// Generate adds net-new work; Modify reshapes the work that already exists so it
+// fits the budget. Two moves, both needing the LLM to understand what a task *is*:
+//   - scope_down: replace a task with a lighter version (smaller estimate).
+//   - split:      break a stuck monolith into smaller real steps.
+//
+// Same hard guardrail as Generate: the model proposes the reshape;
+// `previewProbabilityWithModifications` (i.e. `forecast()`) scores it, and a
+// reshape that doesn't actually improve the odds is dropped before it's shown.
+
+const MOD_KINDS: ModificationKind[] = ["scope_down", "split"];
+
+// Reshaping more than a few tasks at once stops being a recovery and starts
+// being a re-plan (that's Step 3).
+const MAX_MODIFICATIONS = 3;
+
+const MODIFY_SYSTEM_PROMPT = `You are TaskBuddy's recovery strategist. A project is off track because the open
+work doesn't fit the time budget. The deterministic engine has already tried
+deferring and re-dating. Your job is the move it can't make: reshape EXISTING
+tasks so the plan fits, without dropping the deliverable.
+
+You have two moves per task:
+- "scope_down": replace a task with a lighter version that takes less time — a
+  smaller, good-enough cut of the same work (e.g. "Full test suite" -> "Smoke
+  tests for the critical path"). The new estimate MUST be smaller than the
+  original.
+- "split": break one big, vague, or stuck task into 2-4 smaller concrete steps.
+  Splitting a fuzzy monolith into well-understood steps lowers estimation risk
+  even when the minutes are similar. The steps' total MUST NOT exceed the
+  original estimate.
+
+Return ONLY a JSON object with this exact shape (no markdown, no commentary):
+
+{
+  "rationale": string,               // one sentence: the reshaping strategy
+  "modifications": [{
+    "task_ref": string,              // the "T#" ref of the existing task to reshape
+    "kind": "scope_down"|"split",
+    "rationale": string,             // one sentence: why this reshape helps
+    "replacements": [{               // 1 item for scope_down, 2-4 for split
+      "title": string,
+      "description": string,
+      "estimated_minutes": number,
+      "urgency": number,             // 1-5
+      "impact": number,              // 1-5
+      "dependency": number,          // 1-5
+      "risk": number,                // 1-5
+      "effort": number,              // 1-5
+      "confidence": number,          // 1-5
+      "priority_reason": string      // one sentence
+    }]
+  }]
+}
+
+Rules:
+- Reshape ONLY tasks where it genuinely helps the budget. If the work simply
+  needs doing as-is, return an EMPTY modifications array. Don't pad estimates or
+  invent steps — a reshape that doesn't shrink the work or the risk is noise.
+- Only reference tasks by their given "T#" ref. Never invent a ref.
+- Reshape at most ${MAX_MODIFICATIONS} tasks — pick the ones with the most slack
+  to recover (usually the largest or most uncertain).
+- Prefer scope_down for oversized but clear work; split for big/vague/stuck work.
+- Keep titles concise and actionable; estimate minutes realistically.
+- Score each 1-5 factor honestly (urgency, impact, dependency, risk, effort,
+  confidence), same scale as the original tasks.
+- NEVER output a probability, percentage, or likelihood. You propose the reshape;
+  TaskBuddy scores the odds.`;
+
+interface RawModifications {
+  rationale?: unknown;
+  modifications?: unknown;
+}
+
+/**
+ * Reshape existing tasks to fit the budget. Returns null on the same "show
+ * nothing" conditions as Generate (LLM unconfigured, project on-track, the call
+ * fails, or nothing reshapes usefully). Every surviving modification is one the
+ * deterministic forecast confirms actually improves the odds.
+ */
+export async function generateTaskModifications(
+  projectId: string,
+): Promise<ModificationSuggestion | null> {
+  if (!isLLMConfigured()) return null;
+
+  const ctx = await getRecoveryContext(projectId);
+  if (!ctx) return null;
+
+  const { callOpenRouterJSON } = await import("./openrouter");
+
+  const messages: ChatMessage[] = [
+    { role: "system", content: MODIFY_SYSTEM_PROMPT },
+    { role: "user", content: buildModifyPrompt(ctx) },
+  ];
+
+  let raw: RawModifications;
+  try {
+    raw = await callOpenRouterJSON<RawModifications>(messages, {
+      validate: (r) => Array.isArray(r.modifications),
+    });
+  } catch (err) {
+    console.error("Strategist task modification failed:", err);
+    return null;
+  }
+
+  const mods = normalizeModifications(raw.modifications, ctx);
+  if (mods.length === 0) return null;
+
+  return {
+    projectId,
+    modifications: mods,
+    // Guardrail: the deterministic forecast scores the reshaped plan.
+    previewProbability: previewProbabilityWithModifications(ctx, mods),
+    rationale:
+      typeof raw.rationale === "string" && raw.rationale.trim()
+        ? raw.rationale.trim()
+        : "Reshape the heaviest open work to fit the budget.",
+  };
+}
+
+/** Stable "T#" ref → task, so the model points at tasks without leaking UUIDs. */
+function taskRefs(openTasks: Task[]): Map<string, Task> {
+  return new Map(openTasks.map((t, i) => [`T${i + 1}`, t]));
+}
+
+/** The open tasks (with refs + estimates) the model reshapes. */
+function buildModifyPrompt(ctx: RecoveryContext): string {
+  const today = new Date().toISOString().slice(0, 10);
+  const refs = taskRefs(ctx.openTasks);
+
+  const open = [...refs.entries()]
+    .map(([ref, t]) => {
+      const flags: string[] = [`status=${t.status}`];
+      if (t.blocked_by) flags.push(`blocked_by="${t.blocked_by}"`);
+      if (t.due_date) flags.push(`due=${t.due_date.slice(0, 10)}`);
+      return `- ${ref}: "${t.title}" (${t.estimated_minutes}m, ${flags.join(", ")})`;
+    })
+    .join("\n") || "- (no open tasks)";
+
+  const deficitH = Math.max(0, Math.round((estimateTotal(ctx) - ctx.deployable) / 60));
+
+  return [
+    `Today's date is ${today}.`,
+    `Project: "${ctx.project.name}" (deadline ${ctx.project.deadline?.slice(0, 10) ?? "none"}).`,
+    `Current probability of finishing on time: ${Math.round(ctx.currentProbability * 100)}%.`,
+    deficitH > 0
+      ? `The open work is roughly ${deficitH}h more than the time budget allows — reshaping needs to claw that back.`
+      : `The open work narrowly fits, but the plan is at risk; reshaping the riskiest work buys margin.`,
+    ``,
+    `Open tasks:`,
+    open,
+    ``,
+    `Reshape existing tasks to fit the budget, or return an empty list if none should change.`,
+  ].join("\n");
+}
+
+/** Clamp/coerce the model's modifications, resolve refs, drop the ones that don't help. */
+function normalizeModifications(
+  raw: unknown,
+  ctx: RecoveryContext,
+): TaskModification[] {
+  if (!Array.isArray(raw)) return [];
+
+  const refs = taskRefs(ctx.openTasks);
+  const score = (n: unknown): number => {
+    const v = Math.round(Number(n));
+    return Number.isFinite(v) ? Math.min(5, Math.max(1, v)) : 3;
+  };
+  const str = (x: unknown): string => (typeof x === "string" ? x.trim() : "");
+  const kindOf = (x: unknown): ModificationKind =>
+    MOD_KINDS.includes(x as ModificationKind) ? (x as ModificationKind) : "scope_down";
+
+  const part = (x: unknown): ModificationPart | null => {
+    if (typeof x !== "object" || x === null) return null;
+    const p = x as Record<string, unknown>;
+    const title = str(p.title);
+    if (!title) return null;
+    const minutes = Math.round(Number(p.estimated_minutes));
+    return {
+      title,
+      description: str(p.description),
+      estimated_minutes: Number.isFinite(minutes) && minutes > 0 ? minutes : 30,
+      priority_reason: str(p.priority_reason),
+      urgency: score(p.urgency),
+      impact: score(p.impact),
+      dependency: score(p.dependency),
+      risk: score(p.risk),
+      effort: score(p.effort),
+      confidence: score(p.confidence),
+    };
+  };
+
+  const usedTasks = new Set<string>();
+  const out: TaskModification[] = [];
+
+  for (const item of raw) {
+    if (typeof item !== "object" || item === null) continue;
+    const m = item as Record<string, unknown>;
+    const task = refs.get(str(m.task_ref));
+    // Skip unknown refs and tasks already reshaped by an earlier modification.
+    if (!task || usedTasks.has(task.id)) continue;
+
+    const kind = kindOf(m.kind);
+    const parts = Array.isArray(m.replacements)
+      ? (m.replacements.map(part).filter((p): p is ModificationPart => p !== null))
+      : [];
+
+    let replacements: ModificationPart[];
+    if (kind === "scope_down") {
+      const lighter = parts[0];
+      // A scope-down must actually be lighter than the original.
+      if (!lighter || lighter.estimated_minutes >= task.estimated_minutes) continue;
+      replacements = [lighter];
+    } else {
+      // A split needs at least two steps and must not inflate the total work.
+      if (parts.length < 2) continue;
+      const total = parts.reduce((s, p) => s + p.estimated_minutes, 0);
+      if (total > task.estimated_minutes) continue;
+      replacements = parts.slice(0, 4);
+    }
+
+    const mod: TaskModification = {
+      kind,
+      taskId: task.id,
+      taskTitle: task.title,
+      originalEstimate: task.estimated_minutes,
+      rationale: str(m.rationale),
+      replacements,
+    };
+
+    // Deterministic guardrail: only keep reshapes the forecast confirms help.
+    // Compared against the current probability with a small margin so a change
+    // that only moved by forecast discretization isn't surfaced as a fix.
+    if (previewProbabilityWithModifications(ctx, [mod]) <= ctx.currentProbability + 0.005) {
+      continue;
+    }
+
+    usedTasks.add(task.id);
+    out.push(mod);
+    if (out.length >= MAX_MODIFICATIONS) break;
   }
 
   return out;
