@@ -18,6 +18,7 @@ import type {
   Project,
   ProjectForecast,
   RecoveryPlan,
+  ReroutePart,
   RescheduleMove,
   SuggestedTask,
   Task,
@@ -1386,6 +1387,63 @@ export async function applyTaskModifications(
     project,
     "Tasks reshaped to fit the budget.",
     newRows,
+    createdAt,
+  );
+}
+
+// --- LLM strategist: re-route the whole plan --------------------------------
+
+/**
+ * Deterministic preview: the probability the project would have if its entire
+ * open plan were replaced by these alternative tasks. The forecast scores it,
+ * never the LLM. Pure given the context, so the strategist can call it without
+ * I/O.
+ */
+export function previewProbabilityWithReroute(
+  ctx: RecoveryContext,
+  tasks: { estimated_minutes: number }[],
+): number {
+  const estimates = tasks.map((t) => t.estimated_minutes);
+  return forecast(estimates, ctx.deployable, forecastOptions(ctx.model)).probability;
+}
+
+/**
+ * Apply a user-accepted re-route: defer every current open task out of the
+ * forecast (reversibly, exactly like a split's monolith) and persist the
+ * alternative approach's tasks under a synthetic recovery entry — the whole open
+ * plan swapped for a lighter route. Self-contained via the passed task ids,
+ * mirroring `applyTaskModifications`.
+ */
+export async function applyReroute(
+  projectId: string,
+  replacedTaskIds: string[],
+  tasks: ReroutePart[],
+): Promise<void> {
+  if (tasks.length === 0) return;
+  const project = await getProject(projectId);
+  if (!project) return;
+
+  const createdAt = new Date().toISOString();
+
+  // Defer the current plan; read a life-area off the originals for the new tasks.
+  let area = "Work";
+  for (const taskId of replacedTaskIds) {
+    const original = await updateTask(taskId, { deferred: true });
+    if (original?.area) area = original.area;
+  }
+
+  const taskRows = tasks.map((t, i) =>
+    buildRecoveryTaskRow(
+      { ...t, area, status: t.blocked_by ? "blocked" : "todo" },
+      "",
+      i,
+      createdAt,
+    ),
+  );
+  await persistRecoveryEntry(
+    project,
+    "Plan re-routed to a lighter approach.",
+    taskRows,
     createdAt,
   );
 }
