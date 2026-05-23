@@ -3,6 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import {
+  addCorrectiveTasks,
   confirmDraft,
   createDraft,
   createProject,
@@ -15,11 +16,14 @@ import {
   updateTask,
 } from "./store";
 import { generateFollowUp } from "./generate";
+import { generateCorrectiveTasks } from "./strategist";
 import { requireUser } from "./auth";
 import type {
   DraftClassification,
   EntryKind,
   PitCall,
+  RecoverySuggestion,
+  SuggestedTask,
   TaskStatus,
 } from "./types";
 
@@ -250,6 +254,33 @@ export async function logCommitmentAction(
       error: err instanceof Error ? err.message : "Failed to log commitment.",
     };
   }
+}
+
+/**
+ * Ask the LLM strategist for net-new corrective tasks for an off-track project.
+ * Read-only (nothing is persisted until the user accepts), so no revalidation.
+ * Returns null when there's no genuine gap to fill or the LLM is unavailable.
+ */
+export async function suggestRecoveryTasksAction(
+  projectId: string,
+): Promise<RecoverySuggestion | null> {
+  await requireUser();
+  try {
+    return await generateCorrectiveTasks(projectId);
+  } catch (err) {
+    console.error("suggestRecoveryTasks failed:", err);
+    return null;
+  }
+}
+
+/** Persist the corrective tasks the user accepted, then refresh the forecast. */
+export async function acceptRecoveryTasksAction(
+  projectId: string,
+  tasks: SuggestedTask[],
+): Promise<void> {
+  await requireUser();
+  await addCorrectiveTasks(projectId, tasks);
+  revalidateAll();
 }
 
 /** Generate a follow-up message for an entry's open questions and blockers. */
