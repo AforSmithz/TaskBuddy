@@ -407,3 +407,59 @@ export interface RecoverySuggestion {
   /** One-line explanation of the gap these tasks fill. */
   rationale: string;
 }
+
+// --- LLM strategist (existing-task modification) ----------------------------
+
+/**
+ * How the strategist reshapes an existing task to fit the budget:
+ * - "scope_down": replace it with a lighter version (a smaller estimate, trimmed
+ *   scope) — recovers the forecast by lowering the expected work.
+ * - "split": break a stuck monolith into smaller real steps — recovers the
+ *   forecast because the sum of several well-understood estimates carries less
+ *   compounding risk than one big opaque guess (even at equal total minutes).
+ */
+export type ModificationKind = "scope_down" | "split";
+
+/**
+ * One piece of the reshaped work — the lighter version of a scoped-down task, or
+ * one step of a split. Carries its own estimate + 1-5 factor ratings so it scores
+ * through `computePriority` exactly like an extracted task.
+ */
+export interface ModificationPart extends FactorScores {
+  title: string;
+  description: string;
+  estimated_minutes: number;
+  priority_reason: string;
+}
+
+/**
+ * A proposal to reshape one existing task. `replacements` holds the work that
+ * takes its place: exactly one part for "scope_down", two or more for "split".
+ */
+export interface TaskModification {
+  kind: ModificationKind;
+  /** The existing open task being reshaped. */
+  taskId: string;
+  /** Its current title, for display. */
+  taskTitle: string;
+  /** Its current estimate (minutes), for the before/after comparison. */
+  originalEstimate: number;
+  /** One-line explanation of why this reshape helps. */
+  rationale: string;
+  replacements: ModificationPart[];
+}
+
+/**
+ * The strategist's advisory output for one off-track project: existing tasks
+ * reshaped to fit the budget, plus the probability the project would have if the
+ * reshapes were applied. As with Generate, the probability is always computed by
+ * `forecast()` — the LLM proposes the reshape, never the likelihood.
+ */
+export interface ModificationSuggestion {
+  projectId: string;
+  modifications: TaskModification[];
+  /** Completion probability after applying the modifications — from `forecast()`. */
+  previewProbability: number;
+  /** One-line explanation of the reshaping strategy. */
+  rationale: string;
+}
