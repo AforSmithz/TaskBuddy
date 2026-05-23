@@ -18,6 +18,7 @@ import {
   updateTaskStatusAction,
 } from "@/lib/actions";
 import { band, formatPct } from "@/components/forecast/forecast-meter";
+import { RecoverySuggestions } from "@/components/forecast/recovery-suggestions";
 import { Button } from "@/components/ui/button";
 import { formatDate } from "@/lib/format";
 import { cn } from "@/lib/cn";
@@ -204,6 +205,9 @@ export function RecoveryCallout({ plan }: { plan: RecoveryPlan }) {
           No single move recovers this automatically — add hours or split the work.
         </p>
       )}
+
+      {/* LLM-proposed corrective tasks — loads in the background, user-approved. */}
+      <RecoverySuggestions plan={plan} />
 
       {/* Advisory re-sequence */}
       {sequence.length > 0 && (
