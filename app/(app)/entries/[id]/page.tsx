@@ -14,7 +14,7 @@ import {
   Lightbulb,
   FolderKanban,
 } from "lucide-react";
-import { getEntry, getProject } from "@/lib/store";
+import { getEntry, getEntrySchedule, getProject } from "@/lib/store";
 import { formatDate } from "@/lib/format";
 import { Card, CardHeader, CardBody } from "@/components/ui/card";
 import { Pill } from "@/components/ui/badge";
@@ -34,9 +34,10 @@ export default async function EntryPage({
   if (entry.status === "draft") redirect(`/entries/${id}/review`);
 
   const isPlan = entry.kind === "plan";
-  const project = entry.project_id
-    ? await getProject(entry.project_id)
-    : null;
+  const [project, scheduleDays] = await Promise.all([
+    entry.project_id ? getProject(entry.project_id) : Promise.resolve(null),
+    getEntrySchedule(entry),
+  ]);
 
   const countPill = (n: number) => <Pill>{n}</Pill>;
 
@@ -200,7 +201,7 @@ export default async function EntryPage({
               title="Recommended schedule"
               icon={<CalendarClock className="size-4" />}
             />
-            <ScheduleTimeline blocks={entry.schedule} />
+            <ScheduleTimeline days={scheduleDays} />
           </Card>
 
           <Card>
