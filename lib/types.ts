@@ -153,17 +153,6 @@ export interface TaskDependency {
   reason: string | null;
 }
 
-export interface ScheduleBlock {
-  id: string;
-  entry_id: string;
-  task_id: string | null;
-  label: string;
-  start_time: string;
-  end_time: string;
-  reason: string | null;
-  sort_index: number;
-}
-
 // --- Composed views ---------------------------------------------------------
 
 export interface EntryDetail extends Entry {
@@ -171,7 +160,6 @@ export interface EntryDetail extends Entry {
   open_questions: OpenQuestion[];
   tasks: Task[];
   dependencies: TaskDependency[];
-  schedule: ScheduleBlock[];
 }
 
 // --- Time budget (the deployable-hours model) -------------------------------
