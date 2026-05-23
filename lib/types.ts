@@ -285,6 +285,10 @@ export interface RecoveryPlan {
   reschedule: RescheduleMove | null;
   /** Dependency-aware order to tackle the remaining open work (advisory). */
   sequence: { taskId: string; title: string }[];
+  /** Open tasks past their due date — surfaced to reschedule or complete inline. */
+  overdue: { taskId: string; title: string; dueDate: string | null }[];
+  /** Open tasks stuck in `blocked` — surfaced to unblock inline. */
+  blocked: { taskId: string; title: string; blockedBy: string | null }[];
 }
 
 // --- LLM extraction shape (what the model is asked to return) ---------------

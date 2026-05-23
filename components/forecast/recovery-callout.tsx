@@ -7,9 +7,16 @@ import {
   CalendarClock,
   Check,
   ListOrdered,
+  Lock,
 } from "lucide-react";
 import type { RecoveryPlan } from "@/lib/types";
-import { deferTaskAction, setProjectDeadlineAction } from "@/lib/actions";
+import {
+  deferTaskAction,
+  rescheduleTaskAction,
+  setProjectDeadlineAction,
+  unblockTaskAction,
+  updateTaskStatusAction,
+} from "@/lib/actions";
 import { band, formatPct } from "@/components/forecast/forecast-meter";
 import { Button } from "@/components/ui/button";
 import { formatDate } from "@/lib/format";
@@ -58,8 +65,10 @@ export function RecoveryCallout({ plan }: { plan: RecoveryPlan }) {
   // Critical = the deadline itself is in jeopardy; warning = on time but needs
   // attention (a blocked or overdue task). Drives the framing and accent.
   const critical = plan.reasons.some((r) => r.severity === "critical");
-  // No automatic move recovers it (warning-only, or genuinely out of reach).
-  const noRecovery = plan.defer.length === 0 && !plan.reschedule;
+  const hasFlagged = plan.overdue.length > 0 || plan.blocked.length > 0;
+  // No automatic move recovers it, and there's nothing flagged to act on either.
+  const noRecovery =
+    plan.defer.length === 0 && !plan.reschedule && !hasFlagged;
 
   return (
     <div
@@ -165,12 +174,34 @@ export function RecoveryCallout({ plan }: { plan: RecoveryPlan }) {
         </p>
       )}
 
+      {/* Overdue tasks — reschedule the due date or mark done, inline. */}
+      {plan.overdue.length > 0 && (
+        <div className="mt-3.5 space-y-1.5">
+          <p className="text-[11px] font-medium uppercase tracking-wide text-[var(--color-fg-subtle)]">
+            Overdue
+          </p>
+          {plan.overdue.map((t) => (
+            <OverdueRow key={t.taskId} task={t} />
+          ))}
+        </div>
+      )}
+
+      {/* Blocked tasks — clear the blocker, inline. */}
+      {plan.blocked.length > 0 && (
+        <div className="mt-3.5 space-y-1.5">
+          <p className="text-[11px] font-medium uppercase tracking-wide text-[var(--color-fg-subtle)]">
+            Blocked
+          </p>
+          {plan.blocked.map((t) => (
+            <BlockedRow key={t.taskId} task={t} />
+          ))}
+        </div>
+      )}
+
       {/* No automatic move recovers it — tell the user what's left to do. */}
       {noRecovery && (
         <p className="mt-3.5 text-[12px] text-[var(--color-fg-muted)]">
-          {critical
-            ? "No single move recovers this automatically — add hours or split the work."
-            : "Clear the flagged tasks above to get back on track."}
+          No single move recovers this automatically — add hours or split the work.
         </p>
       )}
 
@@ -195,6 +226,107 @@ export function RecoveryCallout({ plan }: { plan: RecoveryPlan }) {
           </ol>
         </div>
       )}
+    </div>
+  );
+}
+
+/** One overdue task: reschedule its due date (inline picker) or mark it done. */
+function OverdueRow({ task }: { task: RecoveryPlan["overdue"][number] }) {
+  const [pending, startTransition] = useTransition();
+  const [applied, setApplied] = useState(false);
+  const [picking, setPicking] = useState(false);
+  const today = new Date().toISOString().slice(0, 10);
+  if (applied) return null;
+
+  function reschedule(date: string) {
+    if (!date) return;
+    startTransition(async () => {
+      await rescheduleTaskAction(task.taskId, date);
+      setApplied(true);
+    });
+  }
+  function markDone() {
+    startTransition(async () => {
+      await updateTaskStatusAction(task.taskId, "done");
+      setApplied(true);
+    });
+  }
+
+  return (
+    <div className="flex items-center gap-2 rounded-md bg-[var(--color-surface)] px-2.5 py-1.5">
+      <CalendarClock className="size-3.5 shrink-0 text-[var(--color-danger)]" />
+      <span className="min-w-0 flex-1 truncate text-[12px] text-[var(--color-fg-muted)]">
+        {task.title}
+      </span>
+      {task.dueDate && !picking && (
+        <span className="shrink-0 text-[11px] tabular-nums text-[var(--color-danger)]">
+          due {formatDate(task.dueDate)}
+        </span>
+      )}
+      {picking ? (
+        <input
+          type="date"
+          min={today}
+          autoFocus
+          disabled={pending}
+          onChange={(e) => reschedule(e.target.value)}
+          onBlur={() => setPicking(false)}
+          aria-label={`New due date for ${task.title}`}
+          className="h-8 shrink-0 rounded-sm border border-[var(--color-accent)] bg-[var(--color-surface)] px-1.5 text-[12px] text-[var(--color-fg)] focus:outline-none"
+        />
+      ) : (
+        <Button
+          variant="secondary"
+          size="sm"
+          disabled={pending}
+          onClick={() => setPicking(true)}
+        >
+          Reschedule
+        </Button>
+      )}
+      <Button
+        variant="ghost"
+        size="sm"
+        loading={pending}
+        onClick={markDone}
+        aria-label={`Mark "${task.title}" done`}
+      >
+        <Check className="size-3.5" />
+      </Button>
+    </div>
+  );
+}
+
+/** One blocked task: clear its blocker and return it to the active queue. */
+function BlockedRow({ task }: { task: RecoveryPlan["blocked"][number] }) {
+  const [pending, startTransition] = useTransition();
+  const [applied, setApplied] = useState(false);
+  if (applied) return null;
+
+  function unblock() {
+    startTransition(async () => {
+      await unblockTaskAction(task.taskId);
+      setApplied(true);
+    });
+  }
+
+  return (
+    <div className="flex items-center gap-2 rounded-md bg-[var(--color-surface)] px-2.5 py-1.5">
+      <Lock className="size-3.5 shrink-0 text-[var(--color-status-blocked-fg)]" />
+      <span className="min-w-0 flex-1 truncate text-[12px] text-[var(--color-fg-muted)]">
+        {task.title}
+        {task.blockedBy && (
+          <span className="text-[var(--color-fg-subtle)]"> · {task.blockedBy}</span>
+        )}
+      </span>
+      <Button
+        variant="secondary"
+        size="sm"
+        loading={pending}
+        onClick={unblock}
+      >
+        Unblock
+      </Button>
     </div>
   );
 }

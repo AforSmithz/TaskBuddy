@@ -162,6 +162,26 @@ export async function deferTaskAction(
   revalidateAll();
 }
 
+/**
+ * Push a task's due date (e.g. to clear an "overdue" flag). Note this does not
+ * affect the completion forecast — only the project deadline + estimates do.
+ */
+export async function rescheduleTaskAction(
+  taskId: string,
+  dueDate: string,
+): Promise<void> {
+  await requireUser();
+  await updateTask(taskId, { due_date: dueDate });
+  revalidateAll();
+}
+
+/** Clear a task's blocker and return it to the active queue. */
+export async function unblockTaskAction(taskId: string): Promise<void> {
+  await requireUser();
+  await updateTask(taskId, { status: "todo", blocked_by: null });
+  revalidateAll();
+}
+
 /** Record actual time spent on a task (estimated vs actual tracking). */
 export async function logActualTimeAction(
   taskId: string,

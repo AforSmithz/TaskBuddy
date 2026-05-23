@@ -615,7 +615,10 @@ export async function listAllDependencies(): Promise<TaskDependency[]> {
 export async function updateTask(
   id: string,
   patch: Partial<
-    Pick<Task, "status" | "actual_minutes" | "blocked_by" | "area" | "deferred">
+    Pick<
+      Task,
+      "status" | "actual_minutes" | "blocked_by" | "area" | "deferred" | "due_date"
+    >
   >,
 ): Promise<Task | null> {
   if (isSupabaseConfigured()) {
@@ -1167,6 +1170,16 @@ function buildRecoveryPlan(g: ForecastGather, project: Project): RecoveryPlan | 
     }
   }
 
+  // The actual flagged tasks behind the overdue/blocked reasons, so the callout
+  // can offer inline actions (reschedule / unblock) rather than just a count.
+  const openTasks = allTasks.filter((t) => t.status !== "done" && !t.deferred);
+  const overdue = openTasks
+    .filter((t) => t.due_date && t.due_date.slice(0, 10) < g.today)
+    .map((t) => ({ taskId: t.id, title: t.title, dueDate: t.due_date }));
+  const blocked = openTasks
+    .filter((t) => t.status === "blocked")
+    .map((t) => ({ taskId: t.id, title: t.title, blockedBy: t.blocked_by }));
+
   return {
     projectId: project.id,
     projectName: project.name,
@@ -1175,5 +1188,7 @@ function buildRecoveryPlan(g: ForecastGather, project: Project): RecoveryPlan | 
     defer,
     reschedule,
     sequence,
+    overdue,
+    blocked,
   };
 }
