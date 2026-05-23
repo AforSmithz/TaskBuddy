@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import {
   addCorrectiveTasks,
+  applyReroute,
   applyTaskModifications,
   confirmDraft,
   createDraft,
@@ -19,6 +20,7 @@ import {
 import { generateFollowUp } from "./generate";
 import {
   generateCorrectiveTasks,
+  generateReroute,
   generateTaskModifications,
 } from "./strategist";
 import { requireUser } from "./auth";
@@ -28,6 +30,8 @@ import type {
   ModificationSuggestion,
   PitCall,
   RecoverySuggestion,
+  ReroutePart,
+  RerouteSuggestion,
   SuggestedTask,
   TaskModification,
   TaskStatus,
@@ -313,6 +317,38 @@ export async function applyModificationsAction(
 ): Promise<void> {
   await requireUser();
   await applyTaskModifications(projectId, mods);
+  revalidateAll();
+}
+
+/**
+ * Ask the LLM strategist for a whole-plan re-route — a different approach to the
+ * same deliverable — when the current path won't fit. Read-only; nothing is
+ * persisted until the user switches. Returns null when no genuinely lighter route
+ * exists or the forecast says it wouldn't meaningfully help.
+ */
+export async function suggestRerouteAction(
+  projectId: string,
+): Promise<RerouteSuggestion | null> {
+  await requireUser();
+  try {
+    return await generateReroute(projectId);
+  } catch (err) {
+    console.error("suggestReroute failed:", err);
+    return null;
+  }
+}
+
+/**
+ * Switch the project to the accepted alternative plan: defer the current open
+ * tasks and add the new approach's tasks, then refresh the forecast.
+ */
+export async function applyRerouteAction(
+  projectId: string,
+  replacedTaskIds: string[],
+  tasks: ReroutePart[],
+): Promise<void> {
+  await requireUser();
+  await applyReroute(projectId, replacedTaskIds, tasks);
   revalidateAll();
 }
 
