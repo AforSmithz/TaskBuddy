@@ -6,6 +6,8 @@ import type {
   ModificationPart,
   ModificationSuggestion,
   RecoverySuggestion,
+  ReroutePart,
+  RerouteSuggestion,
   SuggestedTask,
   TaskModification,
 } from "./types";
@@ -15,6 +17,7 @@ import { isLLMConfigured } from "./extraction";
 import {
   getRecoveryContext,
   previewProbabilityWithModifications,
+  previewProbabilityWithReroute,
   previewProbabilityWithTasks,
   type RecoveryContext,
 } from "./store";
@@ -470,6 +473,215 @@ function normalizeModifications(
     usedTasks.add(task.id);
     out.push(mod);
     if (out.length >= MAX_MODIFICATIONS) break;
+  }
+
+  return out;
+}
+
+// LLM strategist — Step 3: Re-route.
+//
+// Generate adds, Modify reshapes — both keep the current plan's *approach*. This
+// is the boldest move: when the path itself won't fit, replace the entire open
+// plan with a different way to hit the same deliverable (buy vs build, a managed
+// service vs custom, a template vs from-scratch). All-or-nothing — the user
+// switches to the new approach or keeps the old one.
+//
+// The division of labour: the LLM judges *whether* a genuinely lighter route
+// exists and *what* it is (returning nothing when the plan only needs trimming —
+// that's Modify's job). `previewProbabilityWithReroute` (i.e. `forecast()`) is
+// the sole authority on whether the alternative is actually better; a re-route
+// that doesn't clear the current odds by a real margin is dropped before it's
+// shown. As always, the model never emits a probability.
+
+// A whole new plan can run a little longer than Generate's gap-fill, but a
+// re-route with a dozen tasks isn't a route, it's another monolith.
+const MAX_REROUTE_TASKS = 6;
+
+// A whole-plan swap should clearly help, not move the needle by a rounding step,
+// so the bar is well above Modify's 0.005.
+const REROUTE_MIN_GAIN = 0.05;
+
+const REROUTE_SYSTEM_PROMPT = `You are TaskBuddy's recovery strategist. A project is off track because its
+current plan — the approach itself — won't fit the time budget before the
+deadline. The deterministic engine has already tried rearranging the work, and
+the other strategist moves add or reshape individual tasks. Your job is the
+boldest move: propose a COMPLETE alternative plan that hits the SAME deliverable
+by a fundamentally DIFFERENT approach that takes materially less work.
+
+Think buy-vs-build: a managed service instead of a custom one, a template or
+library instead of from-scratch, a narrower good-enough cut of the goal. The new
+plan replaces the entire current plan.
+
+Return ONLY a JSON object with this exact shape (no markdown, no commentary):
+
+{
+  "approach": string,            // short name of the alternative (e.g. "Use a managed auth provider")
+  "rationale": string,           // one sentence: how it differs and why it fits the budget
+  "tasks": [{
+    "title": string,
+    "description": string,
+    "estimated_minutes": number,
+    "due_date": string|null,     // ISO date YYYY-MM-DD or null
+    "blocked_by": string|null,   // short note if this task is itself blocked
+    "urgency": number,           // 1-5
+    "impact": number,            // 1-5
+    "dependency": number,        // 1-5
+    "risk": number,              // 1-5
+    "effort": number,            // 1-5
+    "confidence": number,        // 1-5
+    "priority_reason": string    // one sentence explaining the priority
+  }]
+}
+
+Rules:
+- Propose a re-route ONLY when a genuinely different approach exists that takes
+  materially less work. If the current tasks just need trimming, splitting, or
+  reordering, return an EMPTY tasks array — that is a different move, not yours.
+- The new plan must reach the SAME deliverable. Don't quietly drop the goal.
+- The new plan's total estimated time must be clearly less than the current
+  plan's, or the re-route is pointless.
+- Keep it to a handful of concrete, actionable tasks. Estimate minutes honestly.
+- Score each 1-5 factor (urgency, impact, dependency, risk, effort, confidence),
+  same scale as the original tasks.
+- NEVER output a probability, percentage, or likelihood. You propose the route;
+  TaskBuddy scores the odds.`;
+
+interface RawReroute {
+  approach?: unknown;
+  rationale?: unknown;
+  tasks?: unknown;
+}
+
+/**
+ * Propose a whole-plan alternative for an off-track project. Returns null on the
+ * same "show nothing" conditions as the other moves (LLM unconfigured, project
+ * on-track, the call fails, the model finds no genuine alternative) — and also
+ * when the deterministic forecast says the proposed route doesn't beat the
+ * current odds by a real margin. The probability is always `forecast()`'s.
+ */
+export async function generateReroute(
+  projectId: string,
+): Promise<RerouteSuggestion | null> {
+  if (!isLLMConfigured()) return null;
+
+  const ctx = await getRecoveryContext(projectId);
+  if (!ctx) return null;
+
+  const { callOpenRouterJSON } = await import("./openrouter");
+
+  const messages: ChatMessage[] = [
+    { role: "system", content: REROUTE_SYSTEM_PROMPT },
+    { role: "user", content: buildReroutePrompt(ctx) },
+  ];
+
+  let raw: RawReroute;
+  try {
+    raw = await callOpenRouterJSON<RawReroute>(messages, {
+      validate: (r) => Array.isArray(r.tasks),
+    });
+  } catch (err) {
+    console.error("Strategist re-route failed:", err);
+    return null;
+  }
+
+  const tasks = normalizeReroute(raw.tasks);
+  if (tasks.length === 0) return null;
+
+  const previewProbability = previewProbabilityWithReroute(ctx, tasks);
+  // Deterministic guardrail: a whole-plan swap only earns its place if the
+  // forecast says it clearly improves the odds.
+  if (previewProbability <= ctx.currentProbability + REROUTE_MIN_GAIN) {
+    return null;
+  }
+
+  return {
+    projectId,
+    approach:
+      typeof raw.approach === "string" && raw.approach.trim()
+        ? raw.approach.trim()
+        : "A lighter approach to the same goal",
+    rationale:
+      typeof raw.rationale === "string" && raw.rationale.trim()
+        ? raw.rationale.trim()
+        : "Replace the current plan with a lighter route to the same deliverable.",
+    tasks,
+    replaces: ctx.openTasks.map((t) => ({
+      taskId: t.id,
+      title: t.title,
+      estimated_minutes: t.estimated_minutes,
+    })),
+    previewProbability,
+  };
+}
+
+/** The deliverable + the full open plan (with descriptions) the model re-routes. */
+function buildReroutePrompt(ctx: RecoveryContext): string {
+  const today = new Date().toISOString().slice(0, 10);
+
+  // Descriptions matter here: re-routing needs the substance of the work to
+  // infer the deliverable and find a different way to reach it.
+  const open = ctx.openTasks
+    .map((t) => {
+      const desc = t.description?.trim() ? ` — ${t.description.trim()}` : "";
+      return `- "${t.title}" (${t.estimated_minutes}m)${desc}`;
+    })
+    .join("\n") || "- (no open tasks)";
+
+  const deficitH = Math.max(0, Math.round((estimateTotal(ctx) - ctx.deployable) / 60));
+
+  return [
+    `Today's date is ${today}.`,
+    `Project: "${ctx.project.name}" (deadline ${ctx.project.deadline?.slice(0, 10) ?? "none"}).`,
+    `Current probability of finishing on time: ${Math.round(ctx.currentProbability * 100)}%.`,
+    deficitH > 0
+      ? `The current plan is roughly ${deficitH}h more work than the budget allows — a re-route must claw most of that back.`
+      : `The current plan narrowly fits but is at risk; a lighter route buys real margin.`,
+    ``,
+    `The current plan (this is what a re-route would replace):`,
+    open,
+    ``,
+    `Propose a complete alternative plan that reaches the same deliverable with materially less work, or an empty list if no genuinely different approach exists.`,
+  ].join("\n");
+}
+
+/** Clamp/coerce the model's alternative tasks into ReroutePart, dedup, cap the count. */
+function normalizeReroute(raw: unknown): ReroutePart[] {
+  if (!Array.isArray(raw)) return [];
+
+  const score = (n: unknown): number => {
+    const v = Math.round(Number(n));
+    return Number.isFinite(v) ? Math.min(5, Math.max(1, v)) : 3;
+  };
+  const str = (x: unknown): string => (typeof x === "string" ? x.trim() : "");
+
+  const seen = new Set<string>();
+  const out: ReroutePart[] = [];
+
+  for (const item of raw) {
+    if (typeof item !== "object" || item === null) continue;
+    const t = item as Record<string, unknown>;
+    const title = str(t.title);
+    if (!title) continue;
+    const key = title.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    const minutes = Math.round(Number(t.estimated_minutes));
+    out.push({
+      title,
+      description: str(t.description),
+      estimated_minutes: Number.isFinite(minutes) && minutes > 0 ? minutes : 30,
+      due_date: str(t.due_date) || null,
+      blocked_by: str(t.blocked_by) || null,
+      priority_reason: str(t.priority_reason),
+      urgency: score(t.urgency),
+      impact: score(t.impact),
+      dependency: score(t.dependency),
+      risk: score(t.risk),
+      effort: score(t.effort),
+      confidence: score(t.confidence),
+    });
+    if (out.length >= MAX_REROUTE_TASKS) break;
   }
 
   return out;
