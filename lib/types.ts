@@ -192,6 +192,23 @@ export interface Commitment {
 
 // --- Forecast (the completion-probability engine) ---------------------------
 
+/**
+ * The completion probability at or above which a project counts as "on track".
+ * A single shared definition so the forecast meter, the on-track pill, and the
+ * divergence detector all draw the line in the same place (the recovery plan
+ * also aims to restore a project to this number).
+ */
+export const ON_TRACK_PROBABILITY = 0.8;
+
+/**
+ * Whether a probability counts as on track — compared on the same rounded
+ * percentage the user actually sees, so a value that displays as "80%" reads as
+ * on track everywhere, with no off-by-a-rounding-step contradiction at the edge.
+ */
+export function isOnTrack(probability: number): boolean {
+  return Math.round(probability * 100) >= Math.round(ON_TRACK_PROBABILITY * 100);
+}
+
 /** The headline output of the forecast for a single project. */
 export interface ForecastResult {
   /** P(finish all open work before the deadline), 0–1. */
