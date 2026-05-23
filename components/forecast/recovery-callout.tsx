@@ -19,6 +19,7 @@ import {
 } from "@/lib/actions";
 import { band, formatPct } from "@/components/forecast/forecast-meter";
 import { RecoveryModifications } from "@/components/forecast/recovery-modifications";
+import { RecoveryReroute } from "@/components/forecast/recovery-reroute";
 import { RecoverySuggestions } from "@/components/forecast/recovery-suggestions";
 import { Button } from "@/components/ui/button";
 import { formatDate } from "@/lib/format";
@@ -212,6 +213,9 @@ export function RecoveryCallout({ plan }: { plan: RecoveryPlan }) {
 
       {/* LLM-reshaped existing tasks (scope down / split) — also user-approved. */}
       <RecoveryModifications plan={plan} />
+
+      {/* LLM whole-plan re-route (a different approach) — the boldest move, last. */}
+      <RecoveryReroute plan={plan} />
 
       {/* Advisory re-sequence */}
       {sequence.length > 0 && (
