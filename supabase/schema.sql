@@ -126,28 +126,14 @@ create table if not exists task_dependencies (
 );
 
 -- ---------------------------------------------------------------------------
--- Schedule blocks: deterministic recommended schedule for an entry's tasks.
--- ---------------------------------------------------------------------------
-create table if not exists schedule_blocks (
-  id          uuid primary key default gen_random_uuid(),
-  entry_id    uuid not null references entries(id) on delete cascade,
-  task_id     uuid references tasks(id) on delete cascade,
-  label       text not null,
-  start_time  text not null,                       -- "09:00"
-  end_time    text not null,                       -- "10:30"
-  reason      text,
-  sort_index  integer default 0
-);
-
-create index if not exists schedule_entry_id_idx on schedule_blocks(entry_id);
-
--- ---------------------------------------------------------------------------
 -- Row Level Security: each user sees only their own data.
 --   * projects & entries are owned directly via user_id
---   * child tables (decisions, open_questions, tasks, task_dependencies,
---     schedule_blocks) inherit ownership through their parent entry
+--   * child tables (decisions, open_questions, tasks, task_dependencies)
+--     inherit ownership through their parent entry
 -- The app connects with the publishable (anon) key carrying the user's
 -- session, so these policies — not application code — enforce isolation.
+-- (The recommended schedule is derived on read, not stored, so there's no
+-- schedule_blocks table.)
 -- ---------------------------------------------------------------------------
 alter table projects          enable row level security;
 alter table entries           enable row level security;
@@ -155,7 +141,6 @@ alter table decisions         enable row level security;
 alter table open_questions    enable row level security;
 alter table tasks             enable row level security;
 alter table task_dependencies enable row level security;
-alter table schedule_blocks   enable row level security;
 
 drop policy if exists projects_owner on projects;
 create policy projects_owner on projects
@@ -202,14 +187,6 @@ create policy task_dependencies_owner on task_dependencies
                  where e.id = task_dependencies.entry_id and e.user_id = auth.uid()))
   with check (exists (select 1 from entries e
                       where e.id = task_dependencies.entry_id and e.user_id = auth.uid()));
-
-drop policy if exists schedule_blocks_owner on schedule_blocks;
-create policy schedule_blocks_owner on schedule_blocks
-  for all
-  using (exists (select 1 from entries e
-                 where e.id = schedule_blocks.entry_id and e.user_id = auth.uid()))
-  with check (exists (select 1 from entries e
-                      where e.id = schedule_blocks.entry_id and e.user_id = auth.uid()));
 
 -- ===========================================================================
 -- Phase 1 — the strategy layer: a finish line + a time budget, which together
