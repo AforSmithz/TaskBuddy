@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import {
   addCorrectiveTasks,
+  applyTaskModifications,
   confirmDraft,
   createDraft,
   createProject,
@@ -16,14 +17,19 @@ import {
   updateTask,
 } from "./store";
 import { generateFollowUp } from "./generate";
-import { generateCorrectiveTasks } from "./strategist";
+import {
+  generateCorrectiveTasks,
+  generateTaskModifications,
+} from "./strategist";
 import { requireUser } from "./auth";
 import type {
   DraftClassification,
   EntryKind,
+  ModificationSuggestion,
   PitCall,
   RecoverySuggestion,
   SuggestedTask,
+  TaskModification,
   TaskStatus,
 } from "./types";
 
@@ -280,6 +286,33 @@ export async function acceptRecoveryTasksAction(
 ): Promise<void> {
   await requireUser();
   await addCorrectiveTasks(projectId, tasks);
+  revalidateAll();
+}
+
+/**
+ * Ask the LLM strategist to reshape existing tasks (scope down / split) so an
+ * off-track project fits its budget. Read-only — nothing is persisted until the
+ * user accepts. Returns null when no reshape usefully improves the odds.
+ */
+export async function suggestModificationsAction(
+  projectId: string,
+): Promise<ModificationSuggestion | null> {
+  await requireUser();
+  try {
+    return await generateTaskModifications(projectId);
+  } catch (err) {
+    console.error("suggestModifications failed:", err);
+    return null;
+  }
+}
+
+/** Apply the task reshapes the user accepted, then refresh the forecast. */
+export async function applyModificationsAction(
+  projectId: string,
+  mods: TaskModification[],
+): Promise<void> {
+  await requireUser();
+  await applyTaskModifications(projectId, mods);
   revalidateAll();
 }
 
