@@ -35,6 +35,9 @@ export interface ScheduledBlock {
   label: string;
   minutes: number;
   reason: string;
+  /** Owning project, set only on global (cross-project) schedules. */
+  projectId?: string | null;
+  projectName?: string;
 }
 
 /** A day's worth of work, sized to that day's real deployable capacity. */
@@ -169,26 +172,26 @@ function reasonFor(
   return `Scheduled here because it ${parts.join(", ")}.`;
 }
 
-// --- Multi-day packing ------------------------------------------------------
+// --- Reusable day-capacity + packing core -----------------------------------
+
+/** One day's deployable capacity, in calendar order from an anchor date. */
+export interface DayCapacity {
+  iso: string;
+  capacityMinutes: number;
+}
 
 /**
- * Build a recommended schedule, spread across real days from `anchorDate`.
- *
- * Tasks are ordered (dependency + score), then greedily packed: each task fills
- * the current day until it would overflow, then rolls to the next day that has
- * any deployable time (skipping weekends / fully-committed days). A task larger
- * than a whole day is placed on a fresh day and allowed to overrun it. A closing
- * review buffer caps the last day.
+ * Deployable minutes for each day from `anchorDate` forward across `horizonDays`:
+ * (override ?? weekday template) − commitments, floored at 0. Zero-capacity days
+ * (weekends / fully-committed) are kept so a caller can index by day offset. This
+ * is the same per-day math the forecast's `deployableMinutes` sums — exposed here
+ * as a per-day series the packer and the global Monte Carlo both walk.
  */
-export function generateSchedule(
-  tasks: SchedulableTask[],
-  dependencies: DependencyEdge[],
+export function dayCapacities(
   budget: ScheduleBudget,
   anchorDate: string,
-): ScheduleDay[] {
-  const { order, unblockCount, prereqs } = planOrder(tasks, dependencies);
-  if (order.length === 0) return [];
-
+  horizonDays = HORIZON_DAYS,
+): DayCapacity[] {
   const template = new Map<number, number>();
   for (const a of budget.availability) template.set(a.weekday, a.hours);
   const overrideByDate = new Map<string, number>();
@@ -202,67 +205,222 @@ export function generateSchedule(
   }
 
   const start = parseISODate(anchorDate);
-  const capacityAt = (offset: number): { iso: string; cap: number } => {
+  const out: DayCapacity[] = [];
+  for (let offset = 0; offset <= horizonDays; offset++) {
     const d = new Date(start);
     d.setUTCDate(d.getUTCDate() + offset);
     const iso = toISODate(d);
     const base = overrideByDate.get(iso) ?? template.get(d.getUTCDay()) ?? 0;
     const consumed = consumedByDate.get(iso) ?? 0;
-    return { iso, cap: Math.round(Math.max(0, base - consumed) * MINUTES_PER_HOUR) };
-  };
-
-  const days: ScheduleDay[] = [];
-  let offset = 0;
-  // Open the next day that actually has time; null once past the horizon.
-  const openNextDay = (): ScheduleDay | null => {
-    while (offset <= HORIZON_DAYS) {
-      const { iso, cap } = capacityAt(offset);
-      offset++;
-      if (cap > 0) {
-        const day: ScheduleDay = {
-          date: iso,
-          capacityMinutes: cap,
-          usedMinutes: 0,
-          blocks: [],
-        };
-        days.push(day);
-        return day;
-      }
-    }
-    return null;
-  };
-
-  let current = openNextDay();
-  if (!current) return []; // no deployable time anywhere in the horizon
-
-  for (const task of order) {
-    const duration = Math.max(15, task.estimated_minutes || 30);
-    // Roll to the next day when this won't fit — but never strand a day empty
-    // (an oversized task stays put and overruns rather than looping forever).
-    if (
-      current.usedMinutes > 0 &&
-      current.usedMinutes + duration > current.capacityMinutes
-    ) {
-      current = openNextDay() ?? current;
-    }
-    current.blocks.push({
-      task_id: task.id,
-      label: task.title,
-      minutes: duration,
-      reason: reasonFor(task, unblockCount, prereqs),
+    out.push({
+      iso,
+      capacityMinutes: Math.round(Math.max(0, base - consumed) * MINUTES_PER_HOUR),
     });
-    current.usedMinutes += duration;
+  }
+  return out;
+}
+
+/** Index of the first day at or after `from` that has any capacity. */
+function firstOpenDay(capacities: DayCapacity[], from: number): number {
+  let i = from;
+  while (i < capacities.length && capacities[i].capacityMinutes <= 0) i++;
+  return i;
+}
+
+/**
+ * Greedy packing core: walk `durations` (already in the order to schedule) across
+ * the day capacities and return the 0-based day offset each item lands on. Each
+ * item fills the current day until it would overflow, then rolls to the next day
+ * with capacity; an item larger than a whole day stays on a fresh day and overruns
+ * it (never loops). Items that run past the horizon pin to the last day.
+ *
+ * Pure numbers, no allocation beyond the result — this is the hot path the global
+ * Monte Carlo calls once per iteration, so it takes raw durations (the caller
+ * decides any flooring/defaulting) and never builds block objects.
+ */
+export function packOffsets(
+  durations: number[],
+  capacities: DayCapacity[],
+): number[] {
+  const offsets = new Array<number>(durations.length).fill(0);
+  if (capacities.length === 0) return offsets;
+
+  let dayIdx = firstOpenDay(capacities, 0);
+  // No deployable time anywhere — everything lands on the final day (overrun).
+  if (dayIdx >= capacities.length) return offsets.fill(capacities.length - 1);
+
+  let used = 0;
+  for (let k = 0; k < durations.length; k++) {
+    const duration = durations[k];
+    if (
+      used > 0 &&
+      used + duration > capacities[dayIdx].capacityMinutes
+    ) {
+      const next = firstOpenDay(capacities, dayIdx + 1);
+      if (next < capacities.length) {
+        dayIdx = next;
+        used = 0;
+      }
+      // else: past the horizon — stay on the current day and overrun it.
+    }
+    offsets[k] = dayIdx;
+    used += duration;
+  }
+  return offsets;
+}
+
+/**
+ * Time-accurate finish offsets: walk `durations` (in order) and flow each task's
+ * minutes across day capacities as a continuous resource — a task longer than a
+ * day's remaining time spills into the following days, finishing on the day its
+ * last minute lands. This is the multi-day generalisation of "does the work fit
+ * in the budget?" the forecast needs (unlike `packOffsets`, which keeps an
+ * oversized task as one overrunning block for display). Equivalent to the old
+ * sum-vs-deployable check for a single project, but honours real per-day capacity
+ * and cross-project contention. Items past the horizon pin to the last day.
+ */
+export function flowFinishOffsets(
+  durations: number[],
+  capacities: DayCapacity[],
+): number[] {
+  const offsets = new Array<number>(durations.length).fill(0);
+  if (capacities.length === 0) return offsets;
+
+  let dayIdx = firstOpenDay(capacities, 0);
+  if (dayIdx >= capacities.length) return offsets.fill(capacities.length - 1);
+
+  let remaining = capacities[dayIdx].capacityMinutes;
+  for (let k = 0; k < durations.length; k++) {
+    let need = durations[k];
+    while (need > remaining) {
+      const next = firstOpenDay(capacities, dayIdx + 1);
+      if (next >= capacities.length) {
+        // Out of budget — this task and everything after it spill past the horizon.
+        for (let j = k; j < durations.length; j++) offsets[j] = capacities.length - 1;
+        return offsets;
+      }
+      need -= remaining;
+      dayIdx = next;
+      remaining = capacities[dayIdx].capacityMinutes;
+    }
+    remaining -= need;
+    offsets[k] = dayIdx;
+  }
+  return offsets;
+}
+
+/** One item to pack: a task block's display metadata plus its base estimate. */
+export interface PackItem {
+  taskId: string;
+  label: string;
+  reason: string;
+  estimatedMinutes: number;
+  /** Owning project, set on global (cross-project) packs. */
+  projectId?: string | null;
+  projectName?: string;
+}
+
+export interface PackResult {
+  days: ScheduleDay[];
+  /** taskId → 0-based day offset from the anchor where its block landed. */
+  finishOffsetByTask: Map<string, number>;
+}
+
+/**
+ * Pack `items` into real days using `packOffsets`, building the rich
+ * `ScheduleDay[]` view. `durationOf` supplies each item's minutes — a point
+ * estimate for a deterministic schedule, a sampled duration inside a simulation.
+ * With `reviewBuffer`, a closing buffer caps the last day with work.
+ */
+export function packBlocks(
+  items: PackItem[],
+  capacities: DayCapacity[],
+  durationOf: (item: PackItem) => number,
+  opts: { reviewBuffer?: boolean } = {},
+): PackResult {
+  // No deployable time anywhere in the horizon — no schedule to show.
+  if (items.length === 0 || firstOpenDay(capacities, 0) >= capacities.length) {
+    return { days: [], finishOffsetByTask: new Map() };
   }
 
-  // Closing review/admin buffer on the last day with work.
-  const last = days[days.length - 1];
-  last.blocks.push({
-    task_id: null,
-    label: "Review & follow-up buffer",
-    minutes: REVIEW_BUFFER_MINUTES,
-    reason: "Reserved time to review progress and send follow-up messages.",
-  });
-  last.usedMinutes += REVIEW_BUFFER_MINUTES;
+  const durations = items.map(durationOf);
+  const offsets = packOffsets(durations, capacities);
 
-  return days;
+  const days: ScheduleDay[] = [];
+  const dayByOffset = new Map<number, ScheduleDay>();
+  const finishOffsetByTask = new Map<string, number>();
+
+  // Offsets are non-decreasing, so days are pushed in calendar order.
+  for (let k = 0; k < items.length; k++) {
+    const off = offsets[k];
+    let day = dayByOffset.get(off);
+    if (!day) {
+      const cap = capacities[off];
+      day = { date: cap.iso, capacityMinutes: cap.capacityMinutes, usedMinutes: 0, blocks: [] };
+      dayByOffset.set(off, day);
+      days.push(day);
+    }
+    const item = items[k];
+    const block: ScheduledBlock = {
+      task_id: item.taskId,
+      label: item.label,
+      minutes: durations[k],
+      reason: item.reason,
+    };
+    if (item.projectId !== undefined) {
+      block.projectId = item.projectId;
+      block.projectName = item.projectName;
+    }
+    day.blocks.push(block);
+    day.usedMinutes += durations[k];
+    finishOffsetByTask.set(item.taskId, off);
+  }
+
+  if (opts.reviewBuffer && days.length > 0) {
+    const last = days[days.length - 1];
+    last.blocks.push({
+      task_id: null,
+      label: "Review & follow-up buffer",
+      minutes: REVIEW_BUFFER_MINUTES,
+      reason: "Reserved time to review progress and send follow-up messages.",
+    });
+    last.usedMinutes += REVIEW_BUFFER_MINUTES;
+  }
+
+  return { days, finishOffsetByTask };
+}
+
+// --- Multi-day packing ------------------------------------------------------
+
+/**
+ * Build a recommended schedule, spread across real days from `anchorDate`.
+ *
+ * Tasks are ordered (dependency + score), then greedily packed across real days
+ * (skipping weekends / fully-committed days). A task larger than a whole day is
+ * placed on a fresh day and allowed to overrun it. A closing review buffer caps
+ * the last day.
+ */
+export function generateSchedule(
+  tasks: SchedulableTask[],
+  dependencies: DependencyEdge[],
+  budget: ScheduleBudget,
+  anchorDate: string,
+): ScheduleDay[] {
+  const { order, unblockCount, prereqs } = planOrder(tasks, dependencies);
+  if (order.length === 0) return [];
+
+  const capacities = dayCapacities(budget, anchorDate);
+  const items: PackItem[] = order.map((t) => ({
+    taskId: t.id,
+    label: t.title,
+    reason: reasonFor(t, unblockCount, prereqs),
+    estimatedMinutes: t.estimated_minutes,
+  }));
+
+  return packBlocks(
+    items,
+    capacities,
+    (it) => Math.max(15, it.estimatedMinutes || 30),
+    { reviewBuffer: true },
+  ).days;
 }
