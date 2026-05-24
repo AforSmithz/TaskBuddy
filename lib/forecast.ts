@@ -5,6 +5,7 @@ import type {
   ForecastResult,
   RecoveryMove,
 } from "./types";
+import { flowFinishOffsets, type DayCapacity } from "./schedule";
 
 // The forecast engine — TaskBuddy's "will I make it, and how sure?" number.
 //
@@ -179,6 +180,104 @@ export function forecast(
   }
 
   return { ...base, probability: made / iterations };
+}
+
+// --- Global (contention-aware) forecast -------------------------------------
+
+/** Whole days from ISO date `a` to ISO date `b` (UTC, b − a). */
+function daysBetweenISO(a: string, b: string): number {
+  const da = Date.parse(`${a.slice(0, 10)}T00:00:00Z`);
+  const db = Date.parse(`${b.slice(0, 10)}T00:00:00Z`);
+  return Math.round((db - da) / 86_400_000);
+}
+
+/** One task's place in the global order, as the simulation needs to see it. */
+export interface GlobalForecastTask {
+  taskId: string;
+  estimatedMinutes: number;
+  projectId: string;
+}
+
+/**
+ * Contention-aware completion odds for every deadlined project, from ONE seeded
+ * joint Monte Carlo over the global order. This is `forecast()` generalised to
+ * the whole timeline: instead of asking per project "does my work fit in my
+ * budget?", each iteration samples every open task's true duration, walks the
+ * single global order across the real day-by-day capacities (so projects compete
+ * for the same hours), and records for each project whether its last task lands
+ * on or before its deadline. One run answers all projects from the *same* sampled
+ * future, so the odds are mutually coherent and capture the cascade where a
+ * shared early overrun pushes every downstream project later.
+ *
+ * Same seeded RNG + log-normal estimation model as `forecast()` — the Monte
+ * Carlo still owns the odds; contention only changes which work competes and how
+ * much time is left before each deadline. With a single project (no competing
+ * work) the flow check reduces to `forecast()`'s sum-vs-deployable, so the number
+ * matches it up to sampling noise; the honest drop appears only when projects
+ * actually share hours.
+ *
+ * Returns `projectId → probability` for every project in `deadlineByProject` that
+ * has a deadline. A deadlined project with no open work scores 1.
+ */
+export function globalForecast(
+  order: GlobalForecastTask[],
+  capacities: DayCapacity[],
+  deadlineByProject: Map<string, string | null>,
+  today: string,
+  options: ForecastOptions = {},
+): Map<string, number> {
+  const result = new Map<string, number>();
+
+  // Day offset each project's deadline allows work through; null deadlines skip.
+  const deadlineOffset = new Map<string, number>();
+  for (const [pid, dl] of deadlineByProject) {
+    if (dl) deadlineOffset.set(pid, daysBetweenISO(today, dl));
+  }
+
+  // Task indices grouped by project (only projects we score).
+  const indicesByProject = new Map<string, number[]>();
+  for (let k = 0; k < order.length; k++) {
+    const pid = order[k].projectId;
+    if (!deadlineOffset.has(pid)) continue;
+    const list = indicesByProject.get(pid) ?? [];
+    list.push(k);
+    indicesByProject.set(pid, list);
+  }
+
+  // Deadlined projects with no open work have already "finished".
+  for (const pid of deadlineOffset.keys()) {
+    if (!indicesByProject.has(pid)) result.set(pid, 1);
+  }
+  if (indicesByProject.size === 0) return result;
+
+  const estimates = order.map((t) => Math.max(0, t.estimatedMinutes));
+  const deployableSum = capacities.reduce((s, c) => s + c.capacityMinutes, 0);
+
+  const iterations = options.iterations ?? DEFAULT_ITERATIONS;
+  const sigma = options.sigma ?? DEFAULT_SIGMA;
+  const meanLog = options.meanLog ?? -(sigma * sigma) / 2;
+  const rng = mulberry32(seedFrom(estimates, deployableSum));
+
+  const durations = new Array<number>(order.length).fill(0);
+  const hits = new Map<string, number>();
+  for (const pid of indicesByProject.keys()) hits.set(pid, 0);
+
+  for (let i = 0; i < iterations; i++) {
+    for (let k = 0; k < order.length; k++) {
+      const est = estimates[k];
+      // Sample only real work; keep the RNG stream identical to `forecast()`.
+      durations[k] = est > 0 ? est * Math.exp(meanLog + sigma * nextNormal(rng)) : 0;
+    }
+    const offsets = flowFinishOffsets(durations, capacities);
+    for (const [pid, idxs] of indicesByProject) {
+      let last = 0;
+      for (const k of idxs) if (offsets[k] > last) last = offsets[k];
+      if (last <= deadlineOffset.get(pid)!) hits.set(pid, hits.get(pid)! + 1);
+    }
+  }
+
+  for (const [pid, h] of hits) result.set(pid, h / iterations);
+  return result;
 }
 
 // --- Recovery moves (pit-call recommendations) ------------------------------
