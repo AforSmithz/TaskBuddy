@@ -31,6 +31,7 @@ import { extractEntry } from "./extraction";
 import { estimationModel } from "./generate";
 import { computePriority } from "./priority";
 import {
+  dayCapacities,
   generateSchedule,
   orderSchedulableTasks,
   type DependencyEdge,
@@ -41,9 +42,11 @@ import {
   deployableMinutes,
   earliestAchievableDeadline,
   forecast,
+  globalForecast,
   recoveryMoves,
   type CandidateTask,
 } from "./forecast";
+import { buildGlobalPlan, type AllocTask } from "./allocate";
 import { SAMPLE_ENTRIES, SAMPLE_PROJECTS } from "./sample-data";
 import { getRequestClient } from "./supabase";
 
@@ -817,6 +820,10 @@ interface ForecastGather {
   deps: TaskDependency[];
   /** entry_id → owning project_id, for mapping tasks to projects. */
   projectOfEntry: Map<string, string | null>;
+  /** projectId → deadline (or null) for EVERY project — the global allocator spans all. */
+  deadlineByProject: Map<string, string | null>;
+  /** projectId → name for EVERY project — used to tag global order entries. */
+  projectNameById: Map<string, string>;
   /** The user's estimation bias, fit from all completed tasks — calibrates the forecast. */
   model: EstimationModel;
   availability: Availability[];
@@ -855,12 +862,19 @@ async function gatherForecast(): Promise<ForecastGather> {
     });
     tasksByProject.set(pid, list);
   }
+  // Deadlines + names for EVERY project: the global allocator orders all open
+  // work (undeadlined projects still consume the shared budget), even though
+  // only deadlined projects receive a forecast probability.
+  const deadlineByProject = new Map(projects.map((p) => [p.id, p.deadline]));
+  const projectNameById = new Map(projects.map((p) => [p.id, p.name]));
   return {
     projects: projects.filter((p) => p.deadline),
     tasksByProject,
     allTasksByProject,
     deps,
     projectOfEntry,
+    deadlineByProject,
+    projectNameById,
     // Fit once over every completed task — the bias is the user's, not a project's.
     model: estimationModel(tasks),
     availability: budget.availability,
@@ -875,10 +889,74 @@ function forecastOptions(model: EstimationModel) {
   return { sigma: model.sigma, meanLog: model.meanLog };
 }
 
-/** Run the forecast for every deadlined project under a given commitment set. */
+/** Every open (not done, not deferred) task across all projects, as the allocator sees it. */
+function buildAllocTasks(g: ForecastGather): AllocTask[] {
+  const out: AllocTask[] = [];
+  for (const [pid, tasks] of g.allTasksByProject) {
+    const projectName = g.projectNameById.get(pid) ?? "";
+    for (const t of tasks) {
+      if (t.status === "done" || t.deferred) continue;
+      out.push({
+        id: t.id,
+        title: t.title,
+        projectId: pid,
+        projectName,
+        estimatedMinutes: t.estimated_minutes,
+        status: t.status,
+        priorityScore: t.priority_score ?? 0,
+        urgency: t.urgency_score ?? 3,
+        impact: t.impact_score ?? 3,
+        risk: t.risk_score ?? 3,
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * Contention-aware completion odds for every deadlined project, from ONE joint
+ * Monte Carlo over the global order under a given commitment set. The single
+ * source the per-project forecasts and recovery gating both draw their
+ * probability from (locked decision #1).
+ */
+function globalOdds(
+  g: ForecastGather,
+  commitments: Pick<Commitment, "date" | "hours">[],
+): Map<string, number> {
+  const budget = {
+    availability: g.availability,
+    overrides: g.overrides,
+    commitments,
+  };
+  const plan = buildGlobalPlan({
+    tasks: buildAllocTasks(g),
+    deps: g.deps.map((d) => ({
+      task_id: d.task_id,
+      depends_on_task_id: d.depends_on_task_id,
+    })),
+    deadlineByProject: g.deadlineByProject,
+    budget,
+    today: g.today,
+  });
+  return globalForecast(
+    plan.order,
+    dayCapacities(budget, g.today),
+    g.deadlineByProject,
+    g.today,
+    forecastOptions(g.model),
+  );
+}
+
+/**
+ * Forecast every deadlined project under a commitment set. Per-project
+ * expected/deployable/slack still come from the project's own footprint, but the
+ * headline `probability` is the honest, contention-aware joint odds (`odds`),
+ * which the caller computes once per commitment set and shares across projects.
+ */
 function buildForecasts(
   g: ForecastGather,
   commitments: Pick<Commitment, "date" | "hours">[],
+  odds: Map<string, number>,
 ): ProjectForecast[] {
   return g.projects.map((p) => {
     const dep = deployableMinutes({
@@ -899,6 +977,8 @@ function buildForecasts(
       projectName: p.name,
       deadline: p.deadline,
       ...result,
+      // Honest cross-project odds replace the (optimistic) solo probability.
+      probability: odds.get(p.id) ?? result.probability,
     };
   });
 }
@@ -913,9 +993,10 @@ export async function forecastDashboard(): Promise<{
   model: EstimationModel;
 }> {
   const g = await gatherForecast();
-  const forecasts = buildForecasts(g, g.commitments);
+  const odds = globalOdds(g, g.commitments);
+  const forecasts = buildForecasts(g, g.commitments, odds);
   const recoveries = g.projects
-    .map((p) => buildRecoveryPlan(g, p))
+    .map((p) => buildRecoveryPlan(g, p, odds))
     .filter((plan): plan is RecoveryPlan => plan !== null);
   return { forecasts, recoveries, model: g.model };
 }
@@ -932,11 +1013,14 @@ export async function forecastProjectWithRecovery(projectId: string): Promise<{
   const g = await gatherForecast();
   const project = g.projects.find((p) => p.id === projectId);
   if (!project) return { forecast: null, recovery: null, model: g.model };
+  // Build the plan over the FULL gather (all projects) so contention is real,
+  // then read out just this project's odds.
+  const odds = globalOdds(g, g.commitments);
   const projectForecast =
-    buildForecasts({ ...g, projects: [project] }, g.commitments)[0] ?? null;
+    buildForecasts({ ...g, projects: [project] }, g.commitments, odds)[0] ?? null;
   return {
     forecast: projectForecast,
-    recovery: buildRecoveryPlan(g, project),
+    recovery: buildRecoveryPlan(g, project, odds),
     model: g.model,
   };
 }
@@ -951,11 +1035,9 @@ export async function logCommitment(
   label: string | null,
 ): Promise<PitCall[]> {
   const g = await gatherForecast();
-  const before = buildForecasts(g, g.commitments);
-  const after = buildForecasts(g, [
-    ...g.commitments,
-    { date, hours: Math.max(0, hours) },
-  ]);
+  const afterCommitments = [...g.commitments, { date, hours: Math.max(0, hours) }];
+  const before = buildForecasts(g, g.commitments, globalOdds(g, g.commitments));
+  const after = buildForecasts(g, afterCommitments, globalOdds(g, afterCommitments));
 
   // Persist the commitment.
   const row: Commitment = {
@@ -978,9 +1060,6 @@ export async function logCommitment(
     memDB().commitments.push(row);
   }
 
-  // The commitment set the forecast now reflects (used for re-date suggestions).
-  const newCommitments = [...g.commitments, { date, hours: Math.max(0, hours) }];
-
   // A pit call fires when a project's probability drops meaningfully.
   const pitCalls: PitCall[] = [];
   for (const a of after) {
@@ -1000,7 +1079,7 @@ export async function logCommitment(
             today: g.today,
             availability: g.availability,
             overrides: g.overrides,
-            commitments: newCommitments,
+            commitments: afterCommitments,
           },
           RECOVERY_TARGET,
           forecastOptions(g.model),
@@ -1120,7 +1199,11 @@ export function detectDivergence(
  * state. Returns null when on-track or the project has no deadline. Pure given
  * the gather — no I/O — so it can run for many projects off a single gather.
  */
-function buildRecoveryPlan(g: ForecastGather, project: Project): RecoveryPlan | null {
+function buildRecoveryPlan(
+  g: ForecastGather,
+  project: Project,
+  odds: Map<string, number>,
+): RecoveryPlan | null {
   if (!project.deadline) return null;
   const projectId = project.id;
   const candidates = g.tasksByProject.get(projectId) ?? [];
@@ -1133,7 +1216,13 @@ function buildRecoveryPlan(g: ForecastGather, project: Project): RecoveryPlan | 
   };
   const deployable = deployableMinutes({ ...budget, deadline: project.deadline });
   const opts = forecastOptions(g.model);
-  const fc = forecast(estimates, deployable, opts);
+  // Detection gates on the honest, contention-aware probability; the per-project
+  // defer/reschedule moves below stay solo for now (made contention-aware in G3).
+  const soloFc = forecast(estimates, deployable, opts);
+  const fc: ForecastResult = {
+    ...soloFc,
+    probability: odds.get(projectId) ?? soloFc.probability,
+  };
 
   const allTasks = g.allTasksByProject.get(projectId) ?? [];
   const reasons = detectDivergence(fc, project.deadline, allTasks, g.today);
