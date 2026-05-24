@@ -502,3 +502,53 @@ export interface RerouteSuggestion {
   /** Completion probability after switching to this plan — from `forecast()`. */
   previewProbability: number;
 }
+
+// --- Pit-wall strategist (global, cross-project allocation) -----------------
+
+/**
+ * One task's place in the single global order across all projects. The order is
+ * a *derived* view layered on top of the stored `priority_score` (never
+ * overwrites it): dependency topo-sort, then EDF by project deadline with WSJF
+ * as the tiebreak (and WSJF-first under overload). `pulledAhead` marks a task
+ * that leapfrogged higher-`priority_score` work from another project because its
+ * own project's deadline is closer.
+ */
+export interface EffectiveOrderEntry {
+  taskId: string;
+  title: string;
+  projectId: string;
+  projectName: string;
+  estimatedMinutes: number;
+  /** 0-based position in the global order. */
+  rank: number;
+  /** True when deadline pressure pulled this ahead of more intrinsically important work. */
+  pulledAhead: boolean;
+  /** Human-readable reason for the placement (e.g. "pulled ahead — Project X due in 2 days"). */
+  reason: string;
+}
+
+/**
+ * A pit-wall conflict surfaced by the global allocation: a project that can't
+ * finish in time, or two projects whose deadlines collide over the shared hours.
+ * Defined here; the detector that produces these lands in a later step (G3).
+ */
+export interface Conflict {
+  kind: "infeasible" | "deadline_collision";
+  projectId: string;
+  projectName: string;
+  detail: string;
+}
+
+/**
+ * A recommended triage move: shed (defer) a low-value task to recover the
+ * savable high-value work under overload. `wsjf` is the value density it was
+ * chosen by; `probabilityAfter` is the recovered odds — always from the
+ * forecast, never the LLM. Consumed in a later step (G3).
+ */
+export interface TriageMove {
+  taskId: string;
+  title: string;
+  projectId: string;
+  wsjf: number;
+  probabilityAfter: number;
+}
