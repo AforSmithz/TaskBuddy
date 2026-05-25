@@ -1,6 +1,7 @@
-import type { EffectiveOrderEntry, TaskStatus } from "./types";
+import type { Conflict, EffectiveOrderEntry, TaskStatus } from "./types";
 import {
   dayCapacities,
+  flowFinishOffsets,
   packBlocks,
   type DayCapacity,
   type DependencyEdge,
@@ -37,6 +38,8 @@ const PROXIMITY_WINDOW_DAYS = 14;
 const WSJF_EPSILON = 1;
 /** A deadline this many days out (or further) exerts no proximity pull. */
 const FAR_FUTURE_OFFSET = 1e9;
+/** Troubled projects whose deadlines fall within this window are fighting each other. */
+const COLLISION_WINDOW_DAYS = 7;
 
 // --- Date helpers (UTC-stable) ----------------------------------------------
 
@@ -329,4 +332,157 @@ export function buildGlobalPlan(input: GlobalPlanInput): GlobalPlan {
   );
   const days = packGlobal(order, input.budget, input.today);
   return { order, days };
+}
+
+// --- Conflict detection (the pit wall) --------------------------------------
+
+/**
+ * Where a deadlined project lands in the point-estimate global plan vs. where
+ * its deadline falls. `overBy > 0` means the project's last task finishes that
+ * many days *after* its deadline once it has competed for the shared hours — the
+ * core "can't make it" signal the pit wall reports.
+ */
+export interface ProjectFinish {
+  projectId: string;
+  projectName: string;
+  /** Day offset (from today) the project's last task finishes in the global plan. */
+  finishOffset: number;
+  /** Day offset of the project's deadline. */
+  deadlineOffset: number;
+  /** finishOffset − deadlineOffset; > 0 = late under contention. */
+  overBy: number;
+}
+
+/**
+ * Each deadlined project's point-estimate finish vs. its deadline, under the one
+ * global order. Uses `flowFinishOffsets` (the time-accurate carry the forecast
+ * uses), NOT the display packer — an oversized task must spill across days here,
+ * or a project would falsely "finish" on time. Pure given the order + capacities.
+ */
+export function projectFinishes(
+  order: EffectiveOrderEntry[],
+  capacities: DayCapacity[],
+  deadlineByProject: Map<string, string | null>,
+  today: string,
+): ProjectFinish[] {
+  const durations = order.map((e) => Math.max(0, e.estimatedMinutes));
+  const offsets = flowFinishOffsets(durations, capacities);
+
+  // Latest finish offset per deadlined project.
+  const lastOffset = new Map<string, number>();
+  const nameOf = new Map<string, string>();
+  for (let k = 0; k < order.length; k++) {
+    const e = order[k];
+    if (!deadlineByProject.get(e.projectId)) continue; // only deadlined projects
+    nameOf.set(e.projectId, e.projectName);
+    const cur = lastOffset.get(e.projectId);
+    if (cur === undefined || offsets[k] > cur) lastOffset.set(e.projectId, offsets[k]);
+  }
+
+  const out: ProjectFinish[] = [];
+  for (const [projectId, finishOffset] of lastOffset) {
+    const deadlineOffset = deadlineOffsetOf(
+      deadlineByProject.get(projectId) ?? null,
+      today,
+    );
+    out.push({
+      projectId,
+      projectName: nameOf.get(projectId) ?? "",
+      finishOffset,
+      deadlineOffset,
+      overBy: finishOffset - deadlineOffset,
+    });
+  }
+  return out;
+}
+
+/**
+ * The pit-wall conflicts in the current global plan: deadlined projects that
+ * can't finish in time once they've competed for the shared hours. Troubled
+ * projects whose deadlines fall within `COLLISION_WINDOW_DAYS` of each other are
+ * reported as a `deadline_collision` (they're fighting for the same days — the
+ * case that may need a human call); a lone troubled project is `infeasible`.
+ * Pure given the plan order + capacities.
+ */
+export function detectConflicts(
+  order: EffectiveOrderEntry[],
+  capacities: DayCapacity[],
+  deadlineByProject: Map<string, string | null>,
+  today: string,
+): Conflict[] {
+  const troubled = projectFinishes(order, capacities, deadlineByProject, today)
+    .filter((f) => f.overBy > 0)
+    // Earliest deadline first — the most urgent collision reads first.
+    .sort((a, b) => a.deadlineOffset - b.deadlineOffset);
+  if (troubled.length === 0) return [];
+
+  return troubled.map((f) => {
+    const collidesWith = troubled.filter(
+      (o) =>
+        o.projectId !== f.projectId &&
+        Math.abs(o.deadlineOffset - f.deadlineOffset) <= COLLISION_WINDOW_DAYS,
+    );
+    const lateBy = `${f.overBy} day(s) past its deadline`;
+    if (collidesWith.length > 0) {
+      const others = collidesWith.map((o) => o.projectName).join(", ");
+      return {
+        kind: "deadline_collision",
+        projectId: f.projectId,
+        projectName: f.projectName,
+        detail: `Competing with ${others} for the same hours — ${f.projectName} finishes ${lateBy}.`,
+      };
+    }
+    return {
+      kind: "infeasible",
+      projectId: f.projectId,
+      projectName: f.projectName,
+      detail: `Can't finish in time — projected ${lateBy} once it shares your hours.`,
+    };
+  });
+}
+
+/** A task offered up for shedding, with the value density it was ranked by. */
+export interface TriageCandidate {
+  task: AllocTask;
+  wsjf: number;
+}
+
+/**
+ * The shed order: open tasks of the conflicted (over-budget) projects, lowest
+ * value-density first — the lowest-WSJF "doomed" work whose hours are best spent
+ * rescuing higher-value projects (locked decision #3). Blocked/done work excluded.
+ */
+export function triageCandidates(
+  tasks: AllocTask[],
+  conflictedProjectIds: Set<string>,
+  deadlineByProject: Map<string, string | null>,
+  today: string,
+): TriageCandidate[] {
+  return tasks
+    .filter((t) => conflictedProjectIds.has(t.projectId) && t.status !== "done")
+    .map((task) => ({
+      task,
+      wsjf: wsjf(task, deadlineByProject.get(task.projectId) ?? null, today),
+    }))
+    .sort((a, b) => a.wsjf - b.wsjf || (a.task.id < b.task.id ? -1 : 1));
+}
+
+/**
+ * Total cost-of-delay a project carries across its open tasks — its aggregate
+ * value, used to decide whether a collision is a genuine comparable-value tie
+ * that must escalate (vs. one project clearly worth protecting). Pure.
+ */
+export function projectValue(
+  tasks: AllocTask[],
+  projectId: string,
+  deadlineByProject: Map<string, string | null>,
+  today: string,
+): number {
+  const dl = deadlineByProject.get(projectId) ?? null;
+  let sum = 0;
+  for (const t of tasks) {
+    if (t.projectId !== projectId || t.status === "done") continue;
+    sum += costOfDelay(t, dl, today);
+  }
+  return sum;
 }
