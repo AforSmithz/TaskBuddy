@@ -13,10 +13,12 @@ import {
   Lock,
   Sparkles,
   ArrowRight,
+  ArrowUpCircle,
   CheckCircle2,
 } from "lucide-react";
 import {
   SEED_AREAS,
+  type EffectiveOrderEntry,
   type Task,
   type TaskDependency,
   type TaskStatus,
@@ -38,10 +40,13 @@ export function TodayAgenda({
   tasks,
   entryTitles,
   dependencies,
+  order = [],
 }: {
   tasks: Task[];
   entryTitles: Record<string, string>;
   dependencies: TaskDependency[];
+  /** The global cross-project order the agenda ranks by (falls back to priority_score if empty). */
+  order?: EffectiveOrderEntry[];
 }) {
   const [optimistic, applyOptimistic] = useOptimistic(
     tasks,
@@ -131,22 +136,45 @@ export function TodayAgenda({
     return { waiting, unblockCount };
   }, [optimistic, dependencies]);
 
+  // The global cross-project order, looked up by task id. Deadline pressure can
+  // pull one project's task ahead of another's — keyed on id so an optimistically
+  // completed task (dropped from `optimistic`) never carries a stale rank.
+  const orderByTask = useMemo(
+    () => new Map(order.map((e) => [e.taskId, e])),
+    [order],
+  );
+
+  // Reasons for the tasks deadline pressure pulled ahead — annotated on their
+  // rows. Empty for single-project users (nothing leapfrogs anything).
+  const pulledAhead = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const e of order) if (e.pulledAhead) m.set(e.taskId, e.reason);
+    return m;
+  }, [order]);
+
   const b = useMemo(() => {
     const isWaiting = (t: Task) => depInfo.waiting.has(t.id);
+    // Rank by the global order; fall back to priority_score when a task isn't in
+    // the order (empty/not loaded, or filtered out upstream).
+    const byGlobalRank = (x: Task, y: Task) => {
+      const rx = orderByTask.get(x.id)?.rank ?? Number.POSITIVE_INFINITY;
+      const ry = orderByTask.get(y.id)?.rank ?? Number.POSITIVE_INFINITY;
+      return rx - ry || byPriority(x, y);
+    };
     const visible =
       tab === "All" ? optimistic : optimistic.filter((t) => t.area === tab);
     const open = visible.filter((t) => t.status !== "done");
     const blocked = open
       .filter((t) => t.status === "blocked")
-      .sort(byPriority);
+      .sort(byGlobalRank);
     const sorted = open
       .filter((t) => t.status !== "blocked")
       .sort((x, y) => {
         // Ready-to-start tasks rank above ones still waiting on a
-        // prerequisite, then ties break on priority score.
+        // prerequisite, then ties break on the global order.
         const xw = isWaiting(x) ? 1 : 0;
         const yw = isWaiting(y) ? 1 : 0;
-        return xw - yw || byPriority(x, y);
+        return xw - yw || byGlobalRank(x, y);
       });
     const overdue = sorted.filter((t) => isOverdue(t.due_date));
     const dueToday = sorted.filter(
@@ -162,12 +190,13 @@ export function TodayAgenda({
       overdue,
       dueToday,
       focus,
-      // The next task to do: highest priority among those actually startable.
+      // The next task to do: first startable task in the global order.
       recommended: sorted.find((t) => !isWaiting(t)) ?? sorted[0],
     };
-  }, [optimistic, tab, depInfo]);
+  }, [optimistic, tab, depInfo, orderByTask]);
 
   const rec = b.recommended;
+  const recEntry = rec ? orderByTask.get(rec.id) : undefined;
   const recUnblocks = rec ? depInfo.unblockCount.get(rec.id) ?? 0 : 0;
   const totalOpen = optimistic.filter((t) => t.status !== "done").length;
 
@@ -239,6 +268,12 @@ export function TodayAgenda({
                   {rec.priority_reason}
                 </p>
               )}
+              {recEntry?.pulledAhead && (
+                <p className="mt-1.5 flex items-center gap-1.5 text-[12px] font-medium text-[var(--color-accent-fg)]">
+                  <ArrowUpCircle className="size-3.5 shrink-0" />
+                  {recEntry.reason}
+                </p>
+              )}
               {recUnblocks > 0 && (
                 <p className="mt-1.5 flex items-center gap-1.5 text-[12px] font-medium text-[var(--color-accent-fg)]">
                   <Lock className="size-3.5 shrink-0" />
@@ -294,6 +329,7 @@ export function TodayAgenda({
               entryTitles={entryTitles}
               areas={areas}
               waiting={depInfo.waiting}
+              pulledAhead={pulledAhead}
               onMove={move}
               onAssignArea={assignArea}
             />
@@ -305,6 +341,7 @@ export function TodayAgenda({
               entryTitles={entryTitles}
               areas={areas}
               waiting={depInfo.waiting}
+              pulledAhead={pulledAhead}
               onMove={move}
               onAssignArea={assignArea}
             />
@@ -316,6 +353,7 @@ export function TodayAgenda({
               entryTitles={entryTitles}
               areas={areas}
               waiting={depInfo.waiting}
+              pulledAhead={pulledAhead}
               onMove={move}
               onAssignArea={assignArea}
             />
@@ -336,6 +374,7 @@ export function TodayAgenda({
                     task={t}
                     entryTitle={entryTitles[t.entry_id]}
                     areas={areas}
+                    pulledAheadReason={pulledAhead.get(t.id)}
                     onMove={move}
                     onAssignArea={assignArea}
                   />
@@ -394,6 +433,7 @@ function Section({
   entryTitles,
   areas,
   waiting,
+  pulledAhead,
   onMove,
   onAssignArea,
 }: {
@@ -404,6 +444,7 @@ function Section({
   entryTitles: Record<string, string>;
   areas: string[];
   waiting: Map<string, string[]>;
+  pulledAhead: Map<string, string>;
   onMove: (id: string, status: TaskStatus, from: TaskStatus) => void;
   onAssignArea: (id: string, area: string) => void;
 }) {
@@ -426,6 +467,7 @@ function Section({
               entryTitle={entryTitles[t.entry_id]}
               areas={areas}
               waitingOn={waiting.get(t.id)}
+              pulledAheadReason={pulledAhead.get(t.id)}
               onMove={onMove}
               onAssignArea={onAssignArea}
             />
