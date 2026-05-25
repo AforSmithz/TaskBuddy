@@ -4,6 +4,7 @@ import type {
   AvailabilityOverride,
   Commitment,
   Conflict,
+  PitWallOption,
   Decision,
   DivergenceReason,
   DraftClassification,
@@ -1014,6 +1015,11 @@ export interface PitWall {
   conflicts: Conflict[];
   triage: TriageMove[];
   needsDecision: boolean;
+  /**
+   * When `needsDecision`, the mutually-exclusive resolutions of the tie — one
+   * per colliding project, "protect this one, shed the others". Empty otherwise.
+   */
+  options: PitWallOption[];
 }
 
 /** Conflicts in the point-estimate global plan for this gather (no Monte Carlo). */
@@ -1046,7 +1052,7 @@ function buildPitWall(
 ): PitWall {
   const conflicts = planConflicts(g, ctx);
   if (conflicts.length === 0) {
-    return { conflicts: [], triage: [], needsDecision: false };
+    return { conflicts: [], triage: [], needsDecision: false, options: [] };
   }
 
   const onTrackEverywhere = (odds: Map<string, number>) =>
@@ -1123,7 +1129,50 @@ function buildPitWall(
     collisionValues[0] > 0 &&
     collisionValues[1] >= collisionValues[0] * COMPARABLE_VALUE_RATIO;
 
-  return { conflicts, triage, needsDecision };
+  const options = needsDecision ? escalationOptions(g, ctx, conflicts) : [];
+
+  return { conflicts, triage, needsDecision, options };
+}
+
+/**
+ * The mutually-exclusive ways to resolve a genuine comparable-value tie: for
+ * each colliding project, "protect this one" means deferring the *other*
+ * colliding projects' entire open work so the protected one gets the contested
+ * hours. That's the abandonment auto-triage refuses to do on its own (it never
+ * sheds a project's last task — line ~1080); here the user makes that call
+ * deliberately, so each option's `probabilityAfter` is the protected project's
+ * recovered joint odds once the sacrifice set is shed (one MC probe per option).
+ */
+function escalationOptions(
+  g: ForecastGather,
+  ctx: AllocContext,
+  conflicts: Conflict[],
+): PitWallOption[] {
+  const colliding = conflicts.filter((c) => c.kind === "deadline_collision");
+  const collidingIds = new Set(colliding.map((c) => c.projectId));
+  // Open (still-forecast) task ids per colliding project — the deferrable batch.
+  const openByProject = new Map<string, string[]>();
+  for (const t of ctx.tasks) {
+    if (t.status === "done" || !collidingIds.has(t.projectId)) continue;
+    const ids = openByProject.get(t.projectId) ?? [];
+    ids.push(t.id);
+    openByProject.set(t.projectId, ids);
+  }
+
+  return colliding.map((protect) => {
+    const others = colliding.filter((c) => c.projectId !== protect.projectId);
+    const sacrificeTaskIds = others.flatMap(
+      (o) => openByProject.get(o.projectId) ?? [],
+    );
+    const recovered = jointOdds(g, ctx, new Set(sacrificeTaskIds), TRIAGE_PROBE_ITERATIONS);
+    return {
+      protectId: protect.projectId,
+      protectName: protect.projectName,
+      sacrificeNames: others.map((o) => o.projectName),
+      sacrificeTaskIds,
+      probabilityAfter: recovered.get(protect.projectId) ?? 0,
+    };
+  });
 }
 
 /**
