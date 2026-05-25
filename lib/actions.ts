@@ -177,6 +177,18 @@ export async function deferTaskAction(
 }
 
 /**
+ * Apply a pit-wall triage move in one shot: defer a batch of tasks (the
+ * lowest-value work auto chose to shed, or a colliding project's open work the
+ * user chose to sacrifice). Like a single defer, each is reversible from the
+ * project's Deferred section.
+ */
+export async function applyTriageAction(taskIds: string[]): Promise<void> {
+  await requireUser();
+  await Promise.all(taskIds.map((id) => updateTask(id, { deferred: true })));
+  revalidateAll();
+}
+
+/**
  * Push a task's due date (e.g. to clear an "overdue" flag). Note this does not
  * affect the completion forecast — only the project deadline + estimates do.
  */
