@@ -553,3 +553,22 @@ export interface TriageMove {
   wsjf: number;
   probabilityAfter: number;
 }
+
+/**
+ * One mutually-exclusive way to resolve a genuine comparable-value tie (the
+ * single escalated decision auto-triage refuses to make for you): protect one
+ * colliding project by shedding the open work of the others it's fighting for
+ * the shared hours with. `probabilityAfter` is the protected project's recovered
+ * joint odds once that sacrifice is made — always from the forecast, never the
+ * LLM. Surfaced only when `PitWall.needsDecision`.
+ */
+export interface PitWallOption {
+  protectId: string;
+  protectName: string;
+  /** The colliding projects whose open work is deferred to protect the above. */
+  sacrificeNames: string[];
+  /** Their open tasks — the batch a one-click "Protect this" defers. */
+  sacrificeTaskIds: string[];
+  /** Protected project's joint odds once the sacrifice set is shed. */
+  probabilityAfter: number;
+}
