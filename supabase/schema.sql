@@ -243,3 +243,21 @@ create policy availability_overrides_owner on availability_overrides
 drop policy if exists commitments_owner on commitments;
 create policy commitments_owner on commitments
   for all using (user_id = auth.uid()) with check (user_id = auth.uid());
+
+-- ===========================================================================
+-- Phase 3 — the pit-wall strategist: per-user automation preferences.
+-- ===========================================================================
+
+-- `auto_strategy` on = auto-apply the obvious low-value triage and escalate only
+-- genuine ties; off (default) = surface every option, never auto-apply.
+create table if not exists user_settings (
+  user_id       uuid primary key references auth.users(id) on delete cascade,
+  auto_strategy boolean not null default false,
+  updated_at    timestamptz not null default now()
+);
+
+alter table user_settings enable row level security;
+
+drop policy if exists user_settings_owner on user_settings;
+create policy user_settings_owner on user_settings
+  for all using (user_id = auth.uid()) with check (user_id = auth.uid());
