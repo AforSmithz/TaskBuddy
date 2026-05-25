@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useTransition } from "react";
+import { useEffect, useRef, useState, useTransition } from "react";
 import {
   ArrowRight,
   Check,
@@ -28,12 +28,22 @@ function toneText(p: number): string {
 /**
  * The pit wall: the bird's-eye view of what the shared hours can't satisfy and
  * the cross-project trade-off to make. Two paths, matching locked decision #3:
- * an auto recovery (shed the lowest-value doomed work — one click) and, only
- * when the engine hit a genuine comparable-value tie, an escalation where the
- * user picks which colliding project to protect. Both reuse the reversible
- * defer, so every move is undoable from the project's Deferred section.
+ * an auto recovery (shed the lowest-value doomed work) and, only when the engine
+ * hit a genuine comparable-value tie, an escalation where the user picks which
+ * colliding project to protect. Both reuse the reversible defer, so every move is
+ * undoable from the project's Deferred section.
+ *
+ * `autoStrategy` is the G6 mode. On = the auto path applies itself (the obvious
+ * call); off = it's surfaced for one click. A tie always stays the user's call —
+ * auto escalates ties, it never resolves them.
  */
-export function PitWallCallout({ pitWall }: { pitWall: PitWall }) {
+export function PitWallCallout({
+  pitWall,
+  autoStrategy,
+}: {
+  pitWall: PitWall;
+  autoStrategy: boolean;
+}) {
   const { conflicts, triage, needsDecision, options } = pitWall;
   const collision = conflicts.some((c) => c.kind === "deadline_collision");
 
@@ -59,7 +69,9 @@ export function PitWallCallout({ pitWall }: { pitWall: PitWall }) {
       </div>
 
       {/* Auto path — shed the lowest-value doomed work. */}
-      {triage.length > 0 && <AutoTriage triage={triage} />}
+      {triage.length > 0 && (
+        <AutoTriage triage={triage} autoStrategy={autoStrategy} />
+      )}
 
       {/* The one manual call — a genuine comparable-value tie. */}
       {needsDecision && options.length > 0 && <Escalation options={options} />}
@@ -75,8 +87,18 @@ export function PitWallCallout({ pitWall }: { pitWall: PitWall }) {
   );
 }
 
-/** Defer the lowest-WSJF doomed work — all at once, or one task at a time. */
-function AutoTriage({ triage }: { triage: PitWall["triage"] }) {
+/**
+ * Defer the lowest-WSJF doomed work. In manual mode it's surfaced for a click
+ * (all at once, or one task at a time); in auto mode the strategist applies the
+ * whole batch itself on sight — the obvious call it's trusted to make (G6).
+ */
+function AutoTriage({
+  triage,
+  autoStrategy,
+}: {
+  triage: PitWall["triage"];
+  autoStrategy: boolean;
+}) {
   const [pending, startTransition] = useTransition();
   const [busy, setBusy] = useState<string | null>(null);
   const [applied, setApplied] = useState<Set<string>>(new Set());
@@ -100,10 +122,39 @@ function AutoTriage({ triage }: { triage: PitWall["triage"] }) {
     });
   }
 
+  // Auto mode: shed the batch on sight, exactly once. After it applies, the
+  // revalidated forecast drops these tasks and the conflict (and this card)
+  // usually clears — so there's no re-fire to guard beyond this mount.
+  const autoFired = useRef(false);
+  useEffect(() => {
+    if (!autoStrategy || autoFired.current || triage.length === 0) return;
+    autoFired.current = true;
+    defer(
+      triage.map((m) => m.taskId),
+      "all",
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoStrategy]);
+
   if (remaining.length === 0) {
     return (
       <p className="mt-3.5 flex items-center gap-1.5 text-[12px] text-[var(--color-status-done)]">
         <Check className="size-3.5" /> Deferred — forecast updating.
+      </p>
+    );
+  }
+
+  // Auto mode hasn't finished applying yet — show a passive working state, not
+  // the manual buttons (the user isn't being asked to do anything here).
+  if (autoStrategy) {
+    return (
+      <p className="mt-3.5 flex items-center gap-1.5 text-[12px] text-[var(--color-fg-muted)]">
+        <ArrowRight className="size-3.5 shrink-0 text-[var(--color-fg-subtle)]" />
+        Auto-deferring {triage.length} low-value{" "}
+        {triage.length === 1 ? "task" : "tasks"} →{" "}
+        <span className={cn("font-semibold tabular-nums", toneText(best))}>
+          {formatPct(best)}
+        </span>
       </p>
     );
   }
