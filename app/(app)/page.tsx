@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { Plus, CalendarClock, Gauge, AlertTriangle } from "lucide-react";
+import { Plus, CalendarClock, Gauge, AlertTriangle, TrafficCone } from "lucide-react";
 import {
   forecastDashboard,
   getAvailability,
@@ -17,6 +17,7 @@ import { TodayAgenda } from "@/components/today/today-agenda";
 import { TodayPlan } from "@/components/today/today-plan";
 import { ProbabilityPill, ForecastCalibration } from "@/components/forecast/forecast-meter";
 import { RecoveryCallout } from "@/components/forecast/recovery-callout";
+import { PitWallCallout } from "@/components/forecast/pit-wall-callout";
 import { TimeBudget } from "@/components/forecast/time-budget";
 
 export default async function TodayPage() {
@@ -28,7 +29,7 @@ export default async function TodayPage() {
       forecastDashboard(),
       getAvailability(),
     ]);
-  const { forecasts, recoveries, globalPlan, model } = dashboard;
+  const { forecasts, recoveries, pitWall, globalPlan, model } = dashboard;
   // Deferred tasks are parked out of scope for their deadline — keep them out of
   // the active working views too (they live in the project's Deferred section).
   const tasks = allTasks.filter((t) => !t.deferred);
@@ -68,8 +69,23 @@ export default async function TodayPage() {
         />
       </Reveal>
 
-      {recoveries.length > 0 && (
+      {/* The pit wall — the cross-project trade-off, above the per-project detail. */}
+      {pitWall.conflicts.length > 0 && (
         <Reveal delay={0.05} className="mt-7">
+          <Card>
+            <CardHeader
+              title="The pit wall"
+              icon={<TrafficCone className="size-4 text-[var(--color-danger)]" />}
+            />
+            <div className="p-3">
+              <PitWallCallout pitWall={pitWall} />
+            </div>
+          </Card>
+        </Reveal>
+      )}
+
+      {recoveries.length > 0 && (
+        <Reveal delay={0.08} className="mt-7">
           <Card>
             <CardHeader
               title="Needs attention"
