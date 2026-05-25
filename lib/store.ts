@@ -54,6 +54,7 @@ import {
   projectValue,
   triageCandidates,
   type AllocTask,
+  type GlobalPlan,
 } from "./allocate";
 import { SAMPLE_ENTRIES, SAMPLE_PROJECTS } from "./sample-data";
 import { getRequestClient } from "./supabase";
@@ -1169,6 +1170,8 @@ export async function forecastDashboard(): Promise<{
   forecasts: ProjectForecast[];
   recoveries: RecoveryPlan[];
   pitWall: PitWall;
+  /** The single global allocation the Today views derive from (order + unified schedule). */
+  globalPlan: GlobalPlan;
   model: EstimationModel;
 }> {
   const g = await gatherForecast();
@@ -1179,7 +1182,16 @@ export async function forecastDashboard(): Promise<{
   const recoveries = g.projects
     .map((p) => buildRecoveryPlan(g, p, odds, pitWall.conflicts))
     .filter((plan): plan is RecoveryPlan => plan !== null);
-  return { forecasts, recoveries, pitWall, model: g.model };
+  // The canonical plan over all current open work (no triage shedding) — the
+  // cross-project order the agenda ranks by and the unified schedule it renders.
+  const globalPlan = buildGlobalPlan({
+    tasks: ctx.tasks,
+    deps: ctx.deps,
+    deadlineByProject: g.deadlineByProject,
+    budget: ctx.budget,
+    today: g.today,
+  });
+  return { forecasts, recoveries, pitWall, globalPlan, model: g.model };
 }
 
 /**
