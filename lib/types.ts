@@ -276,7 +276,8 @@ export interface DivergenceReason {
     | "deadline_past" // the deadline is already behind us
     | "at_risk" // open work is below the target probability of finishing on time
     | "overdue_tasks" // open tasks whose due_date has passed
-    | "blocked_tasks"; // open tasks stuck in `blocked`
+    | "blocked_tasks" // open tasks stuck in `blocked`
+    | "contention"; // competing with another project for the same shared hours (pit wall)
   /** "critical" = the deadline itself is in jeopardy; "warning" = needs attention but on time. */
   severity: "critical" | "warning";
   detail: string;
