@@ -14,6 +14,7 @@ import { buttonClasses } from "@/components/ui/button";
 import { EntryListItem } from "@/components/entries/entry-list-item";
 import { Reveal } from "@/components/motion/reveal";
 import { TodayAgenda } from "@/components/today/today-agenda";
+import { TodayPlan } from "@/components/today/today-plan";
 import { ProbabilityPill, ForecastCalibration } from "@/components/forecast/forecast-meter";
 import { RecoveryCallout } from "@/components/forecast/recovery-callout";
 import { TimeBudget } from "@/components/forecast/time-budget";
@@ -27,7 +28,7 @@ export default async function TodayPage() {
       forecastDashboard(),
       getAvailability(),
     ]);
-  const { forecasts, recoveries, model } = dashboard;
+  const { forecasts, recoveries, globalPlan, model } = dashboard;
   // Deferred tasks are parked out of scope for their deadline — keep them out of
   // the active working views too (they live in the project's Deferred section).
   const tasks = allTasks.filter((t) => !t.deferred);
@@ -88,10 +89,15 @@ export default async function TodayPage() {
           tasks={tasks}
           entryTitles={entryTitles}
           dependencies={dependencies}
+          order={globalPlan.order}
         />
       </Reveal>
 
       <Reveal delay={0.15} className="mt-5">
+        <TodayPlan days={globalPlan.days} todayISO={todayISO} />
+      </Reveal>
+
+      <Reveal delay={0.2} className="mt-5">
         <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
           <TimeBudget availability={availability} today={todayISO} />
           <Card>
@@ -121,7 +127,7 @@ export default async function TodayPage() {
         </div>
       </Reveal>
 
-      <Reveal delay={0.2} className="mt-5">
+      <Reveal delay={0.25} className="mt-5">
         <Card>
           <CardHeader
             title="Recent activity"
