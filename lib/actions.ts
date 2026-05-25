@@ -12,6 +12,7 @@ import {
   discardDraft,
   getEntry,
   logCommitment,
+  setAutoStrategy,
   setAvailability,
   setOverride,
   setProjectDeadline,
@@ -241,6 +242,18 @@ export async function setAvailabilityAction(
   await setAvailability(rows);
   revalidatePath("/");
   revalidatePath("/projects", "layout");
+}
+
+/**
+ * Toggle the pit-wall automation mode. On = the strategist auto-defers the
+ * obvious low-value doomed work and only escalates genuine ties; off = it surfaces
+ * every move for the user to apply. Revalidates so the pit wall re-renders in the
+ * chosen mode (and, if turning on mid-conflict, applies the pending triage).
+ */
+export async function setAutoStrategyAction(value: boolean): Promise<void> {
+  await requireUser();
+  await setAutoStrategy(value);
+  revalidatePath("/");
 }
 
 /** Override deployable hours for one specific date. */
