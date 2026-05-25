@@ -96,6 +96,8 @@ interface MemDB {
   availability: Availability[];
   overrides: AvailabilityOverride[];
   commitments: Commitment[];
+  /** Whether the pit-wall strategist auto-applies obvious triage (vs. surfacing it). */
+  autoStrategy: boolean;
   seeded: boolean;
 }
 
@@ -118,6 +120,7 @@ function memDB(): MemDB {
       availability: DEFAULT_AVAILABILITY.map((a) => ({ ...a })),
       overrides: [],
       commitments: [],
+      autoStrategy: false,
       seeded: false,
     };
   }
@@ -748,6 +751,44 @@ export async function setAvailability(
     if (existing) existing.hours = Math.max(0, r.hours);
     else db.availability.push({ weekday: r.weekday, hours: Math.max(0, r.hours) });
   }
+}
+
+/**
+ * The pit-wall automation mode. On = auto applies the obvious low-value triage
+ * itself and escalates only genuine ties; off = surface every option, never
+ * auto-apply (locked decision #3). Off by default — the conservative choice, so
+ * a new user is never surprised by tasks the strategist deferred on its own.
+ */
+export async function getAutoStrategy(): Promise<boolean> {
+  if (isSupabaseConfigured()) {
+    const supabase = await getRequestClient();
+    const { data } = await supabase
+      .from("user_settings")
+      .select("auto_strategy")
+      .maybeSingle();
+    return (data as { auto_strategy?: boolean } | null)?.auto_strategy ?? false;
+  }
+  await ensureSeeded();
+  return memDB().autoStrategy;
+}
+
+/** Set the pit-wall automation mode (one row per user, upserted). */
+export async function setAutoStrategy(value: boolean): Promise<void> {
+  if (isSupabaseConfigured()) {
+    const supabase = await getRequestClient();
+    const user_id = await currentUserId(supabase);
+    const { error } = await supabase
+      .from("user_settings")
+      .upsert(
+        { user_id, auto_strategy: value, updated_at: new Date().toISOString() },
+        { onConflict: "user_id" },
+      );
+    if (error)
+      throw new Error(`Supabase user_settings upsert failed: ${error.message}`);
+    return;
+  }
+  await ensureSeeded();
+  memDB().autoStrategy = value;
 }
 
 /** Override the template for one specific date. */
