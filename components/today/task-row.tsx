@@ -3,7 +3,7 @@
 import { useState } from "react";
 import Link from "next/link";
 import { motion } from "motion/react";
-import { Check, User, CalendarDays, Lock } from "lucide-react";
+import { Check, User, CalendarDays, Lock, ArrowUpCircle } from "lucide-react";
 import {
   TASK_STATUSES,
   STATUS_LABELS,
@@ -21,6 +21,7 @@ export function TaskRow({
   entryTitle,
   areas,
   waitingOn,
+  pulledAheadReason,
   onMove,
   onAssignArea,
 }: {
@@ -29,6 +30,8 @@ export function TaskRow({
   areas: string[];
   /** Titles of prerequisite tasks that aren't done yet, if any. */
   waitingOn?: string[];
+  /** Why deadline pressure pulled this task ahead in the global order, if it did. */
+  pulledAheadReason?: string;
   onMove: (id: string, status: TaskStatus, from: TaskStatus) => void;
   onAssignArea: (id: string, area: string) => void;
 }) {
@@ -109,6 +112,14 @@ export function TaskRow({
                 {waitingOn!.length === 1
                   ? `Waiting on “${waitingOn![0]}”`
                   : `Waiting on ${waitingOn!.length} earlier tasks`}
+              </span>
+            </p>
+          )}
+          {pulledAheadReason && (
+            <p className="mt-1 flex items-center gap-1 text-[11px] font-medium text-[var(--color-accent-fg)] opacity-85">
+              <ArrowUpCircle className="size-3 shrink-0" />
+              <span className="truncate" title={pulledAheadReason}>
+                {pulledAheadReason}
               </span>
             </p>
           )}
