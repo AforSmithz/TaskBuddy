@@ -3,6 +3,7 @@ import type {
   Availability,
   AvailabilityOverride,
   Commitment,
+  Conflict,
   Decision,
   DivergenceReason,
   DraftClassification,
@@ -25,6 +26,7 @@ import type {
   TaskDependency,
   TaskModification,
   TaskStatus,
+  TriageMove,
 } from "./types";
 import { ON_TRACK_PROBABILITY, isOnTrack } from "./types";
 import { extractEntry } from "./extraction";
@@ -46,7 +48,13 @@ import {
   recoveryMoves,
   type CandidateTask,
 } from "./forecast";
-import { buildGlobalPlan, type AllocTask } from "./allocate";
+import {
+  buildGlobalPlan,
+  detectConflicts,
+  projectValue,
+  triageCandidates,
+  type AllocTask,
+} from "./allocate";
 import { SAMPLE_ENTRIES, SAMPLE_PROJECTS } from "./sample-data";
 import { getRequestClient } from "./supabase";
 
@@ -914,6 +922,63 @@ function buildAllocTasks(g: ForecastGather): AllocTask[] {
 }
 
 /**
+ * The shared inputs for one global allocation pass: the alloc tasks, dependency
+ * edges, and the per-day capacities under a commitment set. Built once so the
+ * odds, the conflict detection, and the triage probes all reason over the same
+ * contention picture.
+ */
+interface AllocContext {
+  tasks: AllocTask[];
+  deps: DependencyEdge[];
+  budget: { availability: Availability[]; overrides: AvailabilityOverride[]; commitments: Pick<Commitment, "date" | "hours">[] };
+  capacities: ReturnType<typeof dayCapacities>;
+}
+
+function allocContext(
+  g: ForecastGather,
+  commitments: Pick<Commitment, "date" | "hours">[],
+): AllocContext {
+  const budget = { availability: g.availability, overrides: g.overrides, commitments };
+  return {
+    tasks: buildAllocTasks(g),
+    deps: g.deps.map((d) => ({
+      task_id: d.task_id,
+      depends_on_task_id: d.depends_on_task_id,
+    })),
+    budget,
+    capacities: dayCapacities(budget, g.today),
+  };
+}
+
+/**
+ * Joint completion odds for every deadlined project from ONE Monte Carlo over
+ * the global order built from `ctx.tasks`, optionally with some tasks shed
+ * (`excluded` — the deferred set a triage probe is testing). Lower `iterations`
+ * trades a little precision for speed on the repeated triage probes.
+ */
+function jointOdds(
+  g: ForecastGather,
+  ctx: AllocContext,
+  excluded: Set<string> = new Set(),
+  iterations?: number,
+): Map<string, number> {
+  const tasks = excluded.size
+    ? ctx.tasks.filter((t) => !excluded.has(t.id))
+    : ctx.tasks;
+  const plan = buildGlobalPlan({
+    tasks,
+    deps: ctx.deps,
+    deadlineByProject: g.deadlineByProject,
+    budget: ctx.budget,
+    today: g.today,
+  });
+  return globalForecast(plan.order, ctx.capacities, g.deadlineByProject, g.today, {
+    ...forecastOptions(g.model),
+    ...(iterations !== undefined ? { iterations } : {}),
+  });
+}
+
+/**
  * Contention-aware completion odds for every deadlined project, from ONE joint
  * Monte Carlo over the global order under a given commitment set. The single
  * source the per-project forecasts and recovery gating both draw their
@@ -923,28 +988,141 @@ function globalOdds(
   g: ForecastGather,
   commitments: Pick<Commitment, "date" | "hours">[],
 ): Map<string, number> {
-  const budget = {
-    availability: g.availability,
-    overrides: g.overrides,
-    commitments,
-  };
+  return jointOdds(g, allocContext(g, commitments));
+}
+
+// --- The pit wall: conflict detection + contention-aware triage -------------
+
+/** How many lowest-WSJF tasks a triage search probes before giving up. */
+const MAX_TRIAGE_PROBES = 12;
+/** Fewer MC iterations on the repeated triage probes — they only need a relative read. */
+const TRIAGE_PROBE_ITERATIONS = 2000;
+/** A deferral counts as helping only if it lifts some project's odds by at least this. */
+const TRIAGE_MIN_GAIN = 0.01;
+/** Two still-failing projects whose values are this close are a genuine tie to escalate. */
+const COMPARABLE_VALUE_RATIO = 0.75;
+
+/**
+ * What the global allocation can't satisfy, and what to do about it. `conflicts`
+ * names the projects that can't make their deadlines once they share the hours;
+ * `triage` is the recommended low-value work to shed to recover the savable ones
+ * (best-first); `needsDecision` is the one case auto-triage won't resolve — two
+ * comparable-value projects colliding, where the user must pick which to protect.
+ */
+export interface PitWall {
+  conflicts: Conflict[];
+  triage: TriageMove[];
+  needsDecision: boolean;
+}
+
+/** Conflicts in the point-estimate global plan for this gather (no Monte Carlo). */
+function planConflicts(g: ForecastGather, ctx: AllocContext): Conflict[] {
   const plan = buildGlobalPlan({
-    tasks: buildAllocTasks(g),
-    deps: g.deps.map((d) => ({
-      task_id: d.task_id,
-      depends_on_task_id: d.depends_on_task_id,
-    })),
+    tasks: ctx.tasks,
+    deps: ctx.deps,
     deadlineByProject: g.deadlineByProject,
-    budget,
+    budget: ctx.budget,
     today: g.today,
   });
-  return globalForecast(
-    plan.order,
-    dayCapacities(budget, g.today),
+  return detectConflicts(plan.order, ctx.capacities, g.deadlineByProject, g.today);
+}
+
+/**
+ * The pit wall for a gather: which deadlined projects can't make it under
+ * contention, the lowest-WSJF work to shed to recover the savable ones, and
+ * whether what's left is a comparable-value tie that must be escalated.
+ *
+ * Triage is contention-aware (the G3 promise): each candidate deferral is scored
+ * by re-running the *joint* Monte Carlo with that task (and the ones already
+ * shed) removed, so the recovered odds account for the freed shared hours — not a
+ * solo per-project estimate. Walks candidates lowest-WSJF first and keeps a
+ * deferral only when it meaningfully lifts some project's odds (locked #3).
+ */
+function buildPitWall(
+  g: ForecastGather,
+  ctx: AllocContext,
+  baseOdds: Map<string, number>,
+): PitWall {
+  const conflicts = planConflicts(g, ctx);
+  if (conflicts.length === 0) {
+    return { conflicts: [], triage: [], needsDecision: false };
+  }
+
+  const onTrackEverywhere = (odds: Map<string, number>) =>
+    g.projects.every((p) => isOnTrack(odds.get(p.id) ?? 1));
+
+  // Open-task count per project — so triage can scope a project *down* but never
+  // shed its last task. Deferring a project's entire open work would read as a
+  // vacuous 100% ("no work left ⇒ finished"), which is abandonment, not recovery
+  // — and abandonment is the escalated decision below, never an auto move.
+  const openCount = new Map<string, number>();
+  for (const t of ctx.tasks) openCount.set(t.projectId, (openCount.get(t.projectId) ?? 0) + 1);
+
+  // Shed the lowest-WSJF open work of the conflicted (over-budget) projects —
+  // the obvious low-value doomed work auto can relieve on its own (locked #3).
+  const conflictedIds = new Set(conflicts.map((c) => c.projectId));
+  const candidates = triageCandidates(
+    ctx.tasks,
+    conflictedIds,
     g.deadlineByProject,
     g.today,
-    forecastOptions(g.model),
-  );
+  ).slice(0, MAX_TRIAGE_PROBES);
+
+  const triage: TriageMove[] = [];
+  const deferred = new Set<string>();
+  const remaining = new Map(openCount);
+  let currentOdds = baseOdds;
+
+  for (const cand of candidates) {
+    if (onTrackEverywhere(currentOdds)) break;
+    // Never abandon a project via triage (leave it at least one open task).
+    if ((remaining.get(cand.task.projectId) ?? 0) <= 1) continue;
+
+    const trial = jointOdds(
+      g,
+      ctx,
+      new Set([...deferred, cand.task.id]),
+      TRIAGE_PROBE_ITERATIONS,
+    );
+    // The project this deferral helps most — shedding low-value work of one
+    // project frees shared hours that may rescue a different, higher-value one.
+    let bestPid = "";
+    let bestGain = 0;
+    for (const p of g.projects) {
+      const gain = (trial.get(p.id) ?? 1) - (currentOdds.get(p.id) ?? 1);
+      if (gain > bestGain) {
+        bestGain = gain;
+        bestPid = p.id;
+      }
+    }
+    if (bestGain >= TRIAGE_MIN_GAIN) {
+      deferred.add(cand.task.id);
+      remaining.set(cand.task.projectId, (remaining.get(cand.task.projectId) ?? 1) - 1);
+      triage.push({
+        taskId: cand.task.id,
+        title: cand.task.title,
+        projectId: cand.task.projectId,
+        wsjf: cand.wsjf,
+        probabilityAfter: trial.get(bestPid) ?? 0,
+      });
+      currentOdds = trial;
+    }
+  }
+
+  // Escalate ONLY a genuine tie: two projects whose deadlines collide over the
+  // shared hours and whose aggregate values are close enough that auto can't say
+  // which to protect — the one manual call (locked #3). A collision with a clear
+  // low-value loser isn't a tie: triage above already sheds the loser's work.
+  const collisionValues = conflicts
+    .filter((c) => c.kind === "deadline_collision")
+    .map((c) => projectValue(ctx.tasks, c.projectId, g.deadlineByProject, g.today))
+    .sort((a, b) => b - a);
+  const needsDecision =
+    collisionValues.length >= 2 &&
+    collisionValues[0] > 0 &&
+    collisionValues[1] >= collisionValues[0] * COMPARABLE_VALUE_RATIO;
+
+  return { conflicts, triage, needsDecision };
 }
 
 /**
@@ -990,15 +1168,18 @@ function buildForecasts(
 export async function forecastDashboard(): Promise<{
   forecasts: ProjectForecast[];
   recoveries: RecoveryPlan[];
+  pitWall: PitWall;
   model: EstimationModel;
 }> {
   const g = await gatherForecast();
-  const odds = globalOdds(g, g.commitments);
+  const ctx = allocContext(g, g.commitments);
+  const odds = jointOdds(g, ctx);
   const forecasts = buildForecasts(g, g.commitments, odds);
+  const pitWall = buildPitWall(g, ctx, odds);
   const recoveries = g.projects
-    .map((p) => buildRecoveryPlan(g, p, odds))
+    .map((p) => buildRecoveryPlan(g, p, odds, pitWall.conflicts))
     .filter((plan): plan is RecoveryPlan => plan !== null);
-  return { forecasts, recoveries, model: g.model };
+  return { forecasts, recoveries, pitWall, model: g.model };
 }
 
 /**
@@ -1014,13 +1195,15 @@ export async function forecastProjectWithRecovery(projectId: string): Promise<{
   const project = g.projects.find((p) => p.id === projectId);
   if (!project) return { forecast: null, recovery: null, model: g.model };
   // Build the plan over the FULL gather (all projects) so contention is real,
-  // then read out just this project's odds.
-  const odds = globalOdds(g, g.commitments);
+  // then read out just this project's odds and any conflict touching it.
+  const ctx = allocContext(g, g.commitments);
+  const odds = jointOdds(g, ctx);
+  const conflicts = planConflicts(g, ctx);
   const projectForecast =
     buildForecasts({ ...g, projects: [project] }, g.commitments, odds)[0] ?? null;
   return {
     forecast: projectForecast,
-    recovery: buildRecoveryPlan(g, project, odds),
+    recovery: buildRecoveryPlan(g, project, odds, conflicts),
     model: g.model,
   };
 }
@@ -1129,6 +1312,7 @@ export function detectDivergence(
   deadline: string | null,
   tasks: Task[],
   today: string,
+  conflicts: Conflict[] = [],
 ): DivergenceReason[] {
   const reasons: DivergenceReason[] = [];
   const open = tasks.filter((t) => t.status !== "done" && !t.deferred);
@@ -1191,6 +1375,13 @@ export function detectDivergence(
     });
   }
 
+  // Cross-project signal (the pit wall): this project can't make its deadline
+  // once it competes with others for the shared hours. Critical — the deadline
+  // itself is in jeopardy, for a reason no per-project view can see.
+  for (const c of conflicts) {
+    reasons.push({ kind: "contention", severity: "critical", detail: c.detail });
+  }
+
   return reasons;
 }
 
@@ -1203,6 +1394,7 @@ function buildRecoveryPlan(
   g: ForecastGather,
   project: Project,
   odds: Map<string, number>,
+  conflicts: Conflict[] = [],
 ): RecoveryPlan | null {
   if (!project.deadline) return null;
   const projectId = project.id;
@@ -1225,7 +1417,15 @@ function buildRecoveryPlan(
   };
 
   const allTasks = g.allTasksByProject.get(projectId) ?? [];
-  const reasons = detectDivergence(fc, project.deadline, allTasks, g.today);
+  // Fold in any cross-project conflict touching this project (the pit-wall reason).
+  const projectConflicts = conflicts.filter((c) => c.projectId === projectId);
+  const reasons = detectDivergence(
+    fc,
+    project.deadline,
+    allTasks,
+    g.today,
+    projectConflicts,
+  );
   if (reasons.length === 0) return null;
 
   // Probability-recovery moves (defer / re-date) only make sense when the
