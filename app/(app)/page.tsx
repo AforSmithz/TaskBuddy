@@ -2,6 +2,7 @@ import Link from "next/link";
 import { Plus, CalendarClock, Gauge, AlertTriangle, TrafficCone } from "lucide-react";
 import {
   forecastDashboard,
+  getAutoStrategy,
   getAvailability,
   listAllDependencies,
   listAllTasks,
@@ -21,13 +22,14 @@ import { PitWallCallout } from "@/components/forecast/pit-wall-callout";
 import { TimeBudget } from "@/components/forecast/time-budget";
 
 export default async function TodayPage() {
-  const [allTasks, entries, dependencies, dashboard, availability] =
+  const [allTasks, entries, dependencies, dashboard, availability, autoStrategy] =
     await Promise.all([
       listAllTasks(),
       listEntries(),
       listAllDependencies(),
       forecastDashboard(),
       getAvailability(),
+      getAutoStrategy(),
     ]);
   const { forecasts, recoveries, pitWall, globalPlan, model } = dashboard;
   // Deferred tasks are parked out of scope for their deadline — keep them out of
@@ -78,7 +80,7 @@ export default async function TodayPage() {
               icon={<TrafficCone className="size-4 text-[var(--color-danger)]" />}
             />
             <div className="p-3">
-              <PitWallCallout pitWall={pitWall} />
+              <PitWallCallout pitWall={pitWall} autoStrategy={autoStrategy} />
             </div>
           </Card>
         </Reveal>
@@ -115,7 +117,11 @@ export default async function TodayPage() {
 
       <Reveal delay={0.2} className="mt-5">
         <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
-          <TimeBudget availability={availability} today={todayISO} />
+          <TimeBudget
+            availability={availability}
+            today={todayISO}
+            autoStrategy={autoStrategy}
+          />
           <Card>
             <CardHeader title="On track" icon={<Gauge className="size-4" />} />
             {forecasts.length === 0 ? (
