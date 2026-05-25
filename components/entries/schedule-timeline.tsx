@@ -15,6 +15,13 @@ function formatDay(iso: string): string {
   return `${WEEKDAYS[date.getUTCDay()]}, ${MONTHS[m - 1]} ${d}`;
 }
 
+/** A stable hue per project id so each project reads as one color across days. */
+function projectHue(id: string): number {
+  let h = 0;
+  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) % 360;
+  return h;
+}
+
 /** A multi-day plan sized to each day's real deployable capacity. */
 export function ScheduleTimeline({ days }: { days: ScheduleDay[] }) {
   if (days.length === 0) {
@@ -51,6 +58,24 @@ export function ScheduleTimeline({ days }: { days: ScheduleDay[] }) {
                     <p className="flex min-w-0 items-center gap-1.5 text-[13px] font-medium text-[var(--color-fg)]">
                       {isBuffer && (
                         <Coffee className="size-3.5 shrink-0 text-[var(--color-fg-subtle)]" />
+                      )}
+                      {/* Project tag — only on global (cross-project) schedules. */}
+                      {block.projectId && block.projectName && (
+                        <span
+                          className="flex shrink-0 items-center gap-1 text-[11px] font-medium text-[var(--color-fg-muted)]"
+                          title={block.projectName}
+                        >
+                          <span
+                            aria-hidden
+                            className="size-2 shrink-0 rounded-full"
+                            style={{
+                              backgroundColor: `hsl(${projectHue(block.projectId)} 60% 55%)`,
+                            }}
+                          />
+                          <span className="max-w-[120px] truncate">
+                            {block.projectName}
+                          </span>
+                        </span>
                       )}
                       <span className="truncate" title={block.reason}>
                         {block.label}
