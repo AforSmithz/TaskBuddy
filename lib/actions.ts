@@ -10,10 +10,12 @@ import {
   createDraft,
   createProject,
   discardDraft,
+  getCachedStrategy,
   getEntry,
   logCommitment,
   setAutoStrategy,
   setAvailability,
+  setCachedStrategy,
   setOverride,
   setProjectDeadline,
   updateTask,
@@ -24,12 +26,14 @@ import {
   generateReroute,
   generateTaskModifications,
 } from "./strategist";
+import { generatePortfolioStrategy } from "./portfolio-strategist";
 import { requireUser } from "./auth";
 import type {
   DraftClassification,
   EntryKind,
   ModificationSuggestion,
   PitCall,
+  PortfolioStrategy,
   RecoverySuggestion,
   ReroutePart,
   RerouteSuggestion,
@@ -186,6 +190,17 @@ export async function deferTaskAction(
 export async function applyTriageAction(taskIds: string[]): Promise<void> {
   await requireUser();
   await Promise.all(taskIds.map((id) => updateTask(id, { deferred: true })));
+  revalidateAll();
+}
+
+/**
+ * Reverse a triage batch: bring the deferred tasks back into scope. Backs the
+ * pit wall's "Undo" on an auto-applied deferral, so an automatic move is never a
+ * one-way door.
+ */
+export async function undoTriageAction(taskIds: string[]): Promise<void> {
+  await requireUser();
+  await Promise.all(taskIds.map((id) => updateTask(id, { deferred: false })));
   revalidateAll();
 }
 
@@ -375,6 +390,23 @@ export async function applyRerouteAction(
   await requireUser();
   await applyReroute(projectId, replacedTaskIds, tasks);
   revalidateAll();
+}
+
+/**
+ * Regenerate the portfolio strategy and cache it — the ONLY trigger that runs the
+ * synthesis LLM (locked decision #4). Both "Am I on track?" and the stale-banner
+ * "Refresh" call this; the Today/Strategy load paths never do. Passes the
+ * previously cached strategy for time-drift continuity, persists the result, and
+ * revalidates both pages that render it.
+ */
+export async function refreshPortfolioStrategyAction(): Promise<PortfolioStrategy> {
+  await requireUser();
+  const prev = await getCachedStrategy();
+  const strategy = await generatePortfolioStrategy(prev);
+  await setCachedStrategy(strategy);
+  revalidatePath("/");
+  revalidatePath("/strategy");
+  return strategy;
 }
 
 /** Generate a follow-up message for an entry's open questions and blockers. */
