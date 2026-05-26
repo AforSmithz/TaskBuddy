@@ -572,3 +572,88 @@ export interface PitWallOption {
   /** Protected project's joint odds once the sacrifice set is shed. */
   probabilityAfter: number;
 }
+
+// --- Portfolio strategist (one cached, time-aware recommendation) -----------
+
+/**
+ * Every move the portfolio strategy can recommend. Maps 1:1 to an existing apply
+ * action (see `lib/portfolio-strategist.ts`). `hold` is the no-op "stay the
+ * course" outcome — surfaced when the synthesis decides no change is needed.
+ */
+export type StrategyMoveKind =
+  | "defer"
+  | "reschedule_deadline"
+  | "reschedule_task"
+  | "unblock"
+  | "triage"
+  | "add_tasks"
+  | "reshape"
+  | "reroute"
+  | "mark_done"
+  | "hold";
+
+/**
+ * The literal arguments an apply action needs, discriminated by `kind`. The
+ * payload carries the *full* struct (not a reference) so a cached strategy can be
+ * applied without re-deriving it — a stale id simply no-ops in the apply action.
+ */
+export type StrategyMovePayload =
+  | { kind: "defer"; taskId: string; title: string }
+  | { kind: "reschedule_deadline"; deadline: string }
+  | { kind: "reschedule_task"; taskId: string; title: string; dueDate: string }
+  | { kind: "unblock"; taskId: string; title: string }
+  | { kind: "mark_done"; taskId: string; title: string }
+  | { kind: "triage"; taskIds: string[]; titles: string[] }
+  | { kind: "add_tasks"; tasks: SuggestedTask[] }
+  | { kind: "reshape"; mods: TaskModification[] }
+  | {
+      kind: "reroute";
+      replacedTaskIds: string[];
+      tasks: ReroutePart[];
+      approach: string;
+    }
+  | { kind: "hold" };
+
+/**
+ * One recommended move in the portfolio strategy. `rationale` is human prose (the
+ * synthesis LLM's, or a deterministic template); `probabilityAfter` is ALWAYS
+ * harvested from a `forecast()`-scored struct, never authored by the LLM.
+ */
+export interface StrategyMove {
+  kind: StrategyMoveKind;
+  /** Owning project, or "" for cross-project triage. */
+  projectId: string;
+  projectName: string;
+  rationale: string;
+  /** The odds this move restores — always from `forecast()`/`jointOdds`. */
+  probabilityAfter: number;
+  /** The literal args the mapped apply action needs, discriminated by kind. */
+  payload: StrategyMovePayload;
+}
+
+/**
+ * The single portfolio-wide recommendation rendered on Today: a narrative
+ * assessment plus an ordered (best-first) set of applyable moves. Cached and
+ * regenerated only when the situation changes or the user asks (see §C).
+ */
+export interface PortfolioStrategy {
+  /** Narrative across the whole portfolio. */
+  assessment: string;
+  /** True ⇒ hold course; `moves` may be empty. */
+  onTrack: boolean;
+  /** Ordered best-first; each mapped to an apply action. */
+  moves: StrategyMove[];
+  /** ISO timestamp — anchor for plan-vs-time drift continuity AND the age-based staleness gate. */
+  generatedAt: string;
+  /** Situation hash this strategy was generated for (see `computeSituationFingerprint`). */
+  fingerprint: string;
+  /**
+   * Per-project completion odds (contention-aware) at generation time, keyed by
+   * projectId. The staleness gate diffs the *current* odds against this snapshot
+   * so only a change that materially moves the odds (not a cosmetic edit) marks
+   * the strategy stale — the cheap deterministic pre-filter before any LLM call.
+   */
+  odds: Record<string, number>;
+  /** False = deterministic fallback (no key / call failed). */
+  usedLLM: boolean;
+}
