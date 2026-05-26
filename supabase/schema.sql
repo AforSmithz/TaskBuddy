@@ -261,3 +261,22 @@ alter table user_settings enable row level security;
 drop policy if exists user_settings_owner on user_settings;
 create policy user_settings_owner on user_settings
   for all using (user_id = auth.uid()) with check (user_id = auth.uid());
+
+-- ===========================================================================
+-- Phase 4 — the portfolio strategist: one cached, time-aware recommendation.
+-- ===========================================================================
+
+-- Caches the synthesized portfolio strategy per user so it only regenerates when
+-- the situation changes (fingerprint mismatch) or the user explicitly asks.
+create table if not exists portfolio_strategy (
+  user_id     uuid primary key references auth.users(id) on delete cascade,
+  fingerprint text not null,
+  strategy    jsonb not null,
+  updated_at  timestamptz not null default now()
+);
+
+alter table portfolio_strategy enable row level security;
+
+drop policy if exists portfolio_strategy_owner on portfolio_strategy;
+create policy portfolio_strategy_owner on portfolio_strategy
+  for all using (user_id = auth.uid()) with check (user_id = auth.uid());
