@@ -8,11 +8,18 @@ import {
   Scale,
   Shield,
   TrafficCone,
+  Undo2,
 } from "lucide-react";
 import type { PitWall } from "@/lib/store";
 import type { PitWallOption } from "@/lib/types";
-import { applyTriageAction, deferTaskAction } from "@/lib/actions";
+import {
+  applyTriageAction,
+  deferTaskAction,
+  setAutoStrategyAction,
+  undoTriageAction,
+} from "@/lib/actions";
 import { band, formatPct } from "@/components/forecast/forecast-meter";
+import { Card, CardHeader } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
 
@@ -27,15 +34,17 @@ function toneText(p: number): string {
 
 /**
  * The pit wall: the bird's-eye view of what the shared hours can't satisfy and
- * the cross-project trade-off to make. Two paths, matching locked decision #3:
- * an auto recovery (shed the lowest-value doomed work) and, only when the engine
- * hit a genuine comparable-value tie, an escalation where the user picks which
- * colliding project to protect. Both reuse the reversible defer, so every move is
- * undoable from the project's Deferred section.
+ * the cross-project trade-off to make. Always mounted on Today — when nothing
+ * collides it shows a calm one-liner, so its automation toggle (in the header)
+ * stays reachable. Two conflict paths, matching locked decision #3: an auto
+ * recovery (shed the lowest-value doomed work) and, only on a genuine
+ * comparable-value tie, an escalation where the user picks which colliding
+ * project to protect. Every move reuses the reversible defer.
  *
- * `autoStrategy` is the G6 mode. On = the auto path applies itself (the obvious
- * call); off = it's surfaced for one click. A tie always stays the user's call —
- * auto escalates ties, it never resolves them.
+ * `autoStrategy` is the G6 mode. On = the auto path applies itself on sight and
+ * leaves an undoable receipt here (this card outlives the cleared conflict, so
+ * the receipt persists); off = each move is surfaced for one click. A tie always
+ * stays the user's call — auto escalates ties, it never resolves them.
  */
 export function PitWallCallout({
   pitWall,
@@ -46,65 +55,228 @@ export function PitWallCallout({
 }) {
   const { conflicts, triage, needsDecision, options } = pitWall;
   const collision = conflicts.some((c) => c.kind === "deadline_collision");
+  const hasConflict = conflicts.length > 0;
+
+  // Receipt of an auto-applied batch, kept across the revalidation that clears
+  // the conflict (the inner panels unmount once `triage` empties; this card
+  // doesn't, so the receipt lives here). Null until auto has shed something.
+  const [receipt, setReceipt] = useState<{ taskIds: string[] } | null>(null);
+  const [pending, startTransition] = useTransition();
+  const [undoing, setUndoing] = useState(false);
+
+  // The auto/manual mode, optimistic so the switch and its description update
+  // together the instant it's flipped (the server pref catches up on revalidate).
+  const [autoOn, setAutoOn] = useState(autoStrategy);
+  const [, startStrategy] = useTransition();
+  function toggleStrategy() {
+    const next = !autoOn;
+    setAutoOn(next);
+    startStrategy(async () => {
+      await setAutoStrategyAction(next);
+    });
+  }
+  const modeDescription = autoOn
+    ? "Auto-defers obvious low-value work to protect your deadlines; only a genuine tie asks you to choose."
+    : "Surfaces every trade-off for you to apply — nothing is deferred automatically.";
+
+  // Best recovered odds across the moves — the headline the batch buys.
+  const best = triage.reduce((m, t) => Math.max(m, t.probabilityAfter), 0);
+
+  // Auto mode: shed the lowest-value batch on sight, exactly once per mount.
+  // The revalidated forecast then drops these tasks and the conflict usually
+  // clears — we fall through to the receipt below.
+  const autoFired = useRef(false);
+  useEffect(() => {
+    if (!autoOn || autoFired.current || triage.length === 0) return;
+    autoFired.current = true;
+    const ids = triage.map((m) => m.taskId);
+    startTransition(async () => {
+      await applyTriageAction(ids);
+      setReceipt({ taskIds: ids });
+    });
+  }, [autoOn, triage]);
+
+  function undo() {
+    if (!receipt) return;
+    const ids = receipt.taskIds;
+    setUndoing(true);
+    startTransition(async () => {
+      await undoTriageAction(ids);
+      setReceipt(null);
+      // Let auto re-fire if the conflict returns after the work comes back.
+      autoFired.current = false;
+      setUndoing(false);
+    });
+  }
 
   return (
-    <div className="rounded-lg border border-[var(--color-border)] border-l-2 border-l-[var(--color-danger)] bg-[var(--color-surface-raised)] p-4">
-      {/* What the shared hours can't fit */}
-      <div className="flex items-start gap-2.5">
-        <TrafficCone className="mt-0.5 size-4 shrink-0 text-[var(--color-danger)]" />
-        <div className="min-w-0 flex-1">
-          <p className="text-[13px] font-semibold text-[var(--color-fg)]">
-            {collision
-              ? "Two deadlines are fighting for the same hours"
-              : "This won't all fit before its deadline"}
-          </p>
-          <ul className="mt-1 space-y-0.5">
-            {conflicts.map((c) => (
-              <li key={c.projectId} className="text-[12px] text-[var(--color-fg-muted)]">
-                {c.detail}
-              </li>
-            ))}
-          </ul>
-        </div>
-      </div>
-
-      {/* Auto path — shed the lowest-value doomed work. */}
-      {triage.length > 0 && (
-        <AutoTriage triage={triage} autoStrategy={autoStrategy} />
-      )}
-
-      {/* The one manual call — a genuine comparable-value tie. */}
-      {needsDecision && options.length > 0 && <Escalation options={options} />}
-
-      {/* Nothing auto can relieve, and no tie to arbitrate — name the levers. */}
-      {triage.length === 0 && !needsDecision && (
-        <p className="mt-3.5 text-[12px] text-[var(--color-fg-muted)]">
-          No low-value work to shed recovers this — add hours, move a deadline, or
-          split the work in the projects below.
+    <Card>
+      <CardHeader
+        title="The pit wall"
+        icon={
+          <TrafficCone
+            className={cn(
+              "size-4",
+              hasConflict
+                ? "text-[var(--color-danger)]"
+                : "text-[var(--color-fg-muted)]",
+            )}
+          />
+        }
+        action={<StrategyToggle on={autoOn} onToggle={toggleStrategy} />}
+      />
+      <div className="p-3">
+        <p className="mb-2.5 px-1 text-[12px] leading-snug text-[var(--color-fg-subtle)]">
+          {modeDescription}
         </p>
-      )}
+        {hasConflict ? (
+          <div className="rounded-lg border border-[var(--color-border)] border-l-2 border-l-[var(--color-danger)] bg-[var(--color-surface-raised)] p-4">
+            {/* What the shared hours can't fit */}
+            <div className="flex items-start gap-2.5">
+              <TrafficCone className="mt-0.5 size-4 shrink-0 text-[var(--color-danger)]" />
+              <div className="min-w-0 flex-1">
+                <p className="text-[13px] font-semibold text-[var(--color-fg)]">
+                  {collision
+                    ? "Two deadlines are fighting for the same hours"
+                    : "This won't all fit before its deadline"}
+                </p>
+                <ul className="mt-1 space-y-0.5">
+                  {conflicts.map((c) => (
+                    <li
+                      key={c.projectId}
+                      className="text-[12px] text-[var(--color-fg-muted)]"
+                    >
+                      {c.detail}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            </div>
+
+            {/* Auto path — shed the lowest-value doomed work. */}
+            {triage.length > 0 &&
+              (autoOn ? (
+                <p className="mt-3.5 flex items-center gap-1.5 text-[12px] text-[var(--color-fg-muted)]">
+                  <ArrowRight className="size-3.5 shrink-0 text-[var(--color-fg-subtle)]" />
+                  Auto-deferring {triage.length} low-value{" "}
+                  {triage.length === 1 ? "task" : "tasks"} →{" "}
+                  <span
+                    className={cn(
+                      "font-semibold tabular-nums",
+                      toneText(best),
+                    )}
+                  >
+                    {formatPct(best)}
+                  </span>
+                </p>
+              ) : (
+                <ManualTriage triage={triage} />
+              ))}
+
+            {/* The one manual call — a genuine comparable-value tie. */}
+            {needsDecision && options.length > 0 && (
+              <Escalation options={options} />
+            )}
+
+            {/* Nothing auto can relieve, and no tie to arbitrate. */}
+            {triage.length === 0 && !needsDecision && (
+              <p className="mt-3.5 text-[12px] text-[var(--color-fg-muted)]">
+                No low-value work to shed recovers this — add hours, move a
+                deadline, or split the work in the projects below.
+              </p>
+            )}
+          </div>
+        ) : receipt ? (
+          /* Auto-applied receipt — persists after the conflict clears, undoable. */
+          <div className="flex items-center justify-between gap-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-raised)] px-4 py-3">
+            <p className="flex min-w-0 items-center gap-1.5 text-[12px] text-[var(--color-fg-muted)]">
+              <Check className="size-3.5 shrink-0 text-[var(--color-status-done)]" />
+              <span className="min-w-0">
+                Auto-deferred {receipt.taskIds.length} low-value{" "}
+                {receipt.taskIds.length === 1 ? "task" : "tasks"} to protect your
+                deadlines.
+              </span>
+            </p>
+            <Button
+              variant="ghost"
+              size="sm"
+              loading={undoing}
+              disabled={pending}
+              onClick={undo}
+            >
+              <Undo2 className="size-3.5" />
+              Undo
+            </Button>
+          </div>
+        ) : (
+          /* Calm — everything fits. */
+          <p className="flex items-center gap-1.5 px-1 py-0.5 text-[12px] text-[var(--color-fg-muted)]">
+            <Shield className="size-3.5 shrink-0 text-[var(--color-status-done)]" />
+            All projects fit your hours.
+          </p>
+        )}
+      </div>
+    </Card>
+  );
+}
+
+/**
+ * The auto/manual switch for the pit wall, compact for the card header. State is
+ * owned by the parent so the switch and its description stay in lockstep; the
+ * sentence under the header explains what each mode does.
+ */
+function StrategyToggle({
+  on,
+  onToggle,
+}: {
+  on: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <div className="flex shrink-0 items-center gap-2">
+      <span
+        className={cn(
+          "text-[11px] font-medium uppercase tracking-[0.05em]",
+          on
+            ? "text-[var(--color-accent-fg)]"
+            : "text-[var(--color-fg-subtle)]",
+        )}
+      >
+        {on ? "Auto" : "Manual"}
+      </span>
+      <button
+        type="button"
+        role="switch"
+        aria-checked={on}
+        aria-label="Pit-wall automation"
+        onClick={onToggle}
+        className={cn(
+          "relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-accent)]",
+          on ? "bg-[var(--color-accent)]" : "bg-[var(--color-border)]",
+        )}
+      >
+        <span
+          className={cn(
+            "inline-block size-4 transform rounded-full bg-white shadow-sm transition-transform",
+            on ? "translate-x-4" : "translate-x-0.5",
+          )}
+        />
+      </button>
     </div>
   );
 }
 
 /**
- * Defer the lowest-WSJF doomed work. In manual mode it's surfaced for a click
- * (all at once, or one task at a time); in auto mode the strategist applies the
- * whole batch itself on sight — the obvious call it's trusted to make (G6).
+ * Manual mode: defer the lowest-WSJF doomed work, surfaced for a click — all at
+ * once, or one task at a time. Each shows the odds it recovers (always from the
+ * forecast). Reversible from the project's Deferred section.
  */
-function AutoTriage({
-  triage,
-  autoStrategy,
-}: {
-  triage: PitWall["triage"];
-  autoStrategy: boolean;
-}) {
+function ManualTriage({ triage }: { triage: PitWall["triage"] }) {
   const [pending, startTransition] = useTransition();
   const [busy, setBusy] = useState<string | null>(null);
   const [applied, setApplied] = useState<Set<string>>(new Set());
 
   const remaining = triage.filter((m) => !applied.has(m.taskId));
-  // Best recovered odds across the moves — the headline the batch buys.
   const best = triage.reduce((m, t) => Math.max(m, t.probabilityAfter), 0);
 
   function defer(ids: string[], key: string) {
@@ -122,39 +294,10 @@ function AutoTriage({
     });
   }
 
-  // Auto mode: shed the batch on sight, exactly once. After it applies, the
-  // revalidated forecast drops these tasks and the conflict (and this card)
-  // usually clears — so there's no re-fire to guard beyond this mount.
-  const autoFired = useRef(false);
-  useEffect(() => {
-    if (!autoStrategy || autoFired.current || triage.length === 0) return;
-    autoFired.current = true;
-    defer(
-      triage.map((m) => m.taskId),
-      "all",
-    );
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [autoStrategy]);
-
   if (remaining.length === 0) {
     return (
       <p className="mt-3.5 flex items-center gap-1.5 text-[12px] text-[var(--color-status-done)]">
         <Check className="size-3.5" /> Deferred — forecast updating.
-      </p>
-    );
-  }
-
-  // Auto mode hasn't finished applying yet — show a passive working state, not
-  // the manual buttons (the user isn't being asked to do anything here).
-  if (autoStrategy) {
-    return (
-      <p className="mt-3.5 flex items-center gap-1.5 text-[12px] text-[var(--color-fg-muted)]">
-        <ArrowRight className="size-3.5 shrink-0 text-[var(--color-fg-subtle)]" />
-        Auto-deferring {triage.length} low-value{" "}
-        {triage.length === 1 ? "task" : "tasks"} →{" "}
-        <span className={cn("font-semibold tabular-nums", toneText(best))}>
-          {formatPct(best)}
-        </span>
       </p>
     );
   }
@@ -250,7 +393,8 @@ function Escalation({ options }: { options: PitWallOption[] }) {
           >
             <Flag className="size-3.5 shrink-0 text-[var(--color-accent-fg)]" />
             <span className="min-w-0 flex-1 text-[12px] text-[var(--color-fg-muted)]">
-              Protect <span className="text-[var(--color-fg)]">{opt.protectName}</span>
+              Protect{" "}
+              <span className="text-[var(--color-fg)]">{opt.protectName}</span>
               <span className="text-[var(--color-fg-subtle)]">
                 {" "}
                 · defer {opt.sacrificeNames.join(", ")}

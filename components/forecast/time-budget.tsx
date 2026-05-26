@@ -10,12 +10,10 @@ import {
   Loader2,
   Check,
   CalendarClock,
-  TrafficCone,
 } from "lucide-react";
 import type { Availability, PitCall } from "@/lib/types";
 import {
   setAvailabilityAction,
-  setAutoStrategyAction,
   logCommitmentAction,
   deferTaskAction,
   setProjectDeadlineAction,
@@ -44,11 +42,9 @@ function toneText(p: number): string {
 export function TimeBudget({
   availability,
   today,
-  autoStrategy,
 }: {
   availability: Availability[];
   today: string;
-  autoStrategy: boolean;
 }) {
   const [hours, setHours] = useState<number[]>(() => {
     const arr = Array<number>(7).fill(0);
@@ -218,66 +214,8 @@ export function TimeBudget({
               ))}
             </div>
           ))}
-
-        {/* Pit-wall automation mode (G6) */}
-        <div className="border-t border-[var(--color-border)] pt-4">
-          <StrategyToggle autoStrategy={autoStrategy} />
-        </div>
       </CardBody>
     </Card>
-  );
-}
-
-/**
- * The auto/manual switch for the pit wall. On, the strategist defers the obvious
- * low-value doomed work itself and only escalates genuine comparable-value ties;
- * off, it surfaces every move for the user to apply. Lives here — the strategist's
- * control panel — so it's reachable even when no conflict is currently showing.
- */
-function StrategyToggle({ autoStrategy }: { autoStrategy: boolean }) {
-  const [on, setOn] = useState(autoStrategy);
-  const [, startTransition] = useTransition();
-
-  function toggle() {
-    const next = !on;
-    setOn(next); // optimistic
-    startTransition(async () => {
-      await setAutoStrategyAction(next);
-    });
-  }
-
-  return (
-    <div className="flex items-start gap-3">
-      <TrafficCone className="mt-0.5 size-4 shrink-0 text-[var(--color-fg-muted)]" />
-      <div className="min-w-0 flex-1">
-        <p className="text-[12px] font-semibold uppercase tracking-[0.05em] text-[var(--color-fg-muted)]">
-          Pit-wall automation
-        </p>
-        <p className="mt-0.5 text-[11px] text-[var(--color-fg-subtle)]">
-          {on
-            ? "Auto-deferring obvious low-value work; only genuine ties ask you to choose."
-            : "Surfacing every trade-off for you to apply — nothing is deferred automatically."}
-        </p>
-      </div>
-      <button
-        type="button"
-        role="switch"
-        aria-checked={on}
-        aria-label="Pit-wall automation"
-        onClick={toggle}
-        className={cn(
-          "relative mt-0.5 inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-accent)]",
-          on ? "bg-[var(--color-accent)]" : "bg-[var(--color-border)]",
-        )}
-      >
-        <span
-          className={cn(
-            "inline-block size-4 transform rounded-full bg-white shadow-sm transition-transform",
-            on ? "translate-x-4" : "translate-x-0.5",
-          )}
-        />
-      </button>
-    </div>
   );
 }
 

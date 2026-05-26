@@ -1,13 +1,18 @@
 import Link from "next/link";
-import { Plus, CalendarClock, Gauge, AlertTriangle, TrafficCone } from "lucide-react";
+import { Plus, CalendarClock, Gauge } from "lucide-react";
 import {
   forecastDashboard,
-  getAutoStrategy,
   getAvailability,
+  getCachedStrategy,
   listAllDependencies,
   listAllTasks,
   listEntries,
 } from "@/lib/store";
+import {
+  assessStaleness,
+  deterministicStrategyFrom,
+} from "@/lib/portfolio-strategist";
+import { isLLMConfigured } from "@/lib/extraction";
 import { PageHeader } from "@/components/ui/page-header";
 import { Card, CardHeader } from "@/components/ui/card";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -17,21 +22,28 @@ import { Reveal } from "@/components/motion/reveal";
 import { TodayAgenda } from "@/components/today/today-agenda";
 import { TodayPlan } from "@/components/today/today-plan";
 import { ProbabilityPill, ForecastCalibration } from "@/components/forecast/forecast-meter";
-import { RecoveryCallout } from "@/components/forecast/recovery-callout";
-import { PitWallCallout } from "@/components/forecast/pit-wall-callout";
+import { StrategyCard } from "@/components/strategy/strategy-card";
 import { TimeBudget } from "@/components/forecast/time-budget";
 
 export default async function TodayPage() {
-  const [allTasks, entries, dependencies, dashboard, availability, autoStrategy] =
+  const [allTasks, entries, dependencies, dashboard, availability, cached] =
     await Promise.all([
       listAllTasks(),
       listEntries(),
       listAllDependencies(),
       forecastDashboard(),
       getAvailability(),
-      getAutoStrategy(),
+      getCachedStrategy(),
     ]);
   const { forecasts, recoveries, pitWall, globalPlan, model } = dashboard;
+
+  // The Today load NEVER regenerates (no LLM). It renders the cached strategy
+  // when present — marked stale only if the situation moved the odds materially or
+  // it aged out — or a deterministic fallback when nothing is cached yet. The card
+  // decides whether to auto-regenerate in the background (aggressive policy).
+  const strategy = cached ?? deterministicStrategyFrom(recoveries, pitWall, forecasts);
+  const strategyStale = cached !== null && assessStaleness(cached, forecasts).stale;
+  const canUseLLM = isLLMConfigured();
   // Deferred tasks are parked out of scope for their deadline — keep them out of
   // the active working views too (they live in the project's Deferred section).
   const tasks = allTasks.filter((t) => !t.deferred);
@@ -71,36 +83,12 @@ export default async function TodayPage() {
         />
       </Reveal>
 
-      {/* The pit wall — the cross-project trade-off, above the per-project detail. */}
-      {pitWall.conflicts.length > 0 && (
-        <Reveal delay={0.05} className="mt-7">
-          <Card>
-            <CardHeader
-              title="The pit wall"
-              icon={<TrafficCone className="size-4 text-[var(--color-danger)]" />}
-            />
-            <div className="p-3">
-              <PitWallCallout pitWall={pitWall} autoStrategy={autoStrategy} />
-            </div>
-          </Card>
-        </Reveal>
-      )}
-
-      {recoveries.length > 0 && (
-        <Reveal delay={0.08} className="mt-7">
-          <Card>
-            <CardHeader
-              title="Needs attention"
-              icon={<AlertTriangle className="size-4 text-[var(--color-danger)]" />}
-            />
-            <div className="space-y-3 p-3">
-              {recoveries.map((plan) => (
-                <RecoveryCallout key={plan.projectId} plan={plan} />
-              ))}
-            </div>
-          </Card>
-        </Reveal>
-      )}
+      {/* One portfolio-wide strategy — the cross-project recommendation. Replaces
+          the old pit-wall + per-project "Needs attention" stack; the full detail
+          (contention, per-project options, heavy AI tools) lives at /strategy. */}
+      <Reveal delay={0.05} className="mt-7">
+        <StrategyCard strategy={strategy} stale={strategyStale} canUseLLM={canUseLLM} />
+      </Reveal>
 
       <Reveal delay={0.1} className="mt-7">
         <TodayAgenda
@@ -117,11 +105,7 @@ export default async function TodayPage() {
 
       <Reveal delay={0.2} className="mt-5">
         <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
-          <TimeBudget
-            availability={availability}
-            today={todayISO}
-            autoStrategy={autoStrategy}
-          />
+          <TimeBudget availability={availability} today={todayISO} />
           <Card>
             <CardHeader title="On track" icon={<Gauge className="size-4" />} />
             {forecasts.length === 0 ? (
