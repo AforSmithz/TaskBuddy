@@ -17,6 +17,7 @@ import type {
   ForecastResult,
   OpenQuestion,
   PitCall,
+  PortfolioStrategy,
   Project,
   ProjectForecast,
   RecoveryPlan,
@@ -98,6 +99,8 @@ interface MemDB {
   commitments: Commitment[];
   /** Whether the pit-wall strategist auto-applies obvious triage (vs. surfacing it). */
   autoStrategy: boolean;
+  /** The cached portfolio strategy (Phase 4), or null until first generated. */
+  portfolioStrategy: PortfolioStrategy | null;
   seeded: boolean;
 }
 
@@ -121,6 +124,7 @@ function memDB(): MemDB {
       overrides: [],
       commitments: [],
       autoStrategy: false,
+      portfolioStrategy: null,
       seeded: false,
     };
   }
@@ -789,6 +793,54 @@ export async function setAutoStrategy(value: boolean): Promise<void> {
   }
   await ensureSeeded();
   memDB().autoStrategy = value;
+}
+
+// --- Portfolio strategy cache (Phase 4) -------------------------------------
+
+/**
+ * The cached portfolio strategy for the signed-in user, or null if none has been
+ * generated. The Today load path reads this (never the generator) and compares
+ * its `fingerprint` to the current situation to decide fresh vs. stale.
+ */
+export async function getCachedStrategy(): Promise<PortfolioStrategy | null> {
+  if (isSupabaseConfigured()) {
+    const supabase = await getRequestClient();
+    const { data } = await supabase
+      .from("portfolio_strategy")
+      .select("strategy")
+      .maybeSingle();
+    return (
+      (data as { strategy?: PortfolioStrategy } | null)?.strategy ?? null
+    );
+  }
+  await ensureSeeded();
+  return memDB().portfolioStrategy;
+}
+
+/** Persist the freshly generated portfolio strategy (one row per user, upserted). */
+export async function setCachedStrategy(
+  strategy: PortfolioStrategy,
+): Promise<void> {
+  if (isSupabaseConfigured()) {
+    const supabase = await getRequestClient();
+    const user_id = await currentUserId(supabase);
+    const { error } = await supabase.from("portfolio_strategy").upsert(
+      {
+        user_id,
+        fingerprint: strategy.fingerprint,
+        strategy,
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: "user_id" },
+    );
+    if (error)
+      throw new Error(
+        `Supabase portfolio_strategy upsert failed: ${error.message}`,
+      );
+    return;
+  }
+  await ensureSeeded();
+  memDB().portfolioStrategy = strategy;
 }
 
 /** Override the template for one specific date. */
