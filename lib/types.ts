@@ -190,6 +190,83 @@ export interface Commitment {
   created_at: string;
 }
 
+// --- Recurring activities (goals & routines) --------------------------------
+
+/**
+ * A recurring activity's cadence period. "day" => routine/habit (daily, streak-
+ * based); "week" => goal (a weekly session target).
+ */
+export type ActivityCadencePeriod = "day" | "week";
+
+/**
+ * The unified primitive behind both routines/habits (daily, streak-based) and
+ * goals (weekly target, cadence-based). It contributes a recurring time-drain on
+ * the shared budget and emits a "do it" instance into the Now/Next queue when
+ * due. Its success/miss state is DERIVED from the completion log (see
+ * `lib/recurring.ts`), never stored.
+ */
+export interface RecurringActivity {
+  id: string;
+  /** Owner. Undefined in offline demo mode. */
+  user_id?: string | null;
+  title: string;
+  /** Life-area, reusing the Today-page tabs (Work/Personal/Hobby/custom). */
+  area: string;
+  /** "day" => daily routine/habit; "week" => weekly goal. */
+  period: ActivityCadencePeriod;
+  /** Sessions targeted per period (daily habit = 1; goal e.g. 3 per week). */
+  target_count: number;
+  /** Restrict to certain weekdays (0=Sun..6=Sat); null = any eligible day. */
+  weekdays: number[] | null;
+  /** Minutes per session — the per-instance drain on the time budget. */
+  estimated_minutes: number;
+  // 1-5 factor ratings, same scale as tasks — score the synthetic queue instance.
+  urgency: number;
+  impact: number;
+  effort: number;
+  dependency: number;
+  risk: number;
+  confidence: number;
+  /** When true, the strategist will never auto-sacrifice this activity. */
+  protected: boolean;
+  /** Soft-archive without losing completion history. */
+  active: boolean;
+  created_at: string;
+}
+
+/**
+ * One logged session (or skip) of a recurring activity on a date. A skip
+ * (`skipped: true`) resolves that period's obligation — it stops draining the
+ * budget and stops nagging — but does NOT count toward a streak. All
+ * streak/progress state is derived from these rows; nothing is precomputed.
+ */
+export interface ActivityCompletion {
+  id: string;
+  user_id?: string | null;
+  activity_id: string;
+  date: string; // ISO YYYY-MM-DD the session was logged for
+  minutes: number;
+  skipped: boolean;
+  created_at: string;
+}
+
+/** A recurring activity's derived success state (computed in `lib/recurring.ts`). */
+export type RecurringStatus = "met" | "due" | "missed" | "cold";
+
+/** The derived read of a recurring activity, for the UI and the strategist. */
+export interface RecurringState {
+  activity: RecurringActivity;
+  status: RecurringStatus;
+  /** Consecutive eligible periods met, walking back from today (habit streak). */
+  streak: number;
+  /** Sessions completed vs targeted in the current period. */
+  progress: { done: number; target: number };
+  /** A session (not a skip) was logged for today. */
+  doneToday: boolean;
+  /** An instance is owed today (eligible day, period not yet met, not done). */
+  dueToday: boolean;
+}
+
 // --- Forecast (the completion-probability engine) ---------------------------
 
 /**
@@ -550,6 +627,8 @@ export interface TriageMove {
   taskId: string;
   title: string;
   projectId: string;
+  /** The task's estimate (minutes) — for the before/after task display. */
+  estimatedMinutes: number;
   wsjf: number;
   probabilityAfter: number;
 }
@@ -590,6 +669,7 @@ export type StrategyMoveKind =
   | "reshape"
   | "reroute"
   | "mark_done"
+  | "skip_activity"
   | "hold";
 
 /**
@@ -612,6 +692,12 @@ export type StrategyMovePayload =
       tasks: ReroutePart[];
       approach: string;
     }
+  | {
+      kind: "skip_activity";
+      activityId: string;
+      title: string;
+      period: ActivityCadencePeriod;
+    }
   | { kind: "hold" };
 
 /**
@@ -625,8 +711,25 @@ export interface StrategyMove {
   projectId: string;
   projectName: string;
   rationale: string;
-  /** The odds this move restores — always from `forecast()`/`jointOdds`. */
+  /** The odds this move restores ON ITS OWN — solo per-project, from `forecast()`/`jointOdds`. */
   probabilityAfter: number;
+  /**
+   * The CUMULATIVE contention-aware portfolio odds (P(all deadlined projects
+   * land) — `globalForecastJoint.allOnTime`) after applying this move *and every
+   * move ordered before it*. Climbs to `PortfolioStrategy.combinedProbability` at
+   * the last move. Baked in at generation time; the frontend renders it verbatim.
+   */
+  portfolioProbabilityAfter: number;
+  /**
+   * Titles of EXISTING open tasks this move defers (reversibly) out of the plan —
+   * the work that gets set aside so the lighter/alternative plan can fit. Set for
+   * the moves that shed real work (reroute replaces the whole plan; reshape-split
+   * defers the monolith; triage sheds a batch); omitted for moves that don't
+   * (reschedule, unblock, a plain single defer whose own rationale already says it).
+   * Full task snapshots (hydrated at generation time) so the card renders them as
+   * the same detailed task rows used on the project page — priority, due, scores.
+   */
+  defers?: Task[];
   /** The literal args the mapped apply action needs, discriminated by kind. */
   payload: StrategyMovePayload;
 }
@@ -656,4 +759,22 @@ export interface PortfolioStrategy {
   odds: Record<string, number>;
   /** False = deterministic fallback (no key / call failed). */
   usedLLM: boolean;
+  /**
+   * The bold tier's combined portfolio odds — P(all deadlined projects land)
+   * after applying every move in `moves`. Equals the last move's
+   * `portfolioProbabilityAfter` (the base joint odds when `moves` is empty).
+   * Surfaced at "Apply all".
+   */
+  combinedProbability: number;
+  /**
+   * The grounded "steady plan" tier: mechanical-only moves (defer / reschedule /
+   * unblock / mark_done / triage) chosen by the joint greedy optimizer, beside
+   * the bold LLM recommendation. Each move carries its own cumulative
+   * `portfolioProbabilityAfter`. Null when there's nothing mechanical to do or in
+   * the no-LLM fallback (where the single bold tier already IS the joint plan).
+   */
+  grounded: {
+    moves: StrategyMove[];
+    combinedProbability: number;
+  } | null;
 }

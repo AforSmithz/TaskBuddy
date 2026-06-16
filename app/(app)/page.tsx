@@ -4,6 +4,7 @@ import {
   forecastDashboard,
   getAvailability,
   getCachedStrategy,
+  getRecurringState,
   listAllDependencies,
   listAllTasks,
   listEntries,
@@ -19,40 +20,82 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { buttonClasses } from "@/components/ui/button";
 import { EntryListItem } from "@/components/entries/entry-list-item";
 import { Reveal } from "@/components/motion/reveal";
+import { recurringAgendaTask } from "@/lib/recurring";
 import { TodayAgenda } from "@/components/today/today-agenda";
+import { QuickAdd } from "@/components/today/quick-add";
 import { TodayPlan } from "@/components/today/today-plan";
-import { ProbabilityPill, ForecastCalibration } from "@/components/forecast/forecast-meter";
+import {
+  ProbabilityPill,
+  ForecastCalibration,
+} from "@/components/forecast/forecast-meter";
 import { StrategyCard } from "@/components/strategy/strategy-card";
 import { TimeBudget } from "@/components/forecast/time-budget";
 
 export default async function TodayPage() {
-  const [allTasks, entries, dependencies, dashboard, availability, cached] =
-    await Promise.all([
-      listAllTasks(),
-      listEntries(),
-      listAllDependencies(),
-      forecastDashboard(),
-      getAvailability(),
-      getCachedStrategy(),
-    ]);
-  const { forecasts, recoveries, pitWall, globalPlan, model } = dashboard;
+  const [
+    allTasks,
+    entries,
+    dependencies,
+    dashboard,
+    availability,
+    cached,
+    recurringStates,
+  ] = await Promise.all([
+    listAllTasks(),
+    listEntries(),
+    listAllDependencies(),
+    forecastDashboard(),
+    getAvailability(),
+    getCachedStrategy(),
+    getRecurringState(),
+  ]);
+  const { forecasts, recoveries, pitWall, globalPlan, agendaOrder, model } =
+    dashboard;
 
   // The Today load NEVER regenerates (no LLM). It renders the cached strategy
   // when present — marked stale only if the situation moved the odds materially or
   // it aged out — or a deterministic fallback when nothing is cached yet. The card
   // decides whether to auto-regenerate in the background (aggressive policy).
-  const strategy = cached ?? deterministicStrategyFrom(recoveries, pitWall, forecasts);
-  const strategyStale = cached !== null && assessStaleness(cached, forecasts).stale;
+  const strategy =
+    cached ??
+    deterministicStrategyFrom(
+      recoveries,
+      pitWall,
+      forecasts,
+      new Map(allTasks.map((t) => [t.id, t])),
+    );
+  const strategyStale =
+    cached !== null && assessStaleness(cached, forecasts).stale;
   const canUseLLM = isLLMConfigured();
+  // Escalate the banner only when a hard deadline is genuinely at risk (a critical
+  // divergence reason) — otherwise it stays the calm front door.
+  const bannerSeverity = recoveries.some((p) =>
+    p.reasons.some((r) => r.severity === "critical"),
+  )
+    ? "escalated"
+    : "gentle";
+  // taskId → project name (every open task is in the global order) so the strategy
+  // card can tag each deferred task with the project it belongs to.
+  const projectNames = Object.fromEntries(
+    globalPlan.order.map((o) => [o.taskId, o.projectName]),
+  );
   // Deferred tasks are parked out of scope for their deadline — keep them out of
   // the active working views too (they live in the project's Deferred section).
   const tasks = allTasks.filter((t) => !t.deferred);
 
   const todayISO = new Date().toISOString().slice(0, 10);
 
-  const entryTitles = Object.fromEntries(
-    entries.map((m) => [m.id, m.title]),
+  // Recurring routines/goals due today, woven into the one agenda list as
+  // synthetic rows (their hours are already drained into capacity upstream).
+  const recurringStateById = Object.fromEntries(
+    recurringStates.map((s) => [s.activity.id, s]),
   );
+  const recurringRows = recurringStates
+    .filter((s) => s.dueToday)
+    .map((s) => recurringAgendaTask(s.activity, todayISO));
+  const agendaTasks = [...tasks, ...recurringRows];
+
+  const entryTitles = Object.fromEntries(entries.map((m) => [m.id, m.title]));
 
   const taskCountByEntry = new Map<string, { total: number; open: number }>();
   for (const t of tasks) {
@@ -87,15 +130,26 @@ export default async function TodayPage() {
           the old pit-wall + per-project "Needs attention" stack; the full detail
           (contention, per-project options, heavy AI tools) lives at /strategy. */}
       <Reveal delay={0.05} className="mt-7">
-        <StrategyCard strategy={strategy} stale={strategyStale} canUseLLM={canUseLLM} />
+        <StrategyCard
+          strategy={strategy}
+          stale={strategyStale}
+          canUseLLM={canUseLLM}
+          projectNames={projectNames}
+          severity={bannerSeverity}
+        />
       </Reveal>
 
-      <Reveal delay={0.1} className="mt-7">
+      <Reveal delay={0.1} className="mt-7 flex justify-end">
+        <QuickAdd />
+      </Reveal>
+
+      <Reveal delay={0.12} className="mt-4">
         <TodayAgenda
-          tasks={tasks}
+          tasks={agendaTasks}
           entryTitles={entryTitles}
           dependencies={dependencies}
-          order={globalPlan.order}
+          order={agendaOrder}
+          recurringStateById={recurringStateById}
         />
       </Reveal>
 
@@ -145,10 +199,7 @@ export default async function TodayPage() {
               title="Nothing here yet"
               description="Add a meeting transcript or a personal goal to generate tasks."
               action={
-                <Link
-                  href="/create"
-                  className={buttonClasses("primary", "sm")}
-                >
+                <Link href="/create" className={buttonClasses("primary", "sm")}>
                   <Plus className="size-4" />
                   New Entry
                 </Link>

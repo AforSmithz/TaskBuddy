@@ -8,17 +8,25 @@ import {
   applyTaskModifications,
   confirmDraft,
   createDraft,
+  createErrandTask,
   createProject,
+  createRecurringActivity,
   discardDraft,
   getCachedStrategy,
   getEntry,
+  logActivityCompletion,
   logCommitment,
   setAutoStrategy,
   setAvailability,
   setCachedStrategy,
   setOverride,
   setProjectDeadline,
+  skipActivity,
+  skipActivityForWeek,
+  unskipActivity,
+  updateRecurringActivity,
   updateTask,
+  type NewActivityInput,
 } from "./store";
 import { generateFollowUp } from "./generate";
 import {
@@ -62,6 +70,9 @@ function revalidateAll() {
   revalidatePath("/board");
   revalidatePath("/entries", "layout");
   revalidatePath("/projects", "layout");
+  revalidatePath("/activities");
+  // The strategist banner keys off capacity/odds, which activities change.
+  revalidatePath("/strategy");
 }
 
 /**
@@ -426,4 +437,94 @@ export async function generateFollowUpAction(
       error: err instanceof Error ? err.message : "Failed to generate message.",
     };
   }
+}
+
+// --- Recurring activities (routines & goals) + errands ----------------------
+
+/** Create a recurring activity (routine or goal). */
+export async function createActivityAction(
+  input: NewActivityInput,
+): Promise<void> {
+  await requireUser();
+  await createRecurringActivity(input);
+  revalidateAll();
+}
+
+/** Patch a recurring activity (edit fields). */
+export async function updateActivityAction(
+  id: string,
+  patch: Parameters<typeof updateRecurringActivity>[1],
+): Promise<void> {
+  await requireUser();
+  await updateRecurringActivity(id, patch);
+  revalidateAll();
+}
+
+/** Toggle whether the strategist may auto-sacrifice this activity. */
+export async function setActivityProtectedAction(
+  id: string,
+  isProtected: boolean,
+): Promise<void> {
+  await requireUser();
+  await updateRecurringActivity(id, { protected: isProtected });
+  revalidateAll();
+}
+
+/** Soft-archive a recurring activity (keeps completion history). */
+export async function archiveActivityAction(id: string): Promise<void> {
+  await requireUser();
+  await updateRecurringActivity(id, { active: false });
+  revalidateAll();
+}
+
+/** Log a completed session for an activity today (minutes default to its estimate). */
+export async function logActivityCompletionAction(
+  activityId: string,
+  minutes?: number,
+): Promise<void> {
+  await requireUser();
+  await logActivityCompletion(activityId, undefined, minutes);
+  revalidateAll();
+}
+
+/** Skip an activity's current instance today (reversible). */
+export async function skipActivityAction(
+  activityId: string,
+  date?: string,
+): Promise<void> {
+  await requireUser();
+  await skipActivity(activityId, date);
+  revalidateAll();
+}
+
+/** Undo a skip. */
+export async function unskipActivityAction(
+  activityId: string,
+  date?: string,
+): Promise<void> {
+  await requireUser();
+  await unskipActivity(activityId, date);
+  revalidateAll();
+}
+
+/** Apply a strategist `skip_activity` move: skip the activity for the rest of
+ *  this week, freeing its hours for at-risk deadlines. */
+export async function skipActivityForWeekAction(
+  activityId: string,
+): Promise<void> {
+  await requireUser();
+  await skipActivityForWeek(activityId);
+  revalidateAll();
+}
+
+/** Quick-add a one-off errand (a plain task under the reserved Errands project). */
+export async function quickAddErrandAction(
+  title: string,
+  dueDate?: string | null,
+  estimatedMinutes?: number,
+): Promise<void> {
+  await requireUser();
+  if (!title.trim()) return;
+  await createErrandTask(title, dueDate ?? null, estimatedMinutes ?? 30);
+  revalidateAll();
 }

@@ -199,7 +199,7 @@ function KanbanCard({
       </div>
 
       <Link
-        href={`/entries/${task.entry_id}`}
+        href={`/tasks/${task.id}`}
         draggable={false}
         className="mt-2 block text-[13px] font-medium leading-snug text-[var(--color-fg)] hover:text-[var(--color-accent)]"
       >

@@ -1,5 +1,7 @@
 import "server-only";
 import type {
+  ActivityCadencePeriod,
+  ActivityCompletion,
   Availability,
   AvailabilityOverride,
   Commitment,
@@ -21,8 +23,11 @@ import type {
   Project,
   ProjectForecast,
   RecoveryPlan,
+  RecurringActivity,
+  RecurringState,
   ReroutePart,
   RescheduleMove,
+  StrategyMove,
   SuggestedTask,
   Task,
   TaskDependency,
@@ -47,6 +52,7 @@ import {
   earliestAchievableDeadline,
   forecast,
   globalForecast,
+  globalForecastJoint,
   recoveryMoves,
   type CandidateTask,
 } from "./forecast";
@@ -58,7 +64,19 @@ import {
   type AllocTask,
   type GlobalPlan,
 } from "./allocate";
-import { SAMPLE_ENTRIES, SAMPLE_PROJECTS } from "./sample-data";
+import {
+  SAMPLE_ACTIVITIES,
+  SAMPLE_ENTRIES,
+  SAMPLE_PROJECTS,
+  sampleActivityCompletions,
+} from "./sample-data";
+import {
+  activityDrainCommitments,
+  currentWeekOwedDates,
+  recurringAllocTasksForToday,
+  recurringStateFor,
+  RECURRING_LANE_ID,
+} from "./recurring";
 import { getRequestClient } from "./supabase";
 
 // Central data layer.
@@ -97,6 +115,10 @@ interface MemDB {
   availability: Availability[];
   overrides: AvailabilityOverride[];
   commitments: Commitment[];
+  /** Recurring activities (routines & goals) — the whole-life sources. */
+  recurringActivities: RecurringActivity[];
+  /** Logged sessions/skips of recurring activities — the completion log. */
+  activityCompletions: ActivityCompletion[];
   /** Whether the pit-wall strategist auto-applies obvious triage (vs. surfacing it). */
   autoStrategy: boolean;
   /** The cached portfolio strategy (Phase 4), or null until first generated. */
@@ -123,6 +145,8 @@ function memDB(): MemDB {
       availability: DEFAULT_AVAILABILITY.map((a) => ({ ...a })),
       overrides: [],
       commitments: [],
+      recurringActivities: [],
+      activityCompletions: [],
       autoStrategy: false,
       portfolioStrategy: null,
       seeded: false,
@@ -667,6 +691,8 @@ async function ensureSeeded(): Promise<void> {
         db.tasks.push(...assembled.tasks);
         db.deps.push(...assembled.deps);
       }
+      db.recurringActivities.push(...SAMPLE_ACTIVITIES.map((a) => ({ ...a })));
+      db.activityCompletions.push(...sampleActivityCompletions(todayISO()));
       db.seeded = true;
     })();
   }
@@ -883,12 +909,54 @@ export async function listCommitments(): Promise<Commitment[]> {
     .sort((a, b) => a.date.localeCompare(b.date));
 }
 
-/** Effective time-budget inputs for the forecast engine. */
-async function getTimeBudget(): Promise<{
+interface TimeBudget {
   availability: Availability[];
   overrides: AvailabilityOverride[];
   commitments: Commitment[];
-}> {
+}
+
+/**
+ * Fold recurring activities' drain into the commitment set as synthetic
+ * commitments — the SINGLE place recurring time-cost enters the budget (locked
+ * invariant #1). Because every capacity consumer (`dayCapacities`,
+ * `deployableMinutes`) subtracts commitment hours per date, the eaten time then
+ * lands everywhere automatically. The agenda's synthetic recurring task is
+ * display/order-only and must never be re-counted against capacity.
+ */
+/** Recurring drain as synthetic `Commitment` rows (date + hours; the rest is cosmetic). */
+function drainAsCommitments(
+  activities: RecurringActivity[],
+  completions: ActivityCompletion[],
+  today: string,
+): Commitment[] {
+  return activityDrainCommitments(activities, completions, today).map(
+    (d): Commitment => ({
+      id: `recurring-drain:${d.date}`,
+      date: d.date,
+      hours: d.hours,
+      label: "Routines & goals",
+      created_at: "",
+    }),
+  );
+}
+
+async function appendActivityDrain(budget: TimeBudget): Promise<TimeBudget> {
+  const [activities, completions] = await Promise.all([
+    listRecurringActivities(),
+    listActivityCompletions(),
+  ]);
+  return {
+    ...budget,
+    commitments: [
+      ...budget.commitments,
+      ...drainAsCommitments(activities, completions, todayISO()),
+    ],
+  };
+}
+
+/** Raw time-budget inputs — the real availability/overrides/commitments, NO
+ *  recurring drain folded in (so callers that need the un-drained set can get it). */
+async function getRawTimeBudget(): Promise<TimeBudget> {
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
     const [avail, over, comm] = await Promise.all([
@@ -911,6 +979,427 @@ async function getTimeBudget(): Promise<{
   };
 }
 
+/** Effective time-budget inputs for the forecast engine (recurring drain folded in). */
+async function getTimeBudget(): Promise<TimeBudget> {
+  return appendActivityDrain(await getRawTimeBudget());
+}
+
+// --- Recurring activities (routines & goals) --------------------------------
+
+/** All recurring activities for the user (active and archived). */
+export async function listRecurringActivities(): Promise<RecurringActivity[]> {
+  if (isSupabaseConfigured()) {
+    const supabase = await getRequestClient();
+    const { data } = await supabase
+      .from("recurring_activities")
+      .select("*")
+      .order("created_at", { ascending: false });
+    return (data as RecurringActivity[]) ?? [];
+  }
+  await ensureSeeded();
+  return [...memDB().recurringActivities].sort((a, b) =>
+    b.created_at.localeCompare(a.created_at),
+  );
+}
+
+/** The full completion log for the user (all activities, all dates). */
+export async function listActivityCompletions(): Promise<ActivityCompletion[]> {
+  if (isSupabaseConfigured()) {
+    const supabase = await getRequestClient();
+    const { data } = await supabase
+      .from("activity_completions")
+      .select("*")
+      .order("date", { ascending: false });
+    return (data as ActivityCompletion[]) ?? [];
+  }
+  await ensureSeeded();
+  return [...memDB().activityCompletions];
+}
+
+export interface NewActivityInput {
+  title: string;
+  area?: string;
+  period: ActivityCadencePeriod;
+  target_count: number;
+  weekdays?: number[] | null;
+  estimated_minutes: number;
+  urgency?: number;
+  impact?: number;
+  effort?: number;
+  dependency?: number;
+  risk?: number;
+  confidence?: number;
+  protected?: boolean;
+}
+
+/** Create a recurring activity. Streak habits (daily) default to protected. */
+export async function createRecurringActivity(
+  input: NewActivityInput,
+): Promise<string> {
+  const activity: RecurringActivity = {
+    id: crypto.randomUUID(),
+    title: input.title.trim(),
+    area: input.area?.trim() || "Personal",
+    period: input.period,
+    target_count: Math.max(1, Math.round(input.target_count)),
+    weekdays: input.weekdays ?? null,
+    estimated_minutes: Math.max(1, Math.round(input.estimated_minutes)),
+    urgency: input.urgency ?? 3,
+    impact: input.impact ?? 3,
+    effort: input.effort ?? 3,
+    dependency: input.dependency ?? 1,
+    risk: input.risk ?? 2,
+    confidence: input.confidence ?? 4,
+    protected: input.protected ?? input.period === "day",
+    active: true,
+    created_at: new Date().toISOString(),
+  };
+  if (isSupabaseConfigured()) {
+    const supabase = await getRequestClient();
+    const user_id = await currentUserId(supabase);
+    const { error } = await supabase
+      .from("recurring_activities")
+      .insert({ ...activity, user_id });
+    if (error)
+      throw new Error(`Supabase recurring_activities insert failed: ${error.message}`);
+  } else {
+    await ensureSeeded();
+    memDB().recurringActivities.unshift(activity);
+  }
+  return activity.id;
+}
+
+/** Patch a recurring activity (edit, protect toggle, or soft-archive). */
+export async function updateRecurringActivity(
+  id: string,
+  patch: Partial<
+    Pick<
+      RecurringActivity,
+      | "title"
+      | "area"
+      | "period"
+      | "target_count"
+      | "weekdays"
+      | "estimated_minutes"
+      | "urgency"
+      | "impact"
+      | "effort"
+      | "dependency"
+      | "risk"
+      | "confidence"
+      | "protected"
+      | "active"
+    >
+  >,
+): Promise<RecurringActivity | null> {
+  if (isSupabaseConfigured()) {
+    const supabase = await getRequestClient();
+    const { data } = await supabase
+      .from("recurring_activities")
+      .update(patch)
+      .eq("id", id)
+      .select("*")
+      .maybeSingle();
+    return (data as RecurringActivity) ?? null;
+  }
+  await ensureSeeded();
+  const a = memDB().recurringActivities.find((x) => x.id === id);
+  if (!a) return null;
+  Object.assign(a, patch);
+  return a;
+}
+
+/** Log a completed session for an activity on a date (defaults to today). */
+export async function logActivityCompletion(
+  activityId: string,
+  date?: string,
+  minutes?: number,
+): Promise<void> {
+  const row: ActivityCompletion = {
+    id: crypto.randomUUID(),
+    activity_id: activityId,
+    date: (date ?? todayISO()).slice(0, 10),
+    minutes: minutes !== undefined ? Math.max(0, Math.round(minutes)) : 0,
+    skipped: false,
+    created_at: new Date().toISOString(),
+  };
+  if (isSupabaseConfigured()) {
+    const supabase = await getRequestClient();
+    const user_id = await currentUserId(supabase);
+    const { error } = await supabase
+      .from("activity_completions")
+      .insert({ ...row, user_id });
+    if (error)
+      throw new Error(`Supabase activity_completions insert failed: ${error.message}`);
+    return;
+  }
+  await ensureSeeded();
+  memDB().activityCompletions.push(row);
+}
+
+/**
+ * Skip an activity's current instance for a date (defaults to today): resolves
+ * that period's obligation — stops draining the budget and nagging — without
+ * crediting a streak. Reversible via `unskipActivity`.
+ */
+export async function skipActivity(
+  activityId: string,
+  date?: string,
+): Promise<void> {
+  const day = (date ?? todayISO()).slice(0, 10);
+  const row: ActivityCompletion = {
+    id: crypto.randomUUID(),
+    activity_id: activityId,
+    date: day,
+    minutes: 0,
+    skipped: true,
+    created_at: new Date().toISOString(),
+  };
+  if (isSupabaseConfigured()) {
+    const supabase = await getRequestClient();
+    const user_id = await currentUserId(supabase);
+    const { error } = await supabase
+      .from("activity_completions")
+      .insert({ ...row, user_id });
+    if (error)
+      throw new Error(`Supabase activity skip insert failed: ${error.message}`);
+    return;
+  }
+  await ensureSeeded();
+  memDB().activityCompletions.push(row);
+}
+
+/** Undo a skip (delete the skip rows for that activity + date). */
+export async function unskipActivity(
+  activityId: string,
+  date?: string,
+): Promise<void> {
+  const day = (date ?? todayISO()).slice(0, 10);
+  if (isSupabaseConfigured()) {
+    const supabase = await getRequestClient();
+    await supabase
+      .from("activity_completions")
+      .delete()
+      .eq("activity_id", activityId)
+      .eq("date", day)
+      .eq("skipped", true);
+    return;
+  }
+  await ensureSeeded();
+  const db = memDB();
+  db.activityCompletions = db.activityCompletions.filter(
+    (c) => !(c.activity_id === activityId && c.date === day && c.skipped),
+  );
+}
+
+/**
+ * The derived state (status / streak / progress / due-today) of every active
+ * recurring activity — the read the activities UI and the strategist consume.
+ * Archived activities are excluded.
+ */
+export async function getRecurringState(): Promise<RecurringState[]> {
+  const [activities, completions] = await Promise.all([
+    listRecurringActivities(),
+    listActivityCompletions(),
+  ]);
+  const today = todayISO();
+  return activities
+    .filter((a) => a.active)
+    .map((a) => recurringStateFor(a, completions, today));
+}
+
+/**
+ * Skip an activity for the REST OF THIS WEEK — the apply behind a strategist
+ * `skip_activity` move. Persists skip rows for exactly the current-week owed
+ * instances the forecast probe freed, so the applied effect matches the shown
+ * odds. Reversible by logging real sessions (or unskipping the dates).
+ */
+export async function skipActivityForWeek(activityId: string): Promise<void> {
+  const [activities, completions] = await Promise.all([
+    listRecurringActivities(),
+    listActivityCompletions(),
+  ]);
+  const activity = activities.find((a) => a.id === activityId);
+  if (!activity) return;
+  const dates = currentWeekOwedDates(activity, completions, todayISO());
+  if (dates.length === 0) return;
+  const rows: ActivityCompletion[] = dates.map((date) => ({
+    id: crypto.randomUUID(),
+    activity_id: activityId,
+    date,
+    minutes: 0,
+    skipped: true,
+    created_at: new Date().toISOString(),
+  }));
+  if (isSupabaseConfigured()) {
+    const supabase = await getRequestClient();
+    const user_id = await currentUserId(supabase);
+    const { error } = await supabase
+      .from("activity_completions")
+      .insert(rows.map((r) => ({ ...r, user_id })));
+    if (error)
+      throw new Error(`Supabase activity week-skip insert failed: ${error.message}`);
+    return;
+  }
+  await ensureSeeded();
+  memDB().activityCompletions.push(...rows);
+}
+
+// --- Errands (one-off tasks under a reserved, deadline-less project) ---------
+
+const ERRANDS_PROJECT_NAME = "Errands";
+
+/** A minimal active holding entry for the reserved Errands project. */
+function buildErrandsHoldingEntry(projectId: string): Entry {
+  return {
+    id: crypto.randomUUID(),
+    title: "Errands",
+    raw_input: "",
+    summary: null,
+    discussion_points: [],
+    stakeholders: [],
+    daily_objective: null,
+    key_deliverables: [],
+    assumptions: [],
+    risks: [],
+    kind: "plan",
+    status: "active",
+    project_id: projectId,
+    parent_entry_id: null,
+    created_at: new Date().toISOString(),
+  };
+}
+
+/**
+ * The reserved deadline-less "Errands" project (and its holding entry) that
+ * one-off errands attach to, created lazily on first use. An undeadlined project
+ * still consumes the shared budget but receives no forecast probability — exactly
+ * errand semantics — so errands reuse the whole task/agenda/defer machinery.
+ */
+export async function getOrCreateErrandsProject(): Promise<{
+  projectId: string;
+  entryId: string;
+}> {
+  if (isSupabaseConfigured()) {
+    const supabase = await getRequestClient();
+    const user_id = await currentUserId(supabase);
+    const { data: proj } = await supabase
+      .from("projects")
+      .select("id")
+      .eq("name", ERRANDS_PROJECT_NAME)
+      .limit(1)
+      .maybeSingle();
+    let projectId = (proj as { id: string } | null)?.id;
+    if (!projectId) {
+      projectId = crypto.randomUUID();
+      const { error } = await supabase.from("projects").insert({
+        id: projectId,
+        name: ERRANDS_PROJECT_NAME,
+        description: "One-off errands.",
+        deadline: null,
+        user_id,
+      });
+      if (error)
+        throw new Error(`Supabase errands project insert failed: ${error.message}`);
+    }
+    const { data: ent } = await supabase
+      .from("entries")
+      .select("id")
+      .eq("project_id", projectId)
+      .eq("status", "active")
+      .limit(1)
+      .maybeSingle();
+    let entryId = (ent as { id: string } | null)?.id;
+    if (!entryId) {
+      const entry = buildErrandsHoldingEntry(projectId);
+      entryId = entry.id;
+      const { error } = await supabase
+        .from("entries")
+        .insert({ ...entry, user_id });
+      if (error)
+        throw new Error(`Supabase errands entry insert failed: ${error.message}`);
+    }
+    return { projectId, entryId };
+  }
+  await ensureSeeded();
+  const db = memDB();
+  let proj = db.projects.find((p) => p.name === ERRANDS_PROJECT_NAME);
+  if (!proj) {
+    proj = {
+      id: crypto.randomUUID(),
+      name: ERRANDS_PROJECT_NAME,
+      description: "One-off errands.",
+      deadline: null,
+      created_at: new Date().toISOString(),
+    };
+    db.projects.unshift(proj);
+  }
+  let entry = db.entries.find(
+    (e) => e.project_id === proj!.id && e.status === "active",
+  );
+  if (!entry) {
+    entry = buildErrandsHoldingEntry(proj.id);
+    db.entries.unshift(entry);
+  }
+  return { projectId: proj.id, entryId: entry.id };
+}
+
+/** Create a one-off errand task (under the reserved Errands project). */
+export async function createErrandTask(
+  title: string,
+  dueDate?: string | null,
+  estimatedMinutes = 30,
+): Promise<string> {
+  const { entryId } = await getOrCreateErrandsProject();
+  const f: FactorScores = {
+    urgency: 3,
+    impact: 2,
+    effort: 1,
+    dependency: 1,
+    risk: 2,
+    confidence: 4,
+  };
+  const { score, label } = computePriority(f);
+  const task: Task = {
+    id: crypto.randomUUID(),
+    entry_id: entryId,
+    title: title.trim(),
+    description: null,
+    owner: null,
+    category: null,
+    area: "Personal",
+    status: "todo",
+    due_date: dueDate ?? null,
+    estimated_minutes: Math.max(1, Math.round(estimatedMinutes)),
+    actual_minutes: 0,
+    urgency_score: f.urgency,
+    impact_score: f.impact,
+    effort_score: f.effort,
+    dependency_score: f.dependency,
+    risk_score: f.risk,
+    confidence_score: f.confidence,
+    priority_score: score,
+    priority_label: label,
+    priority_reason: "Quick one-off errand.",
+    source_quote: null,
+    is_ai_suggested: false,
+    blocked_by: null,
+    deferred: false,
+    sort_index: 0,
+    created_at: new Date().toISOString(),
+  };
+  if (isSupabaseConfigured()) {
+    const supabase = await getRequestClient();
+    const { error } = await supabase.from("tasks").insert(task);
+    if (error)
+      throw new Error(`Supabase errand task insert failed: ${error.message}`);
+  } else {
+    await ensureSeeded();
+    memDB().tasks.push(task);
+  }
+  return task.id;
+}
+
 // --- Forecast ---------------------------------------------------------------
 
 interface ForecastGather {
@@ -931,19 +1420,40 @@ interface ForecastGather {
   model: EstimationModel;
   availability: Availability[];
   overrides: AvailabilityOverride[];
+  /** All commitments INCLUDING the recurring drain (the base the forecast uses). */
   commitments: Commitment[];
+  /** The real commitments WITHOUT recurring drain — for recomputing capacity when
+   *  a skip-move probe removes some activity's hours. */
+  realCommitments: Commitment[];
+  /** Recurring activities + their completion log — the inputs a skip-move re-drains. */
+  activities: RecurringActivity[];
+  completions: ActivityCompletion[];
   today: string;
 }
 
 /** Collect deadlined projects, their open tasks, and the time budget. */
 async function gatherForecast(): Promise<ForecastGather> {
-  const [projects, entries, tasks, deps, budget] = await Promise.all([
-    listProjects(),
-    listEntries(),
-    listAllTasks(),
-    listAllDependencies(),
-    getTimeBudget(),
-  ]);
+  const [projects, entries, tasks, deps, rawBudget, activities, completions] =
+    await Promise.all([
+      listProjects(),
+      listEntries(),
+      listAllTasks(),
+      listAllDependencies(),
+      getRawTimeBudget(),
+      listRecurringActivities(),
+      listActivityCompletions(),
+    ]);
+  const today = todayISO();
+  // Fold the recurring drain into the commitment set the forecast reasons over.
+  const commitments = [
+    ...rawBudget.commitments,
+    ...drainAsCommitments(activities, completions, today),
+  ];
+  const budget = {
+    availability: rawBudget.availability,
+    overrides: rawBudget.overrides,
+    commitments,
+  };
   const projectOfEntry = new Map(entries.map((e) => [e.id, e.project_id]));
   const tasksByProject = new Map<string, CandidateTask[]>();
   const allTasksByProject = new Map<string, Task[]>();
@@ -983,7 +1493,10 @@ async function gatherForecast(): Promise<ForecastGather> {
     availability: budget.availability,
     overrides: budget.overrides,
     commitments: budget.commitments,
-    today: todayISO(),
+    realCommitments: rawBudget.commitments,
+    activities,
+    completions,
+    today,
   };
 }
 
@@ -1084,6 +1597,311 @@ function globalOdds(
   commitments: Pick<Commitment, "date" | "hours">[],
 ): Map<string, number> {
   return jointOdds(g, allocContext(g, commitments));
+}
+
+// --- Joint scoring of a move combination (Phase 5) --------------------------
+//
+// The portfolio strategy needs to know the TRUE joint odds of a *set* of moves,
+// not the solo per-project odds each move carries. These helpers apply any
+// ordered move combination to a scratch copy of the alloc state and re-run the
+// contention-aware `globalForecastJoint` over it — so the moves interact through
+// the shared hour pool / real cascade, exactly as they will once applied. Pure:
+// nothing here touches the DB or the base gather.
+
+/** The mutable surface a move transforms: the alloc tasks, dep edges, deadlines,
+ *  plus synthetic skip rows a `skip_activity` move adds (which re-drain capacity). */
+interface AllocState {
+  tasks: AllocTask[];
+  deps: DependencyEdge[];
+  deadlineByProject: Map<string, string | null>;
+  /** Skip completions injected by skip-moves — they reduce the recurring drain. */
+  skipCompletions: ActivityCompletion[];
+}
+
+/** A synthetic alloc task for injected work, scored from its 1-5 factors so
+ *  `buildGlobalPlan` orders it plausibly among the real tasks. */
+function syntheticAllocTask(
+  id: string,
+  projectId: string,
+  projectName: string,
+  title: string,
+  estimatedMinutes: number,
+  f: FactorScores,
+): AllocTask {
+  return {
+    id,
+    title,
+    projectId,
+    projectName,
+    estimatedMinutes,
+    status: "todo",
+    priorityScore: computePriority(f).score,
+    urgency: f.urgency,
+    impact: f.impact,
+    risk: f.risk,
+  };
+}
+
+/**
+ * Pure transform of the scratch alloc state for ONE move. Returns a NEW
+ * `AllocState` (never mutates the base ctx/gather), so prefixes can be scored
+ * independently. Each move maps to the same alloc-level effect its real apply
+ * action has on the forecast:
+ *  - defer / mark_done  → drop the task (the budget it occupied is freed).
+ *  - triage             → drop every task in the batch.
+ *  - unblock            → drop dep edges into the task (frees its ordering).
+ *  - reschedule_deadline→ move the project's deadline (what `globalForecast` gates on).
+ *  - reschedule_task    → near-noop: the project deadline gates the joint odds,
+ *                         not a task's own due date (alloc tasks carry no due date).
+ *  - reshape            → scope_down shrinks the task's estimate in place; split
+ *                         drops the monolith and injects the lighter steps.
+ *  - add_tasks          → inject the new tasks for the move's project.
+ *  - reroute            → drop the replaced tasks, inject the alternative plan.
+ *  - skip_activity      → add skip rows for this activity's CURRENT-week owed
+ *                         instances, freeing its drain from capacity (matches the
+ *                         apply, which persists exactly those skips).
+ *  - hold               → no-op.
+ */
+function applyMoveToAlloc(
+  g: ForecastGather,
+  state: AllocState,
+  move: StrategyMove,
+): AllocState {
+  const p = move.payload;
+  const projectName =
+    move.projectName ||
+    state.tasks.find((t) => t.projectId === move.projectId)?.projectName ||
+    "";
+
+  switch (p.kind) {
+    case "defer":
+    case "mark_done":
+      return { ...state, tasks: state.tasks.filter((t) => t.id !== p.taskId) };
+
+    case "triage": {
+      const drop = new Set(p.taskIds);
+      return { ...state, tasks: state.tasks.filter((t) => !drop.has(t.id)) };
+    }
+
+    case "unblock":
+      return { ...state, deps: state.deps.filter((d) => d.task_id !== p.taskId) };
+
+    case "reschedule_deadline": {
+      const deadlineByProject = new Map(state.deadlineByProject);
+      deadlineByProject.set(move.projectId, p.deadline);
+      return { ...state, deadlineByProject };
+    }
+
+    case "reschedule_task":
+      // Near-noop on the joint odds (the project deadline is the gate).
+      return state;
+
+    case "skip_activity": {
+      const activity = g.activities.find((a) => a.id === p.activityId);
+      if (!activity) return state;
+      const dates = currentWeekOwedDates(activity, g.completions, g.today);
+      if (dates.length === 0) return state;
+      const skips: ActivityCompletion[] = dates.map((date) => ({
+        id: "",
+        activity_id: activity.id,
+        date,
+        minutes: 0,
+        skipped: true,
+        created_at: "",
+      }));
+      return { ...state, skipCompletions: [...state.skipCompletions, ...skips] };
+    }
+
+    case "reshape": {
+      let tasks = state.tasks;
+      for (const mod of p.mods) {
+        if (mod.kind === "scope_down") {
+          const lighter = mod.replacements[0];
+          if (!lighter) continue;
+          tasks = tasks.map((t) =>
+            t.id === mod.taskId
+              ? { ...t, estimatedMinutes: lighter.estimated_minutes }
+              : t,
+          );
+        } else {
+          // split: the monolith leaves the plan, its steps take its place.
+          tasks = tasks.filter((t) => t.id !== mod.taskId);
+          tasks = [
+            ...tasks,
+            ...mod.replacements.map((part, i) =>
+              syntheticAllocTask(
+                `synth:reshape:${mod.taskId}:${i}`,
+                move.projectId,
+                projectName,
+                part.title,
+                part.estimated_minutes,
+                part,
+              ),
+            ),
+          ];
+        }
+      }
+      return { ...state, tasks };
+    }
+
+    case "add_tasks": {
+      const injected = p.tasks.map((t, i) =>
+        syntheticAllocTask(
+          `synth:add:${move.projectId}:${i}`,
+          move.projectId,
+          projectName,
+          t.title,
+          t.estimated_minutes,
+          t,
+        ),
+      );
+      return { ...state, tasks: [...state.tasks, ...injected] };
+    }
+
+    case "reroute": {
+      const drop = new Set(p.replacedTaskIds);
+      const remaining = state.tasks.filter((t) => !drop.has(t.id));
+      const injected = p.tasks.map((t, i) =>
+        syntheticAllocTask(
+          `synth:reroute:${move.projectId}:${i}`,
+          move.projectId,
+          projectName,
+          t.title,
+          t.estimated_minutes,
+          t,
+        ),
+      );
+      return { ...state, tasks: [...remaining, ...injected] };
+    }
+
+    case "hold":
+      return state;
+  }
+}
+
+/**
+ * One joint forecast of the whole portfolio after applying an ordered move set —
+ * the contention-correct read of "do all of these." Folds each move into a
+ * scratch alloc state, rebuilds the global order, and runs `globalForecastJoint`
+ * over the transformed plan. `allOnTime` is the headline conjunction (P(all
+ * deadlined projects land)); `byProject` lets the optimizer count who's on track.
+ */
+function jointOddsWithMoves(
+  g: ForecastGather,
+  ctx: AllocContext,
+  moves: StrategyMove[],
+  iterations?: number,
+): { byProject: Map<string, number>; allOnTime: number } {
+  let state: AllocState = {
+    tasks: ctx.tasks,
+    deps: ctx.deps,
+    deadlineByProject: g.deadlineByProject,
+    skipCompletions: [],
+  };
+  for (const move of moves) state = applyMoveToAlloc(g, state, move);
+
+  const plan = buildGlobalPlan({
+    tasks: state.tasks,
+    deps: state.deps,
+    deadlineByProject: state.deadlineByProject,
+    budget: ctx.budget,
+    today: g.today,
+  });
+  // A skip-move frees that activity's current-week hours: recompute capacity with
+  // its drain removed (re-drained over completions + the synthetic skips). Reuses
+  // the base capacities when no skip-move is in the set (the common case).
+  const capacities = state.skipCompletions.length
+    ? dayCapacities(
+        {
+          availability: g.availability,
+          overrides: g.overrides,
+          commitments: [
+            ...g.realCommitments,
+            ...drainAsCommitments(
+              g.activities,
+              [...g.completions, ...state.skipCompletions],
+              g.today,
+            ),
+          ],
+        },
+        g.today,
+      )
+    : ctx.capacities;
+  return globalForecastJoint(plan.order, capacities, state.deadlineByProject, g.today, {
+    ...forecastOptions(g.model),
+    ...(iterations !== undefined ? { iterations } : {}),
+  });
+}
+
+/**
+ * The cumulative scorer for the display (decision #5): the running portfolio
+ * `allOnTime` after each prefix of the ordered moves, climbing to the combined
+ * total (== the last entry). Full iterations — these are the numbers the card
+ * shows. `combined` falls back to the base joint odds when there are no moves.
+ */
+function cumulativeJointOdds(
+  g: ForecastGather,
+  ctx: AllocContext,
+  ordered: StrategyMove[],
+): { afterEach: number[]; combined: number } {
+  const afterEach = ordered.map(
+    (_, i) => jointOddsWithMoves(g, ctx, ordered.slice(0, i + 1)).allOnTime,
+  );
+  const combined = afterEach.length
+    ? afterEach[afterEach.length - 1]
+    : jointOddsWithMoves(g, ctx, []).allOnTime;
+  return { afterEach, combined };
+}
+
+/** Fewer MC iterations for the optimizer's repeated probes (matches the triage
+ *  probes' `TRIAGE_PROBE_ITERATIONS` — a relative read is all the greedy needs). */
+const JOINT_PROBE_ITERATIONS = 2000;
+
+/**
+ * The portfolio strategy's joint scorer: one gather + dashboard computation, plus
+ * closures the optimizer and the bold-tier re-scorer probe against. Built once
+ * per generation so the strategist does not double-gather (replaces its
+ * `forecastDashboard()` call). All inputs are server-only (RLS-scoped gather);
+ * the scorer closures are pure CPU over the captured state.
+ */
+export interface JointScorer {
+  forecasts: ProjectForecast[];
+  recoveries: RecoveryPlan[];
+  pitWall: PitWall;
+  /** Active recurring activities — the pool of `skip_activity` candidates. */
+  activities: RecurringActivity[];
+  /** Current joint odds per deadlined project, no moves applied. */
+  baseByProject: Map<string, number>;
+  /** Current portfolio conjunction (P(all land)), no moves applied. */
+  baseAllOnTime: number;
+  /** Reduced-iteration joint score of an ordered move set — for optimizer probes. */
+  score(moves: StrategyMove[]): { byProject: Map<string, number>; allOnTime: number };
+  /** Full-iteration cumulative odds of an ordered move set — for the display. */
+  cumulative(ordered: StrategyMove[]): { afterEach: number[]; combined: number };
+}
+
+export async function createJointScorer(): Promise<JointScorer> {
+  const g = await gatherForecast();
+  const ctx = allocContext(g, g.commitments);
+  const base = jointOddsWithMoves(g, ctx, []);
+  const baseByProject = base.byProject;
+
+  const forecasts = buildForecasts(g, g.commitments, baseByProject);
+  const pitWall = buildPitWall(g, ctx, baseByProject);
+  const recoveries = g.projects
+    .map((p) => buildRecoveryPlan(g, p, baseByProject, pitWall.conflicts))
+    .filter((plan): plan is RecoveryPlan => plan !== null);
+
+  return {
+    forecasts,
+    recoveries,
+    pitWall,
+    activities: g.activities.filter((a) => a.active),
+    baseByProject,
+    baseAllOnTime: base.allOnTime,
+    score: (moves) => jointOddsWithMoves(g, ctx, moves, JOINT_PROBE_ITERATIONS),
+    cumulative: (ordered) => cumulativeJointOdds(g, ctx, ordered),
+  };
 }
 
 // --- The pit wall: conflict detection + contention-aware triage -------------
@@ -1202,6 +2020,7 @@ function buildPitWall(
         taskId: cand.task.id,
         title: cand.task.title,
         projectId: cand.task.projectId,
+        estimatedMinutes: cand.task.estimatedMinutes,
         wsjf: cand.wsjf,
         probabilityAfter: trial.get(bestPid) ?? 0,
       });
@@ -1314,9 +2133,20 @@ export async function forecastDashboard(): Promise<{
   pitWall: PitWall;
   /** The single global allocation the Today views derive from (order + unified schedule). */
   globalPlan: GlobalPlan;
+  /**
+   * The agenda's ranking: the global order PLUS today's due recurring instances,
+   * floated up via an ordering-only `today` deadline. Recurring rides this order
+   * for display only — its time is already drained into capacity, so it never
+   * enters the forecast (`globalPlan`/`jointOdds` stay over real project work).
+   */
+  agendaOrder: GlobalPlan["order"];
   model: EstimationModel;
 }> {
-  const g = await gatherForecast();
+  const [g, activities, completions] = await Promise.all([
+    gatherForecast(),
+    listRecurringActivities(),
+    listActivityCompletions(),
+  ]);
   const ctx = allocContext(g, g.commitments);
   const odds = jointOdds(g, ctx);
   const forecasts = buildForecasts(g, g.commitments, odds);
@@ -1325,7 +2155,8 @@ export async function forecastDashboard(): Promise<{
     .map((p) => buildRecoveryPlan(g, p, odds, pitWall.conflicts))
     .filter((plan): plan is RecoveryPlan => plan !== null);
   // The canonical plan over all current open work (no triage shedding) — the
-  // cross-project order the agenda ranks by and the unified schedule it renders.
+  // cross-project order + the unified schedule. Recurring is NOT in here, so the
+  // schedule/forecast never double-count its already-drained hours.
   const globalPlan = buildGlobalPlan({
     tasks: ctx.tasks,
     deps: ctx.deps,
@@ -1333,7 +2164,20 @@ export async function forecastDashboard(): Promise<{
     budget: ctx.budget,
     today: g.today,
   });
-  return { forecasts, recoveries, pitWall, globalPlan, model: g.model };
+  // The agenda order: same plan plus today's due recurring instances, ranked as
+  // if due today (ordering-only) so a due routine/goal surfaces near the top.
+  const recurringTasks = recurringAllocTasksForToday(activities, completions, g.today);
+  const orderingDeadlines = new Map(g.deadlineByProject);
+  orderingDeadlines.set(RECURRING_LANE_ID, g.today);
+  const agendaOrder = buildGlobalPlan({
+    tasks: [...ctx.tasks, ...recurringTasks],
+    deps: ctx.deps,
+    deadlineByProject: g.deadlineByProject,
+    orderingDeadlineByProject: orderingDeadlines,
+    budget: ctx.budget,
+    today: g.today,
+  }).order;
+  return { forecasts, recoveries, pitWall, globalPlan, agendaOrder, model: g.model };
 }
 
 /**

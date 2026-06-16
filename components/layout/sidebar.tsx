@@ -8,6 +8,7 @@ import {
   FolderKanban,
   FilePlus2,
   Compass,
+  Repeat,
   Sparkles,
   LogOut,
 } from "lucide-react";
@@ -18,6 +19,7 @@ const NAV = [
   { href: "/", label: "Today", icon: Sun, exact: true },
   { href: "/board", label: "Board", icon: Columns3, exact: false },
   { href: "/projects", label: "Projects", icon: FolderKanban, exact: false },
+  { href: "/activities", label: "Routines", icon: Repeat, exact: false },
   { href: "/strategy", label: "Strategy", icon: Compass, exact: false },
   { href: "/create", label: "New Entry", icon: FilePlus2, exact: false },
 ];

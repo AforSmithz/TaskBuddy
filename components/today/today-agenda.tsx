@@ -19,17 +19,19 @@ import {
 import {
   SEED_AREAS,
   type EffectiveOrderEntry,
+  type RecurringState,
   type Task,
   type TaskDependency,
   type TaskStatus,
 } from "@/lib/types";
+import { activityIdFromTaskId, isRecurringTaskId } from "@/lib/recurring";
 import { PriorityBadge } from "@/components/ui/badge";
 import { Card, CardHeader } from "@/components/ui/card";
 import { EmptyState } from "@/components/ui/empty-state";
 import { isOverdue, isToday } from "@/lib/format";
 import { cn } from "@/lib/cn";
 import { updateTaskStatusAction, updateTaskAreaAction } from "@/lib/actions";
-import { TaskRow } from "@/components/today/task-row";
+import { TaskRow, RecurringAgendaRow } from "@/components/today/task-row";
 
 const byPriority = (a: Task, b: Task) =>
   (b.priority_score ?? 0) - (a.priority_score ?? 0);
@@ -41,12 +43,15 @@ export function TodayAgenda({
   entryTitles,
   dependencies,
   order = [],
+  recurringStateById = {},
 }: {
   tasks: Task[];
   entryTitles: Record<string, string>;
   dependencies: TaskDependency[];
   /** The global cross-project order the agenda ranks by (falls back to priority_score if empty). */
   order?: EffectiveOrderEntry[];
+  /** Derived state for interleaved recurring rows, keyed by activity id. */
+  recurringStateById?: Record<string, RecurringState>;
 }) {
   const [optimistic, applyOptimistic] = useOptimistic(
     tasks,
@@ -190,8 +195,12 @@ export function TodayAgenda({
       overdue,
       dueToday,
       focus,
-      // The next task to do: first startable task in the global order.
-      recommended: sorted.find((t) => !isWaiting(t)) ?? sorted[0],
+      // The next task to do: first startable REAL task in the global order. A
+      // recurring routine is never the hero (it has no entry to open); routines
+      // still surface in the sections below.
+      recommended:
+        sorted.find((t) => !isWaiting(t) && !isRecurringTaskId(t.id)) ??
+        sorted.find((t) => !isRecurringTaskId(t.id)),
     };
   }, [optimistic, tab, depInfo, orderByTask]);
 
@@ -330,6 +339,7 @@ export function TodayAgenda({
               areas={areas}
               waiting={depInfo.waiting}
               pulledAhead={pulledAhead}
+              recurringStateById={recurringStateById}
               onMove={move}
               onAssignArea={assignArea}
             />
@@ -342,6 +352,7 @@ export function TodayAgenda({
               areas={areas}
               waiting={depInfo.waiting}
               pulledAhead={pulledAhead}
+              recurringStateById={recurringStateById}
               onMove={move}
               onAssignArea={assignArea}
             />
@@ -354,6 +365,7 @@ export function TodayAgenda({
               areas={areas}
               waiting={depInfo.waiting}
               pulledAhead={pulledAhead}
+              recurringStateById={recurringStateById}
               onMove={move}
               onAssignArea={assignArea}
             />
@@ -434,6 +446,7 @@ function Section({
   areas,
   waiting,
   pulledAhead,
+  recurringStateById,
   onMove,
   onAssignArea,
 }: {
@@ -445,6 +458,7 @@ function Section({
   areas: string[];
   waiting: Map<string, string[]>;
   pulledAhead: Map<string, string>;
+  recurringStateById: Record<string, RecurringState>;
   onMove: (id: string, status: TaskStatus, from: TaskStatus) => void;
   onAssignArea: (id: string, area: string) => void;
 }) {
@@ -460,18 +474,26 @@ function Section({
       </p>
       <motion.div layout className="flex flex-col gap-1.5">
         <AnimatePresence initial={false}>
-          {tasks.map((t) => (
-            <TaskRow
-              key={t.id}
-              task={t}
-              entryTitle={entryTitles[t.entry_id]}
-              areas={areas}
-              waitingOn={waiting.get(t.id)}
-              pulledAheadReason={pulledAhead.get(t.id)}
-              onMove={onMove}
-              onAssignArea={onAssignArea}
-            />
-          ))}
+          {tasks.map((t) => {
+            // A synthetic recurring row renders its own check/skip controls.
+            const aid = isRecurringTaskId(t.id)
+              ? activityIdFromTaskId(t.id)
+              : null;
+            const rstate = aid ? recurringStateById[aid] : undefined;
+            if (rstate) return <RecurringAgendaRow key={t.id} state={rstate} />;
+            return (
+              <TaskRow
+                key={t.id}
+                task={t}
+                entryTitle={entryTitles[t.entry_id]}
+                areas={areas}
+                waitingOn={waiting.get(t.id)}
+                pulledAheadReason={pulledAhead.get(t.id)}
+                onMove={onMove}
+                onAssignArea={onAssignArea}
+              />
+            );
+          })}
         </AnimatePresence>
       </motion.div>
     </div>

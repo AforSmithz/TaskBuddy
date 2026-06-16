@@ -77,6 +77,13 @@ export interface GlobalPlanInput {
   deps: DependencyEdge[];
   /** projectId → deadline ISO date (or null for an undeadlined project). */
   deadlineByProject: Map<string, string | null>;
+  /**
+   * Optional ordering-ONLY deadline override (defaults to `deadlineByProject`).
+   * Lets a lane be ranked as if due on a date without entering overload
+   * detection or the forecast — used to float today's due recurring instances to
+   * the top of the AGENDA order while the forecast still gates on real deadlines.
+   */
+  orderingDeadlineByProject?: Map<string, string | null>;
   budget: ScheduleBudget;
   today: string;
 }
@@ -172,6 +179,8 @@ export function effectiveOrder(
   deadlineByProject: Map<string, string | null>,
   capacities: DayCapacity[],
   today: string,
+  /** Ordering-only deadlines for the comparator; defaults to `deadlineByProject`. */
+  orderingDeadlineByProject: Map<string, string | null> = deadlineByProject,
 ): EffectiveOrderEntry[] {
   // Keep blocked tasks in the order: they're still open work that consumes the
   // budget before a deadline, so the contention forecast must account for them
@@ -191,11 +200,14 @@ export function effectiveOrder(
     );
   }
 
+  // Overload uses the REAL deadlines (recurring's ordering-deadline must not
+  // distort feasibility); the comparator uses the ordering deadlines so a due
+  // recurring lane ranks as urgent.
   const overloaded = isOverloaded(schedulable, deadlineByProject, capacities, today);
   const dlOffset = (t: AllocTask) =>
-    deadlineOffsetOf(deadlineByProject.get(t.projectId) ?? null, today);
+    deadlineOffsetOf(orderingDeadlineByProject.get(t.projectId) ?? null, today);
   const density = (t: AllocTask) =>
-    wsjf(t, deadlineByProject.get(t.projectId) ?? null, today);
+    wsjf(t, orderingDeadlineByProject.get(t.projectId) ?? null, today);
 
   // Ready-task comparator: `< 0` means `a` goes before `b`.
   const compare = (a: AllocTask, b: AllocTask): number => {
@@ -243,7 +255,7 @@ export function effectiveOrder(
         )
       : undefined;
 
-    const dl = deadlineByProject.get(next.projectId) ?? null;
+    const dl = orderingDeadlineByProject.get(next.projectId) ?? null;
     const daysOut = dl ? daysBetween(today, dl) : null;
     order.push({
       taskId: next.id,
@@ -329,6 +341,7 @@ export function buildGlobalPlan(input: GlobalPlanInput): GlobalPlan {
     input.deadlineByProject,
     capacities,
     input.today,
+    input.orderingDeadlineByProject,
   );
   const days = packGlobal(order, input.budget, input.today);
   return { order, days };

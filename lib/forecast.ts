@@ -226,6 +226,27 @@ export function globalForecast(
   today: string,
   options: ForecastOptions = {},
 ): Map<string, number> {
+  return globalForecastJoint(order, capacities, deadlineByProject, today, options)
+    .byProject;
+}
+
+/**
+ * The full joint read: per-project odds (`byProject`, identical to what
+ * `globalForecast` returns) PLUS `allOnTime` — the fraction of the SAME sampled
+ * futures in which *every* deadlined project's last task lands on or before its
+ * deadline. `allOnTime` is the honest portfolio conjunction "do this and
+ * everything lands," not the product of independent per-project odds (the
+ * projects share one sampled future, so their finishes are correlated through
+ * contention). A deadlined project with no open work counts as on time, so it
+ * never breaks the conjunction; with no deadlined work at all, `allOnTime` is 1.
+ */
+export function globalForecastJoint(
+  order: GlobalForecastTask[],
+  capacities: DayCapacity[],
+  deadlineByProject: Map<string, string | null>,
+  today: string,
+  options: ForecastOptions = {},
+): { byProject: Map<string, number>; allOnTime: number } {
   const result = new Map<string, number>();
 
   // Day offset each project's deadline allows work through; null deadlines skip.
@@ -248,7 +269,8 @@ export function globalForecast(
   for (const pid of deadlineOffset.keys()) {
     if (!indicesByProject.has(pid)) result.set(pid, 1);
   }
-  if (indicesByProject.size === 0) return result;
+  // No deadlined project has open work ⇒ everything trivially lands on time.
+  if (indicesByProject.size === 0) return { byProject: result, allOnTime: 1 };
 
   const estimates = order.map((t) => Math.max(0, t.estimatedMinutes));
   const deployableSum = capacities.reduce((s, c) => s + c.capacityMinutes, 0);
@@ -261,6 +283,7 @@ export function globalForecast(
   const durations = new Array<number>(order.length).fill(0);
   const hits = new Map<string, number>();
   for (const pid of indicesByProject.keys()) hits.set(pid, 0);
+  let allOnTimeHits = 0;
 
   for (let i = 0; i < iterations; i++) {
     for (let k = 0; k < order.length; k++) {
@@ -269,15 +292,20 @@ export function globalForecast(
       durations[k] = est > 0 ? est * Math.exp(meanLog + sigma * nextNormal(rng)) : 0;
     }
     const offsets = flowFinishOffsets(durations, capacities);
+    // Whether EVERY scored project landed on time in THIS sampled future — the
+    // joint conjunction counter (decision: P(all deadlined projects meet date)).
+    let allHit = true;
     for (const [pid, idxs] of indicesByProject) {
       let last = 0;
       for (const k of idxs) if (offsets[k] > last) last = offsets[k];
       if (last <= deadlineOffset.get(pid)!) hits.set(pid, hits.get(pid)! + 1);
+      else allHit = false;
     }
+    if (allHit) allOnTimeHits++;
   }
 
   for (const [pid, h] of hits) result.set(pid, h / iterations);
-  return result;
+  return { byProject: result, allOnTime: allOnTimeHits / iterations };
 }
 
 // --- Recovery moves (pit-call recommendations) ------------------------------

@@ -11,13 +11,14 @@ import type {
   ReroutePart,
   StrategyMove,
   SuggestedTask,
+  Task,
   TaskModification,
 } from "./types";
 import { isOnTrack } from "./types";
 import type { ChatMessage } from "./openrouter";
 import { isLLMConfigured } from "./extraction";
 import {
-  forecastDashboard,
+  createJointScorer,
   getRecoveryContext,
   listAllTasks,
   listCommitments,
@@ -25,6 +26,7 @@ import {
   previewProbabilityWithModifications,
   previewProbabilityWithReroute,
   previewProbabilityWithTasks,
+  type JointScorer,
   type PitWall,
   type RecoveryContext,
 } from "./store";
@@ -66,6 +68,12 @@ const RESHAPE_MIN_GAIN = 0.005;
 // A whole-plan re-route must clear the current odds by a real margin.
 const REROUTE_MIN_GAIN = 0.05;
 const MOD_KINDS: ModificationKind[] = ["scope_down", "split"];
+
+// --- Joint greedy optimizer (Phase 5) ---------------------------------------
+/** A candidate must lift the portfolio conjunction by at least this to be folded in. */
+const JOINT_MIN_GAIN = 0.01;
+/** Hard cap on the greedy plan length (keeps the steady-plan card readable). */
+const JOINT_MOVE_CAP = 6;
 
 // --- C. Fingerprint ---------------------------------------------------------
 
@@ -188,6 +196,18 @@ interface Candidate {
 }
 
 /**
+ * Seed a candidate move. `portfolioProbabilityAfter` is a placeholder (0) here —
+ * the cumulative joint odds aren't known until a move is placed in an ORDERED
+ * plan. Both selection paths (synthesis re-scoring and the joint optimizer)
+ * overwrite it with the real running conjunction before it ever reaches the UI.
+ */
+function candidateMove(
+  move: Omit<StrategyMove, "portfolioProbabilityAfter">,
+): StrategyMove {
+  return { ...move, portfolioProbabilityAfter: 0 };
+}
+
+/**
  * Every deterministic mechanical candidate from the dashboard's recovery plans +
  * pit wall. Each carries its forecast-scored `probabilityAfter` straight off the
  * struct it came from (locked decision #6) and a payload the mapped apply action
@@ -196,6 +216,7 @@ interface Candidate {
 function buildDeterministicCandidates(
   recoveries: RecoveryPlan[],
   pitWall: PitWall,
+  tasksById: Map<string, Task>,
 ): Candidate[] {
   const out: Candidate[] = [];
 
@@ -204,21 +225,21 @@ function buildDeterministicCandidates(
 
     for (const m of plan.defer) {
       out.push({
-        move: {
+        move: candidateMove({
           kind: "defer",
           projectId,
           projectName,
           rationale: `Defer "${m.title}" in ${projectName} past the deadline.`,
           probabilityAfter: m.probabilityAfter,
           payload: { kind: "defer", taskId: m.taskId, title: m.title },
-        },
+        }),
         label: `Defer "${m.title}" (${projectName})`,
       });
     }
 
     if (plan.reschedule) {
       out.push({
-        move: {
+        move: candidateMove({
           kind: "reschedule_deadline",
           projectId,
           projectName,
@@ -228,7 +249,7 @@ function buildDeterministicCandidates(
             kind: "reschedule_deadline",
             deadline: plan.reschedule.deadline,
           },
-        },
+        }),
         label: `Move ${projectName}'s deadline to ${plan.reschedule.deadline}`,
       });
     }
@@ -236,7 +257,7 @@ function buildDeterministicCandidates(
     for (const t of plan.overdue) {
       const dueDate = new Date().toISOString().slice(0, 10);
       out.push({
-        move: {
+        move: candidateMove({
           kind: "reschedule_task",
           projectId,
           projectName,
@@ -248,32 +269,32 @@ function buildDeterministicCandidates(
             title: t.title,
             dueDate,
           },
-        },
+        }),
         label: `Reschedule overdue "${t.title}" (${projectName})`,
       });
       out.push({
-        move: {
+        move: candidateMove({
           kind: "mark_done",
           projectId,
           projectName,
           rationale: `Mark the overdue task "${t.title}" in ${projectName} done.`,
           probabilityAfter: currentProbability,
           payload: { kind: "mark_done", taskId: t.taskId, title: t.title },
-        },
+        }),
         label: `Mark overdue "${t.title}" done (${projectName})`,
       });
     }
 
     for (const t of plan.blocked) {
       out.push({
-        move: {
+        move: candidateMove({
           kind: "unblock",
           projectId,
           projectName,
           rationale: `Clear the blocker on "${t.title}" in ${projectName}.`,
           probabilityAfter: currentProbability,
           payload: { kind: "unblock", taskId: t.taskId, title: t.title },
-        },
+        }),
         label: `Unblock "${t.title}" (${projectName})`,
       });
     }
@@ -287,18 +308,21 @@ function buildDeterministicCandidates(
       0,
     );
     out.push({
-      move: {
+      move: candidateMove({
         kind: "triage",
         projectId: "",
         projectName: "",
         rationale: `Shed ${pitWall.triage.length} low-value task(s) so the shared hours protect your at-risk deadlines.`,
         probabilityAfter: best,
+        defers: pitWall.triage
+          .map((t) => tasksById.get(t.taskId))
+          .filter((t): t is Task => t !== undefined),
         payload: {
           kind: "triage",
           taskIds: pitWall.triage.map((t) => t.taskId),
           titles: pitWall.triage.map((t) => t.title),
         },
-      },
+      }),
       label: `Triage ${pitWall.triage.length} low-value task(s) across projects`,
     });
   }
@@ -307,22 +331,79 @@ function buildDeterministicCandidates(
   // the others' open work. A genuine "your call" trade-off.
   for (const opt of pitWall.options) {
     out.push({
-      move: {
+      move: candidateMove({
         kind: "triage",
         projectId: opt.protectId,
         projectName: opt.protectName,
         rationale: `Protect ${opt.protectName} by deferring ${opt.sacrificeNames.join(", ")}.`,
         probabilityAfter: opt.probabilityAfter,
+        // The sacrificed projects' open tasks — hydrated so the move shows exactly
+        // which (cross-project) work it sets aside.
+        defers: opt.sacrificeTaskIds
+          .map((tid) => tasksById.get(tid))
+          .filter((t): t is Task => t !== undefined),
         payload: {
           kind: "triage",
           taskIds: opt.sacrificeTaskIds,
           titles: [],
         },
-      },
+      }),
       label: `Protect ${opt.protectName} (defer ${opt.sacrificeNames.join(", ")})`,
     });
   }
 
+  return out;
+}
+
+/**
+ * Sacrifice-the-flex candidates: for each UNPROTECTED recurring activity, a
+ * "skip it this week" move that frees its current-week hours back to the shared
+ * pool. Each is forecast-scored by re-running the joint odds with that activity's
+ * drain removed (via `scorer.score`, which routes through the capacity-recompute
+ * path) — never an LLM-authored number. Offered only under contention, and only
+ * when the skip materially lifts some deadlined project (so it never pads the plan
+ * with a sacrifice that doesn't help). Protected activities are never offered.
+ */
+function buildActivitySkipCandidates(scorer: JointScorer): Candidate[] {
+  const out: Candidate[] = [];
+  if (scorer.pitWall.conflicts.length === 0) return out; // nothing to protect
+  for (const a of scorer.activities) {
+    if (a.protected) continue;
+    const move = candidateMove({
+      kind: "skip_activity",
+      projectId: "",
+      projectName: "",
+      rationale:
+        a.period === "week"
+          ? `Skip ${a.title} this week to free its hours for your at-risk deadlines.`
+          : `Pause ${a.title} for the rest of this week to free its hours.`,
+      probabilityAfter: 0,
+      payload: {
+        kind: "skip_activity",
+        activityId: a.id,
+        title: a.title,
+        period: a.period,
+      },
+    });
+    const trial = scorer.score([move]);
+    // The most this skip lifts any deadlined project (its best recovered odds).
+    let bestGain = 0;
+    let bestProb = 0;
+    for (const [pid, prob] of trial.byProject) {
+      const gain = prob - (scorer.baseByProject.get(pid) ?? prob);
+      if (gain > bestGain) {
+        bestGain = gain;
+        bestProb = prob;
+      }
+    }
+    if (bestGain >= JOINT_MIN_GAIN) {
+      move.probabilityAfter = bestProb;
+      out.push({
+        move,
+        label: `Skip "${a.title}" this week (${a.period === "week" ? "goal" : "routine"})`,
+      });
+    }
+  }
   return out;
 }
 
@@ -540,14 +621,14 @@ function scoreGenerativeMove(
     if (tasks.length === 0) return null;
     const prob = previewProbabilityWithTasks(ctx, tasks);
     return {
-      move: {
+      move: candidateMove({
         kind: "add_tasks",
         projectId,
         projectName,
         rationale: str(m.rationale) || `Add corrective tasks to ${projectName}.`,
         probabilityAfter: prob,
         payload: { kind: "add_tasks", tasks },
-      },
+      }),
       label: `Add ${tasks.length} corrective task(s) to ${projectName}`,
     };
   }
@@ -558,14 +639,20 @@ function scoreGenerativeMove(
     const prob = previewProbabilityWithModifications(ctx, mods);
     if (prob <= ctx.currentProbability + RESHAPE_MIN_GAIN) return null;
     return {
-      move: {
+      move: candidateMove({
         kind: "reshape",
         projectId,
         projectName,
         rationale: str(m.rationale) || `Reshape work in ${projectName} to fit the budget.`,
         probabilityAfter: prob,
+        // Only a split defers its monolith; a scope_down rewrites in place. The
+        // split task is one of the project's open tasks — hydrate the full row.
+        defers: mods
+          .filter((d) => d.kind === "split")
+          .map((d) => ctx.openTasks.find((t) => t.id === d.taskId))
+          .filter((t): t is Task => t !== undefined),
         payload: { kind: "reshape", mods },
-      },
+      }),
       label: `Reshape ${mods.length} task(s) in ${projectName}`,
     };
   }
@@ -577,19 +664,21 @@ function scoreGenerativeMove(
     if (prob <= ctx.currentProbability + REROUTE_MIN_GAIN) return null;
     const approach = str(m.approach) || "A lighter approach to the same goal";
     return {
-      move: {
+      move: candidateMove({
         kind: "reroute",
         projectId,
         projectName,
         rationale: str(m.rationale) || `Re-route ${projectName} to a lighter plan.`,
         probabilityAfter: prob,
+        // A reroute defers the project's entire current open plan for the new one.
+        defers: ctx.openTasks,
         payload: {
           kind: "reroute",
           replacedTaskIds: ctx.openTasks.map((t) => t.id),
           tasks,
           approach,
         },
-      },
+      }),
       label: `Re-route ${projectName}: ${approach}`,
     };
   }
@@ -908,6 +997,74 @@ function buildSynthesisPrompt(args: {
   ].join("\n");
 }
 
+// --- Joint greedy optimizer -------------------------------------------------
+
+/** # of deadlined projects on track in a joint-odds map. */
+function onTrackCount(byProject: Map<string, number>): number {
+  let c = 0;
+  for (const p of byProject.values()) if (isOnTrack(p)) c++;
+  return c;
+}
+
+/**
+ * Sequential greedy plan, scored jointly (decision #3). From the base state, each
+ * round joint-scores every not-yet-picked candidate against the accumulated
+ * picks, keeps the one that best improves the lexicographic objective —
+ * (#on-track ↑, then portfolio conjunction ↑) — folds it in, and repeats. Stops
+ * when everyone savable is on track, no remaining candidate gains ≥ `JOINT_MIN_GAIN`
+ * on the conjunction (without adding an on-track project), or the move cap is hit.
+ * Redundant moves fall out for free: a move whose project is already saved buys
+ * ~0 gain, so it's never picked. The chosen set is re-scored once at full
+ * iterations for the displayed cumulative odds; each returned move carries its
+ * cumulative `portfolioProbabilityAfter`.
+ */
+function optimizeJointPlan(
+  scorer: JointScorer,
+  candidates: Candidate[],
+): { moves: StrategyMove[]; afterEach: number[]; combined: number } {
+  const picked: StrategyMove[] = [];
+  const remaining = [...candidates];
+  let current = { byProject: scorer.baseByProject, allOnTime: scorer.baseAllOnTime };
+
+  while (picked.length < JOINT_MOVE_CAP && remaining.length > 0) {
+    // Everyone deadlined is already on track — nothing left worth doing.
+    if (onTrackCount(current.byProject) >= current.byProject.size) break;
+
+    let best: { idx: number; result: { byProject: Map<string, number>; allOnTime: number } } | null = null;
+    for (let i = 0; i < remaining.length; i++) {
+      const result = scorer.score([...picked, remaining[i].move]);
+      if (
+        !best ||
+        onTrackCount(result.byProject) > onTrackCount(best.result.byProject) ||
+        (onTrackCount(result.byProject) === onTrackCount(best.result.byProject) &&
+          result.allOnTime > best.result.allOnTime)
+      ) {
+        best = { idx: i, result };
+      }
+    }
+    if (!best) break;
+
+    // Accept a move that saves a project outright, else only if it lifts the
+    // conjunction by a real margin (so redundant moves are dropped for free).
+    const savesProject =
+      onTrackCount(best.result.byProject) > onTrackCount(current.byProject);
+    const gain = best.result.allOnTime - current.allOnTime;
+    if (!savesProject && gain < JOINT_MIN_GAIN) break;
+
+    picked.push(remaining[best.idx].move);
+    remaining.splice(best.idx, 1);
+    current = best.result;
+  }
+
+  // Re-score the final ordered set once at full iterations for the display.
+  const { afterEach, combined } = scorer.cumulative(picked);
+  const moves = picked.map((m, i) => ({
+    ...m,
+    portfolioProbabilityAfter: afterEach[i] ?? m.probabilityAfter,
+  }));
+  return { moves, afterEach, combined };
+}
+
 // --- B-fallback. Deterministic (no key / call failed) -----------------------
 
 function templateAssessment(calm: boolean): string {
@@ -917,25 +1074,23 @@ function templateAssessment(calm: boolean): string {
 }
 
 /**
- * The full demo-mode / failure path: no generative proposal, no synthesis.
- * On-track is purely deterministic; moves are the mechanical candidate set ranked
- * by recovered odds.
+ * The full demo-mode / synthesis-failure path: no generative proposal, no
+ * synthesis. On-track is purely deterministic; the single bold tier is the
+ * joint-optimized mechanical plan (decision #8) — contention-correct and free of
+ * redundant moves. `grounded` is null here: the bold tier already IS the joint
+ * steady plan, so a second copy would just duplicate it (decision #5).
  */
 function deterministicFallback(
+  scorer: JointScorer,
   candidates: Candidate[],
-  recoveries: RecoveryPlan[],
-  pitWall: PitWall,
-  forecasts: ProjectForecast[],
   fingerprint: string,
   generatedAt: string,
 ): PortfolioStrategy {
-  const onTrack = recoveries.length === 0 && pitWall.conflicts.length === 0;
-  const moves = onTrack
-    ? []
-    : [...candidates]
-        .sort((a, b) => b.move.probabilityAfter - a.move.probabilityAfter)
-        .slice(0, MAX_FALLBACK_MOVES)
-        .map((c) => c.move);
+  const onTrack =
+    scorer.recoveries.length === 0 && scorer.pitWall.conflicts.length === 0;
+  const { moves, combined } = onTrack
+    ? { moves: [] as StrategyMove[], combined: scorer.baseAllOnTime }
+    : optimizeJointPlan(scorer, candidates);
 
   return {
     assessment: templateAssessment(onTrack),
@@ -943,31 +1098,54 @@ function deterministicFallback(
     moves,
     generatedAt,
     fingerprint,
-    odds: oddsSnapshot(forecasts),
+    odds: oddsSnapshot(scorer.forecasts),
     usedLLM: false,
+    combinedProbability: combined,
+    grounded: null,
   };
 }
 
 /**
- * Build the deterministic strategy from an already-gathered dashboard — the
- * load-path fallback when no strategy is cached yet. Pure and LLM-free, so a
- * Today/Strategy render can show a genuinely useful strategy immediately without
- * ever firing the generator.
+ * The instant load-path draft when no strategy is cached yet — synchronous and
+ * LLM-free, off the already-computed dashboard. It keeps the cheap solo ranking
+ * (no extra gather / no joint MC here): each move's `portfolioProbabilityAfter`
+ * is seeded from its solo odds as a placeholder. The aggressive auto-refresh
+ * immediately replaces this with the real joint-scored, two-tier strategy
+ * (decision #5), so this never needs to run the optimizer itself.
  */
 export function deterministicStrategyFrom(
   recoveries: RecoveryPlan[],
   pitWall: PitWall,
   forecasts: ProjectForecast[],
+  tasksById: Map<string, Task>,
 ): PortfolioStrategy {
-  const candidates = buildDeterministicCandidates(recoveries, pitWall);
-  return deterministicFallback(
-    candidates,
-    recoveries,
-    pitWall,
-    forecasts,
-    "",
-    new Date().toISOString(),
-  );
+  const candidates = buildDeterministicCandidates(recoveries, pitWall, tasksById);
+  const onTrack = recoveries.length === 0 && pitWall.conflicts.length === 0;
+  const moves = onTrack
+    ? []
+    : [...candidates]
+        .sort((a, b) => b.move.probabilityAfter - a.move.probabilityAfter)
+        .slice(0, MAX_FALLBACK_MOVES)
+        .map((c) => ({
+          ...c.move,
+          portfolioProbabilityAfter: c.move.probabilityAfter,
+        }));
+
+  return {
+    assessment: templateAssessment(onTrack),
+    onTrack,
+    moves,
+    generatedAt: new Date().toISOString(),
+    fingerprint: "",
+    odds: oddsSnapshot(forecasts),
+    usedLLM: false,
+    combinedProbability: moves.length
+      ? moves[moves.length - 1].portfolioProbabilityAfter
+      : onTrack
+        ? 1
+        : 0,
+    grounded: null,
+  };
 }
 
 // --- The generator ----------------------------------------------------------
@@ -989,19 +1167,21 @@ export async function generatePortfolioStrategy(
   const generatedAt = new Date().toISOString();
   const today = generatedAt.slice(0, 10);
 
-  const { forecasts, recoveries, pitWall } = await forecastDashboard();
-  const candidates = buildDeterministicCandidates(recoveries, pitWall);
+  // One gather + dashboard, plus the joint scorer the optimizer + bold re-scorer
+  // probe against (decision #9 — replaces the old forecastDashboard() call).
+  const scorer = await createJointScorer();
+  const { forecasts, recoveries, pitWall } = scorer;
+  const tasksById = new Map((await listAllTasks()).map((t) => [t.id, t]));
+  const candidates = buildDeterministicCandidates(recoveries, pitWall, tasksById);
+  // Sacrifice-the-flex: skip an unprotected routine/goal to free its hours. Folded
+  // into the mechanical menu so synthesis, the joint optimizer, and the
+  // deterministic fallback can all pick it.
+  candidates.push(...buildActivitySkipCandidates(scorer));
 
-  // Deterministic fallback: no LLM, no generative proposal, no synthesis.
+  // Deterministic fallback: no LLM, no generative proposal, no synthesis. The
+  // single bold tier IS the joint-optimized mechanical plan (decision #8).
   if (!isLLMConfigured()) {
-    return deterministicFallback(
-      candidates,
-      recoveries,
-      pitWall,
-      forecasts,
-      fingerprint,
-      generatedAt,
-    );
+    return deterministicFallback(scorer, candidates, fingerprint, generatedAt);
   }
 
   // B2 — one generative-proposal call (the LLM's free canvas, scored). May be empty.
@@ -1022,20 +1202,33 @@ export async function generatePortfolioStrategy(
     });
   } catch (err) {
     console.error("Portfolio synthesis failed:", err);
-    return deterministicFallback(
-      candidates,
-      recoveries,
-      pitWall,
-      forecasts,
-      fingerprint,
-      generatedAt,
-    );
+    return deterministicFallback(scorer, candidates, fingerprint, generatedAt);
   }
 
-  // B4 — map selected ids back to moves (dropping any unknown id).
-  const moves = result.selectedIds
+  // B4 — map selected ids back to moves (dropping any unknown id). The LLM still
+  // chooses (decision #7); selection is unchanged from Phase 4.
+  const selected = result.selectedIds
     .map((id) => allCandidates[id]?.move)
     .filter((m): m is StrategyMove => m !== undefined);
+
+  // Bold tier: re-score the LLM's exact ordered set jointly so each move shows the
+  // running portfolio conjunction (decision #5/#7) instead of its solo odds.
+  const bold = scorer.cumulative(selected);
+  const moves = selected.map((m, i) => ({
+    ...m,
+    portfolioProbabilityAfter: bold.afterEach[i] ?? m.probabilityAfter,
+  }));
+
+  // Grounded "steady plan" tier (decision #1): mechanical-only moves chosen by the
+  // joint greedy optimizer. Null when there's nothing mechanical worth doing.
+  const groundedPlan = optimizeJointPlan(scorer, candidates);
+  const grounded =
+    groundedPlan.moves.length > 0
+      ? {
+          moves: groundedPlan.moves,
+          combinedProbability: groundedPlan.combined,
+        }
+      : null;
 
   return {
     assessment: result.assessment,
@@ -1045,5 +1238,7 @@ export async function generatePortfolioStrategy(
     fingerprint,
     odds: oddsSnapshot(forecasts),
     usedLLM: true,
+    combinedProbability: bold.combined,
+    grounded,
   };
 }

@@ -2,7 +2,12 @@
 // These run through the same extraction + scoring + schedule pipeline as real
 // input, so the app is populated and fully explorable on first load.
 
-import type { EntryKind, Project } from "./types";
+import type {
+  ActivityCompletion,
+  EntryKind,
+  Project,
+  RecurringActivity,
+} from "./types";
 
 export interface SampleEntry {
   notes: string;
@@ -72,3 +77,103 @@ We are assuming the staging environment mirrors production.`,
     notes: `I want to learn the basics of piano this week.`,
   },
 ];
+
+// --- Recurring activities (routines & goals) --------------------------------
+
+const QURAN_ACTIVITY_ID = "33333333-3333-4333-8333-333333333333";
+const PIANO_PRACTICE_ID = "44444444-4444-4444-8444-444444444444";
+const WORKOUT_ACTIVITY_ID = "55555555-5555-4555-8555-555555555555";
+
+export const SAMPLE_ACTIVITIES: RecurringActivity[] = [
+  {
+    id: QURAN_ACTIVITY_ID,
+    title: "Read Quran",
+    area: "Personal",
+    period: "day",
+    target_count: 1,
+    weekdays: null,
+    estimated_minutes: 15,
+    urgency: 3,
+    impact: 4,
+    effort: 1,
+    dependency: 1,
+    risk: 2,
+    confidence: 5,
+    protected: true, // a streak habit — shielded by default
+    active: true,
+    created_at: "2026-05-15T07:00:00.000Z",
+  },
+  {
+    id: PIANO_PRACTICE_ID,
+    title: "Piano practice",
+    area: "Hobby",
+    period: "week",
+    target_count: 3,
+    weekdays: null,
+    estimated_minutes: 30,
+    urgency: 2,
+    impact: 3,
+    effort: 3,
+    dependency: 1,
+    risk: 2,
+    confidence: 4,
+    protected: false, // a discretionary goal — the first flex to sacrifice
+    active: true,
+    created_at: "2026-05-17T18:30:00.000Z",
+  },
+  {
+    id: WORKOUT_ACTIVITY_ID,
+    title: "Workout",
+    area: "Personal",
+    period: "day",
+    target_count: 1,
+    weekdays: [1, 2, 3, 4, 5], // weekdays only
+    estimated_minutes: 45,
+    urgency: 2,
+    impact: 4,
+    effort: 4,
+    dependency: 1,
+    risk: 2,
+    confidence: 3,
+    protected: false,
+    active: true,
+    created_at: "2026-05-18T06:30:00.000Z",
+  },
+];
+
+/** ISO date `days` before `today` (UTC-stable). */
+function isoDaysAgo(today: string, days: number): string {
+  const [y, m, d] = today.slice(0, 10).split("-").map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  dt.setUTCDate(dt.getUTCDate() - days);
+  return dt.toISOString().slice(0, 10);
+}
+
+/**
+ * Seed completions relative to `today` so streaks/progress render non-empty on
+ * first load (the in-memory demo computes status against the live date). Quran
+ * has a few consecutive prior days (a live streak, still due today); piano has
+ * one logged session this week (1 of 3); workout one recent day.
+ */
+export function sampleActivityCompletions(today: string): ActivityCompletion[] {
+  const make = (
+    activity_id: string,
+    daysAgo: number,
+    minutes: number,
+  ): ActivityCompletion => ({
+    id: crypto.randomUUID(),
+    activity_id,
+    date: isoDaysAgo(today, daysAgo),
+    minutes,
+    skipped: false,
+    created_at: new Date().toISOString(),
+  });
+  return [
+    make(QURAN_ACTIVITY_ID, 1, 15),
+    make(QURAN_ACTIVITY_ID, 2, 15),
+    make(QURAN_ACTIVITY_ID, 3, 15),
+    make(QURAN_ACTIVITY_ID, 4, 15),
+    make(PIANO_PRACTICE_ID, 1, 30),
+    make(WORKOUT_ACTIVITY_ID, 1, 45),
+  ];
+}

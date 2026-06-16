@@ -280,3 +280,59 @@ alter table portfolio_strategy enable row level security;
 drop policy if exists portfolio_strategy_owner on portfolio_strategy;
 create policy portfolio_strategy_owner on portfolio_strategy
   for all using (user_id = auth.uid()) with check (user_id = auth.uid());
+
+-- ===========================================================================
+-- Phase 5 — whole-life sources: recurring activities (routines & goals) that
+-- share the same daily hour pool as projects. Routines are daily/streak-based
+-- (period='day'); goals are a weekly session target (period='week'). Errands
+-- are NOT modelled here — they are plain one-off tasks under a reserved,
+-- deadline-less "Errands" project, so they reuse the tasks table as-is.
+-- ===========================================================================
+
+create table if not exists recurring_activities (
+  id                uuid primary key default gen_random_uuid(),
+  user_id           uuid not null references auth.users(id) on delete cascade,
+  title             text not null,
+  area              text not null default 'Personal',
+  period            text not null default 'day',   -- day | week
+  target_count      integer not null default 1,
+  weekdays          jsonb,                          -- int[] (0=Sun..6=Sat) or null
+  estimated_minutes integer not null default 30,
+  -- 1-5 factor ratings (same scale as tasks); score the synthetic queue instance.
+  urgency           integer not null default 3,
+  impact            integer not null default 3,
+  effort            integer not null default 3,
+  dependency        integer not null default 3,
+  risk              integer not null default 3,
+  confidence        integer not null default 3,
+  protected         boolean not null default false,
+  active            boolean not null default true,
+  created_at        timestamptz not null default now()
+);
+create index if not exists recurring_activities_user_idx on recurring_activities(user_id);
+
+-- One logged session (or skip) of a recurring activity. A skip resolves the
+-- period's obligation without counting toward a streak. Streak/progress are
+-- derived from these rows on read.
+create table if not exists activity_completions (
+  id           uuid primary key default gen_random_uuid(),
+  user_id      uuid not null references auth.users(id) on delete cascade,
+  activity_id  uuid not null references recurring_activities(id) on delete cascade,
+  date         date not null,
+  minutes      integer not null default 0,
+  skipped      boolean not null default false,
+  created_at   timestamptz not null default now()
+);
+create index if not exists activity_completions_activity_idx
+  on activity_completions(activity_id, date);
+
+alter table recurring_activities  enable row level security;
+alter table activity_completions  enable row level security;
+
+drop policy if exists recurring_activities_owner on recurring_activities;
+create policy recurring_activities_owner on recurring_activities
+  for all using (user_id = auth.uid()) with check (user_id = auth.uid());
+
+drop policy if exists activity_completions_owner on activity_completions;
+create policy activity_completions_owner on activity_completions
+  for all using (user_id = auth.uid()) with check (user_id = auth.uid());
