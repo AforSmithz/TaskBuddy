@@ -106,114 +106,129 @@ export default async function TodayPage() {
   }
 
   return (
-    <main className="mx-auto max-w-[960px] px-8 pb-12 pt-6">
+    <main className="mx-auto max-w-[1180px] px-8 pb-12 pt-6">
       <Reveal>
         <CaptureBar />
       </Reveal>
 
-      {/* One portfolio-wide strategy — the cross-project recommendation. Replaces
-          the old pit-wall + per-project "Needs attention" stack; the full detail
-          (contention, per-project options, heavy AI tools) lives at /strategy. */}
-      <Reveal delay={0.05} className="mt-7">
-        <StrategyCard
-          strategy={strategy}
-          stale={strategyStale}
-          canUseLLM={canUseLLM}
-          projectNames={projectNames}
-          severity={bannerSeverity}
-        />
-      </Reveal>
-
-      <Reveal delay={0.1} className="mt-7 flex justify-end">
-        <QuickAdd />
-      </Reveal>
-
-      <Reveal delay={0.12} className="mt-4">
-        <TodayAgenda
-          tasks={agendaTasks}
-          entryTitles={entryTitles}
-          dependencies={dependencies}
-          order={agendaOrder}
-          recurringStateById={recurringStateById}
-        />
-      </Reveal>
-
-      <Reveal delay={0.15} className="mt-5">
-        <TodayPlan days={globalPlan.days} todayISO={todayISO} />
-      </Reveal>
-
-      <Reveal delay={0.2} className="mt-5">
-        <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
-          <TimeBudget availability={availability} today={todayISO} />
-          <Card>
-            <CardHeader title="On track" icon={<Gauge className="size-4" />} />
-            {forecasts.length === 0 ? (
-              <div className="p-5">
-                <EmptyState
-                  icon={Gauge}
-                  title="No deadlines set"
-                  description="Give a project a deadline to forecast your odds of finishing it in time."
-                />
-              </div>
-            ) : (
-              <div className="space-y-2 p-3">
-                {forecasts.map((f) => (
-                  <ProbabilityPill
-                    key={f.projectId}
-                    projectId={f.projectId}
-                    name={f.projectName}
-                    probability={f.probability}
-                  />
-                ))}
-                <ForecastCalibration model={model} />
-              </div>
-            )}
-          </Card>
-        </div>
-      </Reveal>
-
-      <Reveal delay={0.25} className="mt-5">
-        <Card>
-          <CardHeader
-            title="Recent activity"
-            icon={<CalendarClock className="size-4" />}
-          />
-          {entries.length === 0 ? (
-            <EmptyState
-              icon={CalendarClock}
-              title="Nothing here yet"
-              description="Add a meeting transcript or a personal goal to generate tasks."
-              action={
-                <Link href="/create" className={buttonClasses("primary", "sm")}>
-                  <Plus className="size-4" />
-                  New Entry
-                </Link>
-              }
+      {/* Direction F two-column shell: the actionable flow (strategy -> agenda ->
+          plan) in the wide column, status & context in the right rail. Collapses
+          to one column under 980px (matches the f-webapp mockup). */}
+      <div className="mt-7 grid grid-cols-1 items-start gap-[18px] min-[980px]:grid-cols-[1.7fr_1fr]">
+        {/* Wide column — what to do next */}
+        <div className="min-w-0 space-y-5">
+          {/* One portfolio-wide strategy — the cross-project recommendation. The
+              full detail (contention, per-project options, heavy AI tools) lives
+              at /strategy. */}
+          <Reveal delay={0.05}>
+            <StrategyCard
+              strategy={strategy}
+              stale={strategyStale}
+              canUseLLM={canUseLLM}
+              projectNames={projectNames}
+              severity={bannerSeverity}
             />
-          ) : (
-            <div className="divide-y divide-[var(--color-border)]">
-              {entries.map((m) => {
-                const counts = taskCountByEntry.get(m.id) ?? {
-                  total: 0,
-                  open: 0,
-                };
-                return (
-                  <EntryListItem
-                    key={m.id}
-                    id={m.id}
-                    title={m.title}
-                    summary={m.summary}
-                    createdAt={m.created_at}
-                    taskCount={counts.total}
-                    openCount={counts.open}
-                    kind={m.kind}
+          </Reveal>
+
+          <Reveal delay={0.1} className="flex justify-end">
+            <QuickAdd />
+          </Reveal>
+
+          <Reveal delay={0.12}>
+            <TodayAgenda
+              tasks={agendaTasks}
+              entryTitles={entryTitles}
+              dependencies={dependencies}
+              order={agendaOrder}
+              recurringStateById={recurringStateById}
+            />
+          </Reveal>
+
+          <Reveal delay={0.15}>
+            <TodayPlan days={globalPlan.days} todayISO={todayISO} />
+          </Reveal>
+        </div>
+
+        {/* Right rail — status & context */}
+        <div className="min-w-0 space-y-5">
+          <Reveal delay={0.18}>
+            <Card>
+              <CardHeader title="On track" icon={<Gauge className="size-4" />} />
+              {forecasts.length === 0 ? (
+                <div className="p-5">
+                  <EmptyState
+                    icon={Gauge}
+                    title="No deadlines set"
+                    description="Give a project a deadline to forecast your odds of finishing it in time."
                   />
-                );
-              })}
-            </div>
-          )}
-        </Card>
-      </Reveal>
+                </div>
+              ) : (
+                <div className="space-y-2 p-3">
+                  {forecasts.map((f) => (
+                    <ProbabilityPill
+                      key={f.projectId}
+                      projectId={f.projectId}
+                      name={f.projectName}
+                      probability={f.probability}
+                    />
+                  ))}
+                  <ForecastCalibration model={model} />
+                </div>
+              )}
+            </Card>
+          </Reveal>
+
+          <Reveal delay={0.2}>
+            <TimeBudget availability={availability} today={todayISO} />
+          </Reveal>
+
+          <Reveal delay={0.25}>
+            <Card>
+              <CardHeader
+                title="Recent activity"
+                icon={<CalendarClock className="size-4" />}
+              />
+              {entries.length === 0 ? (
+                <EmptyState
+                  icon={CalendarClock}
+                  title="Nothing here yet"
+                  description="Add a meeting transcript or a personal goal to generate tasks."
+                  action={
+                    <Link
+                      href="/create"
+                      className={buttonClasses("primary", "sm")}
+                    >
+                      <Plus className="size-4" />
+                      New Entry
+                    </Link>
+                  }
+                />
+              ) : (
+                <div className="divide-y divide-[var(--color-border)]">
+                  {entries.map((m) => {
+                    const counts = taskCountByEntry.get(m.id) ?? {
+                      total: 0,
+                      open: 0,
+                    };
+                    return (
+                      <EntryListItem
+                        key={m.id}
+                        id={m.id}
+                        title={m.title}
+                        summary={m.summary}
+                        createdAt={m.created_at}
+                        taskCount={counts.total}
+                        openCount={counts.open}
+                        kind={m.kind}
+                      />
+                    );
+                  })}
+                </div>
+              )}
+            </Card>
+          </Reveal>
+        </div>
+      </div>
     </main>
   );
 }

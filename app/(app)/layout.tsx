@@ -21,7 +21,7 @@ export default async function AppLayout({
     <>
       <Sidebar demoMode={demoMode} userName={name} userEmail={user.email ?? ""} />
       <div className="ml-[var(--spacing-sidebar)] min-h-screen">
-        <div className="mx-auto max-w-[960px] px-8 pt-6">
+        <div className="mx-auto max-w-[1180px] px-8 pt-6">
           <TopBar firstName={firstName} />
         </div>
         {children}
