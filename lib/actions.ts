@@ -15,6 +15,7 @@ import {
   discardDraft,
   removeGoalCriterion,
   setGoalCriterionMet,
+  setGoalKind,
   getCachedStrategy,
   getEntry,
   logActivityCompletion,
@@ -45,6 +46,7 @@ import type {
   CompletionConfidence,
   DraftClassification,
   EntryKind,
+  GoalKind,
   ModificationSuggestion,
   PitCall,
   PortfolioStrategy,
@@ -215,6 +217,17 @@ export async function setGoalCriterionMetAction(
   await requireUser();
   await setGoalCriterionMet(id, met, met ? confidence : null);
   revalidateAll();
+}
+
+/** Reclassify a goal as a project or a learning goal. */
+export async function setGoalKindAction(
+  goalId: string,
+  kind: GoalKind,
+): Promise<void> {
+  await requireUser();
+  await setGoalKind(goalId, kind);
+  revalidatePath("/");
+  revalidatePath("/projects", "layout");
 }
 
 /** Remove a criterion from a goal's definition of done. */

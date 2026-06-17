@@ -12,11 +12,13 @@ import {
   FolderTree,
 } from "lucide-react";
 import {
+  GOAL_KIND_LABELS,
   SEED_AREAS,
   type DraftClassification,
   type Entry,
   type EntryDetail,
   type Goal,
+  type GoalKind,
   type Task,
 } from "@/lib/types";
 import { PriorityBadge } from "@/components/ui/badge";
@@ -53,6 +55,7 @@ export function ReviewPanel({
   const [projectId, setProjectId] = useState(entry.goal_id ?? "");
   const [addingProject, setAddingProject] = useState(false);
   const [newProjectName, setNewProjectName] = useState("");
+  const [newProjectKind, setNewProjectKind] = useState<GoalKind>("project");
   const [parentEntryId, setParentEntryId] = useState(
     entry.parent_entry_id ?? "",
   );
@@ -85,6 +88,7 @@ export function ReviewPanel({
       area: (addingArea ? customArea : area).trim() || "Work",
       projectId: addingProject ? null : projectId || null,
       newProjectName: addingProject ? newProjectName.trim() : "",
+      newProjectKind,
       parentEntryId: showRelated ? parentEntryId || null : null,
     };
     startTransition(async () => {
@@ -147,16 +151,35 @@ export function ReviewPanel({
             <div>
               <FieldLabel htmlFor="review-project">Goal</FieldLabel>
               {addingProject ? (
-                <TextField
-                  id="review-project"
-                  autoFocus
-                  placeholder="New goal name…"
-                  value={newProjectName}
-                  onChange={(e) => setNewProjectName(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Escape") setAddingProject(false);
-                  }}
-                />
+                <div className="space-y-2">
+                  <TextField
+                    id="review-project"
+                    autoFocus
+                    placeholder="New goal name…"
+                    value={newProjectName}
+                    onChange={(e) => setNewProjectName(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Escape") setAddingProject(false);
+                    }}
+                  />
+                  <div className="inline-flex items-center gap-1 rounded-[12px] bg-[var(--color-surface-overlay)] p-1">
+                    {(["project", "learning"] as GoalKind[]).map((k) => (
+                      <button
+                        key={k}
+                        type="button"
+                        onClick={() => setNewProjectKind(k)}
+                        className={cn(
+                          "rounded-[9px] px-2.5 py-1 text-[12px] font-medium transition-colors",
+                          newProjectKind === k
+                            ? "bg-[var(--color-surface-raised)] text-[var(--color-fg)] shadow-sm"
+                            : "text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]",
+                        )}
+                      >
+                        {GOAL_KIND_LABELS[k]}
+                      </button>
+                    ))}
+                  </div>
+                </div>
               ) : (
                 <Select
                   id="review-project"

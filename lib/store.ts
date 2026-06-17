@@ -1,5 +1,6 @@
 import "server-only";
 import type {
+  GoalKind,
   ActivityCadencePeriod,
   ActivityCompletion,
   Availability,
@@ -359,11 +360,13 @@ export async function assembleEntry(
 export async function createGoal(
   name: string,
   description: string | null = null,
+  kind: GoalKind = "project",
 ): Promise<string> {
   const project: Goal = {
     id: crypto.randomUUID(),
     name,
     description,
+    kind,
     deadline: null,
     created_at: new Date().toISOString(),
   };
@@ -408,6 +411,22 @@ export async function getGoal(id: string): Promise<Goal | null> {
   }
   await ensureSeeded();
   return memDB().projects.find((p) => p.id === id) ?? null;
+}
+
+/** Reclassify a goal as a project or a learning goal. */
+export async function setGoalKind(id: string, kind: GoalKind): Promise<void> {
+  if (isSupabaseConfigured()) {
+    const supabase = await getRequestClient();
+    const { error } = await supabase
+      .from("goals")
+      .update({ kind })
+      .eq("id", id);
+    if (error) throw new Error(`Supabase goal kind update failed: ${error.message}`);
+    return;
+  }
+  await ensureSeeded();
+  const goal = memDB().projects.find((p) => p.id === id);
+  if (goal) goal.kind = kind;
 }
 
 // --- Definition of done (goal criteria) -------------------------------------
@@ -542,7 +561,11 @@ export async function confirmDraft(
   // Resolve the confirmed filing. A new project is created on demand; a
   // follow-up link to the entry itself is rejected defensively.
   const projectId = classification.newProjectName
-    ? await createGoal(classification.newProjectName)
+    ? await createGoal(
+        classification.newProjectName,
+        null,
+        classification.newProjectKind,
+      )
     : classification.projectId;
   const parentEntryId =
     classification.parentEntryId &&
@@ -1457,6 +1480,7 @@ export async function getOrCreateErrandsProject(): Promise<{
         id: projectId,
         name: ERRANDS_PROJECT_NAME,
         description: "One-off errands.",
+        kind: "project",
         deadline: null,
         user_id,
       });
@@ -1490,6 +1514,7 @@ export async function getOrCreateErrandsProject(): Promise<{
       id: crypto.randomUUID(),
       name: ERRANDS_PROJECT_NAME,
       description: "One-off errands.",
+      kind: "project",
       deadline: null,
       created_at: new Date().toISOString(),
     };

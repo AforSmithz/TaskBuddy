@@ -68,6 +68,20 @@ export const SEED_AREAS = ["Work", "Personal", "Hobby"];
 /** How an entry was created: a meeting transcript or a personal goal/note. */
 export type EntryKind = "meeting" | "plan";
 
+/**
+ * The flavour of a goal. A `project` carries a task DAG + a deadline (work that
+ * ships by a date); a `learning` goal carries a skill graph + checkpoints +
+ * definition-of-done (a capability you build up over time). The same engine runs
+ * under both — `kind` is what lets the UI and (later) the decomposer treat them
+ * differently. The skill-graph structure itself lands with the decomposer.
+ */
+export type GoalKind = "project" | "learning";
+
+export const GOAL_KIND_LABELS: Record<GoalKind, string> = {
+  project: "Project",
+  learning: "Learning",
+};
+
 /** Lifecycle of an entry: a draft awaiting review, or live. */
 export type EntryStatus = "draft" | "active";
 
@@ -83,6 +97,8 @@ export interface DraftClassification {
   projectId: string | null;
   /** Name of a brand-new project to create; empty string when not creating one. */
   newProjectName: string;
+  /** Kind for a brand-new goal (only read when `newProjectName` is set). */
+  newProjectKind: GoalKind;
   /** Earlier entry this one follows up on, or null. */
   parentEntryId: string | null;
 }
@@ -102,6 +118,8 @@ export interface Goal {
   user_id?: string | null;
   name: string;
   description: string | null;
+  /** Project (task DAG + deadline) vs learning (skill graph + checkpoints). */
+  kind: GoalKind;
   /** The "finish line" the completion forecast is computed against. */
   deadline: string | null;
   created_at: string;

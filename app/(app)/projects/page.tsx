@@ -1,11 +1,12 @@
 import Link from "next/link";
-import { Plus, FolderKanban, ListChecks, ChevronRight } from "lucide-react";
+import { Plus, FolderKanban } from "lucide-react";
 import { listAllTasks, listEntries, listGoals } from "@/lib/store";
 import { PageHeader } from "@/components/ui/page-header";
 import { Card } from "@/components/ui/card";
 import { EmptyState } from "@/components/ui/empty-state";
 import { buttonClasses } from "@/components/ui/button";
 import { Reveal } from "@/components/motion/reveal";
+import { GoalsGrid, type GoalCard } from "@/components/goals/goals-grid";
 
 export const metadata = { title: "Goals — TaskBuddy" };
 
@@ -35,6 +36,19 @@ export default async function ProjectsPage() {
     if (t.status !== "done") counts.open += 1;
     tasksByProject.set(pid, counts);
   }
+
+  const cards: GoalCard[] = projects.map((p) => {
+    const counts = tasksByProject.get(p.id) ?? { total: 0, open: 0 };
+    return {
+      id: p.id,
+      name: p.name,
+      description: p.description,
+      kind: p.kind,
+      entryCount: entriesByProject.get(p.id) ?? 0,
+      open: counts.open,
+      total: counts.total,
+    };
+  });
 
   return (
     <main className="mx-auto max-w-[960px] px-8 py-8">
@@ -70,41 +84,7 @@ export default async function ProjectsPage() {
             />
           </Card>
         ) : (
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-            {projects.map((p) => {
-              const counts = tasksByProject.get(p.id) ?? { total: 0, open: 0 };
-              const entryCount = entriesByProject.get(p.id) ?? 0;
-              return (
-                <Link key={p.id} href={`/projects/${p.id}`}>
-                  <Card className="group h-full p-5 transition-colors hover:border-[var(--color-border-strong)]">
-                    <div className="flex items-start justify-between gap-3">
-                      <span className="flex size-9 items-center justify-center rounded-md bg-[var(--color-accent-subtle)] text-[var(--color-accent)]">
-                        <FolderKanban className="size-4" />
-                      </span>
-                      <ChevronRight className="size-4 text-[var(--color-fg-subtle)] transition-transform group-hover:translate-x-0.5" />
-                    </div>
-                    <p className="mt-3 text-[15px] font-semibold text-[var(--color-fg)]">
-                      {p.name}
-                    </p>
-                    {p.description && (
-                      <p className="mt-0.5 line-clamp-2 text-[13px] text-[var(--color-fg-muted)]">
-                        {p.description}
-                      </p>
-                    )}
-                    <div className="mt-3 flex items-center gap-4 text-[12px] text-[var(--color-fg-muted)]">
-                      <span>
-                        {entryCount} {entryCount === 1 ? "entry" : "entries"}
-                      </span>
-                      <span className="flex items-center gap-1.5">
-                        <ListChecks className="size-3.5" />
-                        {counts.open}/{counts.total} open
-                      </span>
-                    </div>
-                  </Card>
-                </Link>
-              );
-            })}
-          </div>
+          <GoalsGrid goals={cards} />
         )}
       </Reveal>
     </main>

@@ -202,6 +202,10 @@ create policy task_dependencies_owner on task_dependencies
 -- A goal's deadline is the "race distance" probability is computed against.
 alter table goals add column if not exists deadline date;
 
+-- A goal's kind: 'project' (task DAG + deadline) or 'learning' (skill graph +
+-- checkpoints, built later). Existing goals are all deadline/task-shaped.
+alter table goals add column if not exists kind text not null default 'project';
+
 -- ---------------------------------------------------------------------------
 -- Goal criteria: the definition-of-done checklist for a goal. A goal counts as
 -- complete when its criteria are non-empty AND all met (derived in code). Each

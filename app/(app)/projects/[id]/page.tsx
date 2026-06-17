@@ -3,6 +3,7 @@ import { notFound } from "next/navigation";
 import {
   ArrowLeft,
   FolderKanban,
+  GraduationCap,
   CalendarClock,
   ListChecks,
   Gauge,
@@ -25,6 +26,7 @@ import { DeadlineEditor } from "@/components/forecast/deadline-editor";
 import { RecoveryCallout } from "@/components/forecast/recovery-callout";
 import { DeferredTasks } from "@/components/forecast/deferred-tasks";
 import { DefinitionOfDone } from "@/components/goals/definition-of-done";
+import { GoalKindEditor } from "@/components/goals/goal-kind-badge";
 
 export default async function ProjectPage({
   params,
@@ -75,9 +77,13 @@ export default async function ProjectPage({
 
       <div className="mt-3 flex items-start gap-3">
         <span className="flex size-10 items-center justify-center rounded-md bg-[var(--color-accent-subtle)] text-[var(--color-accent)]">
-          <FolderKanban className="size-5" />
+          {project.kind === "learning" ? (
+            <GraduationCap className="size-5" />
+          ) : (
+            <FolderKanban className="size-5" />
+          )}
         </span>
-        <div>
+        <div className="min-w-0 flex-1">
           <h1 className="text-2xl font-bold tracking-[-0.02em] text-[var(--color-fg)]">
             {project.name}
           </h1>
@@ -86,6 +92,7 @@ export default async function ProjectPage({
               `${projectEntries.length} entries · ${openCount} open tasks`}
           </p>
         </div>
+        <GoalKindEditor goalId={project.id} kind={project.kind} />
       </div>
 
       {/* Proactive recovery — surfaced only when the project is off track. */}
