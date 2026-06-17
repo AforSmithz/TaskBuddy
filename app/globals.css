@@ -6,27 +6,125 @@
 
 @theme {
   /* Fonts */
-  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-sans: var(--font-schibsted), ui-sans-serif, system-ui, sans-serif;
   --font-mono: var(--font-geist-mono), ui-monospace, "Cascadia Code", monospace;
 
-  /* Foundation */
-  --color-bg:              oklch(97.8% 0.004 264);
-  --color-surface:         oklch(100%  0     0);
-  --color-surface-raised:  oklch(96%   0.004 264);
-  --color-surface-overlay: oklch(93.5% 0.005 264);
-  --color-border:          oklch(90%   0.006 264);
-  --color-border-strong:   oklch(83%   0.008 264);
-  --color-fg:              oklch(14%   0.015 264);
-  --color-fg-muted:        oklch(50%   0.018 264);
-  --color-fg-subtle:       oklch(66%   0.014 264);
+  /* ───────────────────────────────────────────────────────────────────────
+     Direction F · "Soft" — dark is the default (also feeds utility generation).
+     Light values are overridden below in :root[data-theme="light"].
+  ─────────────────────────────────────────────────────────────────────────── */
 
-  /* Accent — indigo */
-  --color-accent:          oklch(52%   0.24  264);
-  --color-accent-hover:    oklch(47%   0.24  264);
-  --color-accent-subtle:   oklch(95.5% 0.025 264);
-  --color-accent-fg:       oklch(30%   0.2   264);
+  /* Foundation — dark */
+  --color-bg:              #0a0a0c;
+  --color-surface:         #171719;
+  --color-surface-raised:  #202023;
+  --color-surface-overlay: #2a2a2e;
+  --color-border:          rgba(255, 255, 255, 0.07);
+  --color-border-strong:   rgba(255, 255, 255, 0.12);
+  --color-fg:              #f3f2ef;
+  --color-fg-muted:        #a4a3a0;
+  --color-fg-subtle:       #6c6b71;
 
-  /* Priority */
+  /* Accent — green */
+  --color-accent:          #1fd083;
+  --color-accent-hover:    #19b873;
+  --color-accent-subtle:   rgba(31, 208, 131, 0.13);
+  --color-accent-fg:       #1fd083;
+
+  /* Cut — the single warm "attention" tone */
+  --color-cut:             #ff9a52;
+  --color-cut-subtle:      rgba(255, 154, 82, 0.13);
+  --color-cut-fg:          #ff9a52;
+
+  /* Priority — dark */
+  --color-priority-critical:        oklch(64% 0.21 27);
+  --color-priority-critical-subtle: oklch(64% 0.21 27 / 0.15);
+  --color-priority-critical-fg:     oklch(79% 0.12 27);
+  --color-priority-high:            oklch(70% 0.16 47);
+  --color-priority-high-subtle:     oklch(70% 0.16 47 / 0.15);
+  --color-priority-high-fg:         oklch(81% 0.10 50);
+  --color-priority-medium:          oklch(78% 0.15 95);
+  --color-priority-medium-subtle:   oklch(78% 0.15 95 / 0.15);
+  --color-priority-medium-fg:       oklch(86% 0.10 98);
+  --color-priority-low:             oklch(68% 0.15 145);
+  --color-priority-low-subtle:      oklch(68% 0.15 145 / 0.15);
+  --color-priority-low-fg:          oklch(81% 0.11 147);
+  --color-priority-backlog:         oklch(62% 0.012 264);
+  --color-priority-backlog-subtle:  oklch(70% 0.012 264 / 0.12);
+  --color-priority-backlog-fg:      oklch(76% 0.010 264);
+
+  /* Kanban status — dark */
+  --color-status-backlog:            oklch(62% 0.012 264);
+  --color-status-backlog-subtle:     oklch(70% 0.012 264 / 0.12);
+  --color-status-backlog-fg:         oklch(76% 0.010 264);
+  --color-status-todo:               oklch(66% 0.15 264);
+  --color-status-todo-subtle:        oklch(66% 0.15 264 / 0.15);
+  --color-status-todo-fg:            oklch(80% 0.09 264);
+  --color-status-in-progress:        oklch(66% 0.15 215);
+  --color-status-in-progress-subtle: oklch(66% 0.15 215 / 0.15);
+  --color-status-in-progress-fg:     oklch(81% 0.09 215);
+  --color-status-blocked:            oklch(64% 0.21 27);
+  --color-status-blocked-subtle:     oklch(64% 0.21 27 / 0.15);
+  --color-status-blocked-fg:         oklch(79% 0.12 27);
+  --color-status-review:             oklch(62% 0.19 292);
+  --color-status-review-subtle:      oklch(62% 0.19 292 / 0.15);
+  --color-status-review-fg:          oklch(80% 0.11 292);
+  --color-status-done:               oklch(68% 0.15 145);
+  --color-status-done-subtle:        oklch(68% 0.15 145 / 0.15);
+  --color-status-done-fg:            oklch(81% 0.11 147);
+
+  /* Semantic feedback — dark */
+  --color-success:        oklch(68% 0.15 145);
+  --color-success-subtle: oklch(68% 0.15 145 / 0.15);
+  --color-danger:         oklch(64% 0.21 27);
+  --color-danger-subtle:  oklch(64% 0.21 27 / 0.15);
+
+  /* Radius — softened (cards ~22px) */
+  --radius-xs:   7px;
+  --radius-sm:   10px;
+  --radius-md:   13px;
+  --radius-lg:   18px;
+  --radius-xl:   22px;
+
+  /* Shadows — dark-tuned, soft & diffuse */
+  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.30);
+  --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.32);
+  --shadow-md: 0 6px 18px rgba(0, 0, 0, 0.36);
+  --shadow-lg: 0 10px 34px rgba(0, 0, 0, 0.42);
+
+  /* Layout */
+  --spacing-sidebar: 248px;
+}
+
+/* Brand gradient — violet → pink → peach, used only as small accents. */
+:root {
+  --gradient-brand: linear-gradient(118deg, #a982f4 0%, #ef72ac 50%, #ffb178 100%);
+}
+
+/* ───────────────────────────────────────────────────────────────────────────
+   Light theme overrides (mockup E). Specificity 0,2,0 beats @theme's :root.
+─────────────────────────────────────────────────────────────────────────── */
+:root[data-theme="light"] {
+  --color-bg:              #ececed;
+  --color-surface:         #ffffff;
+  --color-surface-raised:  #f4f4f6;
+  --color-surface-overlay: #ececed;
+  --color-border:          rgba(15, 15, 20, 0.07);
+  --color-border-strong:   rgba(15, 15, 20, 0.12);
+  --color-fg:              #0e0e11;
+  --color-fg-muted:        #5f5f67;
+  --color-fg-subtle:       #9b9ba3;
+
+  --color-accent:          #13bf6d;
+  --color-accent-hover:    #0fa75e;
+  --color-accent-subtle:   #e6f7ee;
+  --color-accent-fg:       #0c8a4d;
+
+  --color-cut:             #ff9a52;
+  --color-cut-subtle:      #fdeee2;
+  --color-cut-fg:          #c25a18;
+
+  /* Priority — light */
   --color-priority-critical:        oklch(51%   0.22  27);
   --color-priority-critical-subtle: oklch(97%   0.018 27);
   --color-priority-critical-fg:     oklch(35%   0.17  27);
@@ -43,7 +141,7 @@
   --color-priority-backlog-subtle:  oklch(96%   0.004 264);
   --color-priority-backlog-fg:      oklch(33%   0.015 264);
 
-  /* Kanban status */
+  /* Kanban status — light */
   --color-status-backlog:            oklch(66%   0.014 264);
   --color-status-backlog-subtle:     oklch(96%   0.004 264);
   --color-status-backlog-fg:         oklch(33%   0.015 264);
@@ -63,27 +161,16 @@
   --color-status-done-subtle:        oklch(97%   0.02  145);
   --color-status-done-fg:            oklch(37%   0.13  145);
 
-  /* Semantic feedback */
+  /* Semantic feedback — light */
   --color-success:        oklch(54%   0.16  145);
   --color-success-subtle: oklch(97%   0.02  145);
   --color-danger:         oklch(51%   0.22  27);
   --color-danger-subtle:  oklch(97%   0.018 27);
 
-  /* Radius */
-  --radius-xs:   3px;
-  --radius-sm:   5px;
-  --radius-md:   8px;
-  --radius-lg:   12px;
-  --radius-xl:   16px;
-
-  /* Shadows */
-  --shadow-xs: 0 1px 2px oklch(14% 0.015 264 / 0.05);
-  --shadow-sm: 0 1px 3px oklch(14% 0.015 264 / 0.07), 0 1px 2px oklch(14% 0.015 264 / 0.04);
-  --shadow-md: 0 4px 6px oklch(14% 0.015 264 / 0.06), 0 2px 4px oklch(14% 0.015 264 / 0.04);
-  --shadow-lg: 0 10px 15px oklch(14% 0.015 264 / 0.07), 0 4px 6px oklch(14% 0.015 264 / 0.04);
-
-  /* Layout */
-  --spacing-sidebar: 240px;
+  --shadow-xs: 0 1px 2px rgba(20, 18, 40, 0.05);
+  --shadow-sm: 0 2px 8px rgba(20, 18, 40, 0.06);
+  --shadow-md: 0 6px 18px rgba(20, 18, 40, 0.07);
+  --shadow-lg: 0 6px 26px rgba(20, 18, 40, 0.08);
 }
 
 /* Base styles */
@@ -124,8 +211,8 @@ body {
   50%      { transform: scale(1.14) rotate(8deg); }
 }
 @keyframes tb-glow {
-  0%, 100% { box-shadow: 0 0 0 0 oklch(52% 0.24 264 / 0);    }
-  50%      { box-shadow: 0 0 0 5px oklch(52% 0.24 264 / 0.07); }
+  0%, 100% { box-shadow: 0 0 0 0 oklch(72% 0.17 158 / 0);    }
+  50%      { box-shadow: 0 0 0 5px oklch(72% 0.17 158 / 0.12); }
 }
 
 /* Gentle pulse for the "Recommended" sparkle badge */
@@ -145,7 +232,7 @@ body {
   background: linear-gradient(
     105deg,
     transparent 42%,
-    oklch(100% 0 0 / 0.55) 50%,
+    oklch(100% 0 0 / 0.10) 50%,
     transparent 58%
   );
   background-size: 220% 100%;
