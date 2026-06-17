@@ -157,7 +157,7 @@ export function TaskRow({
               }
             }}
             onBlur={() => setAddingArea(false)}
-            className="h-7 w-28 shrink-0 rounded-sm border border-[var(--color-accent)] bg-[var(--color-surface)] px-1.5 text-[11px] font-medium text-[var(--color-fg)] focus:outline-none"
+            className="h-7 w-28 shrink-0 rounded-sm border border-[var(--color-accent)] bg-[var(--color-surface)] px-1.5 text-[11px] font-medium text-[var(--color-fg)] focus:outline-none focus-visible:outline-2 focus-visible:outline-[var(--color-accent)] focus-visible:outline-offset-1"
           />
         ) : (
           <select
@@ -170,7 +170,7 @@ export function TaskRow({
               }
             }}
             aria-label={`Change area of ${task.title}`}
-            className="h-7 shrink-0 rounded-sm border border-[var(--color-border)] bg-[var(--color-surface)] px-1.5 text-[11px] font-medium text-[var(--color-fg-muted)] focus:border-[var(--color-accent)] focus:outline-none"
+            className="h-7 shrink-0 rounded-sm border border-[var(--color-border)] bg-[var(--color-surface)] px-1.5 text-[11px] font-medium text-[var(--color-fg-muted)] focus:border-[var(--color-accent)] focus:outline-none focus-visible:outline-2 focus-visible:outline-[var(--color-accent)] focus-visible:outline-offset-1"
           >
             {areaOptions.map((a) => (
               <option key={a} value={a}>
@@ -187,7 +187,7 @@ export function TaskRow({
             onMove(task.id, e.target.value as TaskStatus, task.status)
           }
           aria-label={`Change status of ${task.title}`}
-          className="h-7 shrink-0 rounded-sm border border-[var(--color-border)] bg-[var(--color-surface)] px-1.5 text-[11px] font-medium text-[var(--color-fg-muted)] focus:border-[var(--color-accent)] focus:outline-none"
+          className="h-7 shrink-0 rounded-sm border border-[var(--color-border)] bg-[var(--color-surface)] px-1.5 text-[11px] font-medium text-[var(--color-fg-muted)] focus:border-[var(--color-accent)] focus:outline-none focus-visible:outline-2 focus-visible:outline-[var(--color-accent)] focus-visible:outline-offset-1"
         >
           {TASK_STATUSES.map((s) => (
             <option key={s} value={s}>

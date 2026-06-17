@@ -51,6 +51,7 @@ function NavLink({ item, active }: { item: NavItem; active: boolean }) {
       href={item.href}
       className={cn(
         "relative flex h-11 items-center gap-3 rounded-[13px] px-3 text-[14.5px] transition-colors",
+        "focus-visible:outline-2 focus-visible:outline-[var(--color-accent)] focus-visible:outline-offset-2",
         active
           ? "bg-[var(--color-surface-raised)] font-semibold text-[var(--color-fg)]"
           : "font-medium text-[var(--color-fg-muted)] hover:bg-[var(--color-surface-raised)] hover:text-[var(--color-fg)]",

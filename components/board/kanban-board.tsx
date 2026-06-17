@@ -241,7 +241,7 @@ function KanbanCard({
           onMove(task.id, e.target.value as TaskStatus, task.status)
         }
         aria-label={`Change status of ${task.title}`}
-        className="mt-2.5 h-7 w-full rounded-sm border border-[var(--color-border)] bg-[var(--color-surface)] px-1.5 text-[11px] font-medium text-[var(--color-fg-muted)] focus:border-[var(--color-accent)] focus:outline-none"
+        className="mt-2.5 h-7 w-full rounded-sm border border-[var(--color-border)] bg-[var(--color-surface)] px-1.5 text-[11px] font-medium text-[var(--color-fg-muted)] focus:border-[var(--color-accent)] focus:outline-none focus-visible:outline-2 focus-visible:outline-[var(--color-accent)] focus-visible:outline-offset-1"
       >
         {TASK_STATUSES.map((s) => (
           <option key={s} value={s}>
