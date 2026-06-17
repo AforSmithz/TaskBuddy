@@ -4,9 +4,11 @@
 create extension if not exists "pgcrypto";
 
 -- ---------------------------------------------------------------------------
--- Projects: top-level grouping for entries and goal plans.
+-- Goals: the spine of the app. A goal owns its tasks directly (tasks.goal_id)
+-- and carries a definition-of-done (goal_criteria) + a deadline. Entries are a
+-- provenance/source link, no longer the structural parent of tasks.
 -- ---------------------------------------------------------------------------
-create table if not exists projects (
+create table if not exists goals (
   id          uuid primary key default gen_random_uuid(),
   user_id     uuid references auth.users(id) on delete cascade,
   name        text not null,
@@ -14,7 +16,7 @@ create table if not exists projects (
   created_at  timestamptz not null default now()
 );
 
-create index if not exists projects_user_id_idx on projects(user_id);
+create index if not exists goals_user_id_idx on goals(user_id);
 
 -- ---------------------------------------------------------------------------
 -- Entries: one row per entry (meeting transcript or goal plan), plus its
@@ -34,12 +36,12 @@ create table if not exists entries (
   risks             jsonb default '[]'::jsonb,   -- string[]
   kind              text not null default 'meeting', -- meeting | plan
   status            text not null default 'active',  -- draft | active
-  project_id        uuid references projects(id) on delete set null,
+  goal_id           uuid references goals(id) on delete set null,
   parent_entry_id   uuid references entries(id) on delete set null,
   created_at        timestamptz not null default now()
 );
 
-create index if not exists entries_project_id_idx on entries(project_id);
+create index if not exists entries_goal_id_idx on entries(goal_id);
 create index if not exists entries_user_id_idx on entries(user_id);
 
 -- For existing databases, add the new columns in place:
@@ -47,7 +49,7 @@ alter table entries
   add column if not exists kind            text not null default 'meeting',
   add column if not exists status          text not null default 'active',
   add column if not exists user_id         uuid references auth.users(id) on delete cascade,
-  add column if not exists project_id      uuid references projects(id) on delete set null,
+  add column if not exists goal_id         uuid references goals(id) on delete set null,
   add column if not exists parent_entry_id uuid references entries(id) on delete set null;
 
 -- ---------------------------------------------------------------------------
@@ -82,6 +84,7 @@ create table if not exists open_questions (
 create table if not exists tasks (
   id                uuid primary key default gen_random_uuid(),
   entry_id          uuid not null references entries(id) on delete cascade,
+  goal_id           uuid references goals(id) on delete set null, -- the canonical owning goal (spine)
   title             text not null,
   description       text,
   owner             text,
@@ -106,11 +109,14 @@ create table if not exists tasks (
   is_ai_suggested   boolean not null default false,
   blocked_by        text,                          -- human-readable blocker note
   deferred          boolean not null default false, -- pushed past the deadline by a recovery move
+  completion_confidence text,                       -- verified|self_assessed|inferred|in_progress (null while open)
+  completed_at      timestamptz,                    -- set when status → done
   sort_index        integer default 0,
   created_at        timestamptz not null default now()
 );
 
 create index if not exists tasks_entry_id_idx on tasks(entry_id);
+create index if not exists tasks_goal_id_idx on tasks(goal_id);
 create index if not exists tasks_status_idx on tasks(status);
 
 -- ---------------------------------------------------------------------------
@@ -127,23 +133,23 @@ create table if not exists task_dependencies (
 
 -- ---------------------------------------------------------------------------
 -- Row Level Security: each user sees only their own data.
---   * projects & entries are owned directly via user_id
---   * child tables (decisions, open_questions, tasks, task_dependencies)
---     inherit ownership through their parent entry
+--   * goals & entries are owned directly via user_id
+--   * child tables (decisions, open_questions, tasks, task_dependencies,
+--     goal_criteria) inherit ownership through their parent entry/goal
 -- The app connects with the publishable (anon) key carrying the user's
 -- session, so these policies — not application code — enforce isolation.
 -- (The recommended schedule is derived on read, not stored, so there's no
 -- schedule_blocks table.)
 -- ---------------------------------------------------------------------------
-alter table projects          enable row level security;
+alter table goals             enable row level security;
 alter table entries           enable row level security;
 alter table decisions         enable row level security;
 alter table open_questions    enable row level security;
 alter table tasks             enable row level security;
 alter table task_dependencies enable row level security;
 
-drop policy if exists projects_owner on projects;
-create policy projects_owner on projects
+drop policy if exists goals_owner on goals;
+create policy goals_owner on goals
   for all
   using (user_id = auth.uid())
   with check (user_id = auth.uid());
@@ -193,8 +199,34 @@ create policy task_dependencies_owner on task_dependencies
 -- feed the completion-probability forecast (see lib/forecast.ts).
 -- ===========================================================================
 
--- A project's deadline is the "race distance" probability is computed against.
-alter table projects add column if not exists deadline date;
+-- A goal's deadline is the "race distance" probability is computed against.
+alter table goals add column if not exists deadline date;
+
+-- ---------------------------------------------------------------------------
+-- Goal criteria: the definition-of-done checklist for a goal. A goal counts as
+-- complete when its criteria are non-empty AND all met (derived in code). Each
+-- criterion carries the confidence at which it was marked met.
+-- ---------------------------------------------------------------------------
+create table if not exists goal_criteria (
+  id             uuid primary key default gen_random_uuid(),
+  goal_id        uuid not null references goals(id) on delete cascade,
+  text           text not null,
+  met            boolean not null default false,
+  met_confidence text,                              -- verified|self_assessed|inferred|in_progress (null until met)
+  sort_index     integer not null default 0,
+  created_at     timestamptz not null default now()
+);
+
+create index if not exists goal_criteria_goal_id_idx on goal_criteria(goal_id);
+
+alter table goal_criteria enable row level security;
+drop policy if exists goal_criteria_owner on goal_criteria;
+create policy goal_criteria_owner on goal_criteria
+  for all
+  using (exists (select 1 from goals g
+                 where g.id = goal_criteria.goal_id and g.user_id = auth.uid()))
+  with check (exists (select 1 from goals g
+                      where g.id = goal_criteria.goal_id and g.user_id = auth.uid()));
 
 -- Weekly availability template: baseline deployable hours per weekday
 -- (0=Sun .. 6=Sat, matching JS Date.getDay()).
