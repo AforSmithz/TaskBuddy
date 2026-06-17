@@ -9,6 +9,7 @@ import {
   FilePlus2,
   Flag,
   RotateCcw,
+  SlidersHorizontal,
   LogOut,
   type LucideIcon,
 } from "lucide-react";
@@ -107,6 +108,21 @@ export function Sidebar({
 
       {/* Footer */}
       <div className="mt-auto">
+        <NavLink
+          item={{
+            href: "/settings",
+            label: "Value model",
+            icon: SlidersHorizontal,
+            exact: false,
+          }}
+          active={isActive({
+            href: "/settings",
+            label: "Value model",
+            icon: SlidersHorizontal,
+            exact: false,
+          })}
+        />
+        <div className="my-3.5 h-px bg-[var(--color-border)]" />
         {demoMode && (
           <div className="mb-3 rounded-[13px] bg-[var(--color-surface-raised)] px-3 py-2.5">
             <p className="text-[11px] font-semibold uppercase tracking-wide text-[var(--color-fg-muted)]">
