@@ -87,6 +87,11 @@ export function ForecastMeter({
         <span>
           {forecast.openTaskCount} open · {formatMinutes(forecast.expectedMinutes)} est
         </span>
+        {forecast.openTaskCount > 0 && forecast.p90Minutes > forecast.p10Minutes && (
+          <span>
+            {formatMinutes(forecast.p10Minutes)}–{formatMinutes(forecast.p90Minutes)} likely
+          </span>
+        )}
         <span className={slack < 0 ? "text-[var(--color-danger)]" : undefined}>
           {slack >= 0
             ? `${formatMinutes(slack)} slack`

@@ -429,6 +429,14 @@ export interface ForecastResult {
   /** deployable − expected; negative means over budget. */
   slackMinutes: number;
   openTaskCount: number;
+  /**
+   * 80% central interval of the *remaining work* (minutes), from the same Monte
+   * Carlo that prices the odds: the work lands between `p10Minutes` and
+   * `p90Minutes` in ~80% of sampled futures. Turns the single `expectedMinutes`
+   * point estimate into an honest range. Both 0 when there's no open work.
+   */
+  p10Minutes: number;
+  p90Minutes: number;
 }
 
 /**

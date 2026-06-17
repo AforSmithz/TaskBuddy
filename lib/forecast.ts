@@ -157,12 +157,12 @@ export function forecast(
     deployableMinutes: deployable,
     slackMinutes: deployable - expectedMinutes,
     openTaskCount: open.length,
+    p10Minutes: 0,
+    p90Minutes: 0,
   };
 
   // Nothing left to do — you've already "finished".
   if (open.length === 0) return { ...base, probability: 1 };
-  // Work remains but no time to deploy — you won't make it.
-  if (deployable <= 0) return { ...base, probability: 0 };
 
   const iterations = options.iterations ?? DEFAULT_ITERATIONS;
   const sigma = options.sigma ?? DEFAULT_SIGMA;
@@ -170,16 +170,42 @@ export function forecast(
   const meanLog = options.meanLog ?? -(sigma * sigma) / 2;
   const rng = mulberry32(seedFrom(open, deployable));
 
+  // Sample the total remaining work many times: the pass-rate is the
+  // probability, and the spread of the sampled totals is an honest effort
+  // interval (p10–p90) around the point estimate — the same uncertainty the
+  // odds price, expressed in hours. We compute the interval even when over
+  // budget (it's a property of the work, not the deadline).
+  const totals = new Array<number>(iterations);
   let made = 0;
   for (let i = 0; i < iterations; i++) {
     let total = 0;
     for (const est of open) {
       total += est * Math.exp(meanLog + sigma * nextNormal(rng));
     }
+    totals[i] = total;
     if (total <= deployable) made++;
   }
+  totals.sort((a, b) => a - b);
+  const withInterval = {
+    ...base,
+    p10Minutes: Math.round(percentile(totals, 0.1)),
+    p90Minutes: Math.round(percentile(totals, 0.9)),
+  };
 
-  return { ...base, probability: made / iterations };
+  // Work remains but no time to deploy — you won't make it.
+  if (deployable <= 0) return { ...withInterval, probability: 0 };
+  return { ...withInterval, probability: made / iterations };
+}
+
+/** Linear-interpolated percentile `p` (0–1) of an ascending-sorted array. */
+function percentile(sorted: number[], p: number): number {
+  if (sorted.length === 0) return 0;
+  if (sorted.length === 1) return sorted[0];
+  const idx = p * (sorted.length - 1);
+  const lo = Math.floor(idx);
+  const hi = Math.ceil(idx);
+  if (lo === hi) return sorted[lo];
+  return sorted[lo] + (sorted[hi] - sorted[lo]) * (idx - lo);
 }
 
 // --- Global (contention-aware) forecast -------------------------------------
