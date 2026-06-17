@@ -7,7 +7,6 @@ import {
   CalendarClock,
   Check,
   ChevronDown,
-  Compass,
   Lock,
   RefreshCw,
   Repeat,
@@ -37,7 +36,7 @@ import {
   updateTaskStatusAction,
 } from "@/lib/actions";
 import { band, formatPct } from "@/components/forecast/forecast-meter";
-import { Card, CardHeader } from "@/components/ui/card";
+import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import {
   TaskDetailRow,
@@ -517,40 +516,41 @@ export function StrategyCard({
   // surface raw odds here — the accent is the only louder signal.
   const escalated = severity === "escalated" && !calm;
 
+  // Hero anchor — the giant portfolio number: odds everything lands with this
+  // plan (`combinedProbability`). Neutral when healthy; takes the cut/danger tone
+  // only when at risk, so an on-track portfolio reads calm. Falls back to a
+  // wordmark for a pre-Phase-5 cache that has no combined odds.
+  const pct = current.combinedProbability;
+  const hasPct = Number.isFinite(pct);
+  const heroBand = hasPct ? band(pct) : "track";
+  const heroTone =
+    heroBand === "off"
+      ? "text-[var(--color-danger)]"
+      : heroBand === "risk"
+        ? "text-[var(--color-cut)]"
+        : "text-[var(--color-fg)]";
+  const eyebrow = current.usedLLM ? "Recommended strategy" : "Strategy draft";
+  const heroCaption = calm
+    ? "you're on track right now"
+    : "chance everything lands with this plan";
+  const headline = escalated
+    ? "A deadline needs your attention"
+    : calm
+      ? "You're on track"
+      : "Here's how to keep everything on track";
+
   return (
     <Card
       className={cn(
+        "rounded-[22px] shadow-[var(--shadow-md)]",
         escalated && "border-l-2 border-l-[var(--color-danger)]",
       )}
     >
-      <CardHeader
-        title="Your strategy"
-        icon={
-          <Compass
-            className={cn(
-              "size-4",
-              escalated
-                ? "text-[var(--color-danger)]"
-                : "text-[var(--color-accent)]",
-            )}
-          />
-        }
-        action={
-          !current.usedLLM ? (
-            <span
-              title="A deterministic draft — generate the AI strategy for a synthesized recommendation."
-              className="shrink-0 rounded-full bg-[var(--color-surface-raised)] px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-[var(--color-fg-subtle)]"
-            >
-              Draft
-            </span>
-          ) : undefined
-        }
-      />
-      <div className="p-4">
+      <div className="p-6 md:p-7">
         {/* Background regeneration in flight — auto (first-load upgrade / stale
             refresh) or a manual click. */}
         {refreshing ? (
-          <div className="mb-3 flex items-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-raised)] px-3.5 py-2.5">
+          <div className="mb-5 flex items-center gap-2 rounded-[14px] border border-[var(--color-border)] bg-[var(--color-surface-raised)] px-3.5 py-2.5">
             <RefreshCw className="size-3.5 shrink-0 animate-spin text-[var(--color-accent-fg)]" />
             <p className="min-w-0 text-[12px] text-[var(--color-fg-muted)]">
               Synthesizing your strategy…
@@ -558,7 +558,7 @@ export function StrategyCard({
           </div>
         ) : isStale ? (
           /* Stale and not auto-refreshing (e.g. LLM offline) — offer a manual refresh. */
-          <div className="mb-3 flex items-center justify-between gap-3 rounded-lg border border-[var(--color-border)] border-l-2 border-l-[var(--color-accent)] bg-[var(--color-surface-raised)] px-3.5 py-2.5">
+          <div className="mb-5 flex items-center justify-between gap-3 rounded-[14px] border border-[var(--color-border)] border-l-2 border-l-[var(--color-accent)] bg-[var(--color-surface-raised)] px-3.5 py-2.5">
             <p className="min-w-0 text-[12px] text-[var(--color-fg-muted)]">
               Your situation changed since this strategy — refresh for current
               advice.
@@ -570,10 +570,56 @@ export function StrategyCard({
           </div>
         ) : null}
 
-        {/* Assessment narrative */}
-        <p className="px-1 text-[13px] leading-relaxed text-[var(--color-fg-muted)]">
-          {current.assessment}
-        </p>
+        {/* Hero — the giant odds anchor plus the headline & why. */}
+        <div className="relative flex flex-col gap-6 overflow-hidden md:flex-row md:gap-8">
+          <div
+            aria-hidden
+            className="pointer-events-none absolute -left-16 -top-20 size-60 rounded-full bg-[image:var(--gradient-brand)] opacity-[0.16] blur-[70px]"
+          />
+          <div className="relative shrink-0">
+            <div className="flex items-center gap-2">
+              <p className="text-[12.5px] font-semibold text-[var(--color-fg-subtle)]">
+                {eyebrow}
+              </p>
+              {!current.usedLLM && (
+                <span
+                  title="A deterministic draft — generate the AI strategy for a synthesized recommendation."
+                  className="rounded-full bg-[var(--color-surface-raised)] px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-[var(--color-fg-subtle)]"
+                >
+                  Draft
+                </span>
+              )}
+            </div>
+            {hasPct ? (
+              <div
+                className={cn(
+                  "mt-2.5 text-[74px] font-extrabold leading-[0.9] tracking-[-0.04em] tabular-nums",
+                  heroTone,
+                )}
+              >
+                {Math.round(pct * 100)}
+                <span className="align-top text-[32px] font-bold text-[var(--color-fg-muted)]">
+                  %
+                </span>
+              </div>
+            ) : (
+              <div className="mt-2.5 text-[40px] font-extrabold leading-tight tracking-[-0.03em] text-[var(--color-fg)]">
+                Strategy
+              </div>
+            )}
+            <p className="mt-2 max-w-[160px] text-[13.5px] font-medium text-[var(--color-fg-muted)]">
+              {heroCaption}
+            </p>
+          </div>
+          <div className="flex-1 md:border-l md:border-[var(--color-border)] md:pl-8">
+            <h1 className="text-[22px] font-bold leading-tight tracking-[-0.02em] text-[var(--color-fg)]">
+              {headline}
+            </h1>
+            <p className="mt-2.5 max-w-[54ch] text-[14px] leading-relaxed text-[var(--color-fg-muted)]">
+              {current.assessment}
+            </p>
+          </div>
+        </div>
 
         {/* Bold tier — the LLM's recommendation, re-scored jointly. */}
         <MoveTier
@@ -601,7 +647,7 @@ export function StrategyCard({
         {calm && (
           <p className="mt-3 flex items-center gap-1.5 px-1 text-[12px] text-[var(--color-status-done)]">
             <Shield className="size-3.5 shrink-0" />
-            On track — nothing to change right now.
+            Nothing to change right now — hold course.
           </p>
         )}
 
