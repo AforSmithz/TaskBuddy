@@ -4,14 +4,17 @@ import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import {
   addCorrectiveTasks,
+  addGoalCriterion,
   applyReroute,
   applyTaskModifications,
   confirmDraft,
   createDraft,
   createErrandTask,
-  createProject,
+  createGoal,
   createRecurringActivity,
   discardDraft,
+  removeGoalCriterion,
+  setGoalCriterionMet,
   getCachedStrategy,
   getEntry,
   logActivityCompletion,
@@ -39,6 +42,7 @@ import { generatePortfolioStrategy } from "./portfolio-strategist";
 import { requireUser } from "./auth";
 import type { ValueModel } from "./value-model";
 import type {
+  CompletionConfidence,
   DraftClassification,
   EntryKind,
   ModificationSuggestion,
@@ -48,6 +52,7 @@ import type {
   ReroutePart,
   RerouteSuggestion,
   SuggestedTask,
+  Task,
   TaskModification,
   TaskStatus,
 } from "./types";
@@ -115,7 +120,7 @@ export async function createEntryAction(
   try {
     let projectId = existingProjectId;
     if (newProjectName) {
-      projectId = await createProject(newProjectName);
+      projectId = await createGoal(newProjectName);
     }
     entryId = await createDraft(notes, {
       kind,
@@ -161,13 +166,61 @@ export async function discardDraftAction(entryId: string): Promise<void> {
   redirect("/create");
 }
 
-/** Move a task to a new Kanban status. */
+/**
+ * Move a task to a new Kanban status. Completing it tags the completion with a
+ * confidence (manual checkbox → `self_assessed`; strategist auto-complete →
+ * `inferred`; an explicit verify → `verified`) and stamps `completed_at`;
+ * reopening it clears both.
+ */
 export async function updateTaskStatusAction(
   taskId: string,
   status: TaskStatus,
+  confidence: CompletionConfidence = "self_assessed",
 ): Promise<void> {
   await requireUser();
-  await updateTask(taskId, { status });
+  const patch: Partial<Task> =
+    status === "done"
+      ? { status, completion_confidence: confidence, completed_at: new Date().toISOString() }
+      : { status, completion_confidence: null, completed_at: null };
+  await updateTask(taskId, patch);
+  revalidateAll();
+}
+
+/** Elevate an already-done task's completion to `verified` (keeps `completed_at`). */
+export async function verifyTaskAction(taskId: string): Promise<void> {
+  await requireUser();
+  await updateTask(taskId, { completion_confidence: "verified" });
+  revalidateAll();
+}
+
+// --- Definition of done (goal criteria) -------------------------------------
+
+/** Add a criterion to a goal's definition of done. */
+export async function addGoalCriterionAction(
+  goalId: string,
+  text: string,
+): Promise<void> {
+  await requireUser();
+  if (!text.trim()) return;
+  await addGoalCriterion(goalId, text);
+  revalidateAll();
+}
+
+/** Mark a criterion met (at a confidence) or unmet. */
+export async function setGoalCriterionMetAction(
+  id: string,
+  met: boolean,
+  confidence: CompletionConfidence = "self_assessed",
+): Promise<void> {
+  await requireUser();
+  await setGoalCriterionMet(id, met, met ? confidence : null);
+  revalidateAll();
+}
+
+/** Remove a criterion from a goal's definition of done. */
+export async function removeGoalCriterionAction(id: string): Promise<void> {
+  await requireUser();
+  await removeGoalCriterion(id);
   revalidateAll();
 }
 

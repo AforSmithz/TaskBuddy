@@ -5,7 +5,8 @@
 import type {
   ActivityCompletion,
   EntryKind,
-  Project,
+  Goal,
+  GoalCriterion,
   RecurringActivity,
 } from "./types";
 
@@ -20,7 +21,7 @@ export interface SampleEntry {
 const ANALYTICS_PROJECT_ID = "11111111-1111-4111-8111-111111111111";
 const PIANO_PROJECT_ID = "22222222-2222-4222-8222-222222222222";
 
-export const SAMPLE_PROJECTS: Project[] = [
+export const SAMPLE_PROJECTS: Goal[] = [
   {
     id: ANALYTICS_PROJECT_ID,
     name: "Q2 Analytics Initiative",
@@ -34,6 +35,38 @@ export const SAMPLE_PROJECTS: Project[] = [
     description: "A personal goal to pick up the basics of piano.",
     deadline: null,
     created_at: "2026-05-17T17:30:00.000Z",
+  },
+];
+
+// A starter definition-of-done for the seed goals: one criterion already met (so
+// the "provisionally complete" path is visible) and the rest still open.
+export const SAMPLE_GOAL_CRITERIA: GoalCriterion[] = [
+  {
+    id: "c1111111-0000-4000-8000-000000000001",
+    goal_id: ANALYTICS_PROJECT_ID,
+    text: "Dashboard signed off by stakeholders",
+    met: false,
+    met_confidence: null,
+    sort_index: 0,
+    created_at: "2026-05-15T09:05:00.000Z",
+  },
+  {
+    id: "c1111111-0000-4000-8000-000000000002",
+    goal_id: ANALYTICS_PROJECT_ID,
+    text: "Customer dataset cleaned and validated",
+    met: true,
+    met_confidence: "self_assessed",
+    sort_index: 1,
+    created_at: "2026-05-15T09:05:00.000Z",
+  },
+  {
+    id: "c2222222-0000-4000-8000-000000000001",
+    goal_id: PIANO_PROJECT_ID,
+    text: "Play a major scale hands together",
+    met: false,
+    met_confidence: null,
+    sort_index: 0,
+    created_at: "2026-05-17T17:35:00.000Z",
   },
 ];
 

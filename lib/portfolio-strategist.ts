@@ -23,7 +23,7 @@ import {
   getRecoveryContext,
   listAllTasks,
   listCommitments,
-  listProjects,
+  listGoals,
   previewProbabilityWithModifications,
   previewProbabilityWithReroute,
   previewProbabilityWithTasks,
@@ -115,7 +115,7 @@ function dueState(
 export async function computePortfolioFingerprint(): Promise<string> {
   const [tasks, projects, commitments] = await Promise.all([
     listAllTasks(),
-    listProjects(),
+    listGoals(),
     listCommitments(),
   ]);
   const today = new Date().toISOString().slice(0, 10);

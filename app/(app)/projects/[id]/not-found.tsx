@@ -10,7 +10,7 @@ export default function NotFound() {
       </div>
       <div className="space-y-1">
         <p className="text-[15px] font-semibold text-[var(--color-fg)]">
-          Project not found
+          Goal not found
         </p>
         <p className="max-w-sm text-[13px] text-[var(--color-fg-muted)]">
           This project may have been removed, or the link is incorrect.

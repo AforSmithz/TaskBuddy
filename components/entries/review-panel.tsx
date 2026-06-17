@@ -16,7 +16,7 @@ import {
   type DraftClassification,
   type Entry,
   type EntryDetail,
-  type Project,
+  type Goal,
   type Task,
 } from "@/lib/types";
 import { PriorityBadge } from "@/components/ui/badge";
@@ -36,7 +36,7 @@ export function ReviewPanel({
   entries,
 }: {
   entry: EntryDetail;
-  projects: Project[];
+  projects: Goal[];
   entries: Entry[];
 }) {
   const tasks = entry.tasks;
@@ -50,7 +50,7 @@ export function ReviewPanel({
   const [area, setArea] = useState(initialArea);
   const [addingArea, setAddingArea] = useState(false);
   const [customArea, setCustomArea] = useState("");
-  const [projectId, setProjectId] = useState(entry.project_id ?? "");
+  const [projectId, setProjectId] = useState(entry.goal_id ?? "");
   const [addingProject, setAddingProject] = useState(false);
   const [newProjectName, setNewProjectName] = useState("");
   const [parentEntryId, setParentEntryId] = useState(
@@ -61,7 +61,7 @@ export function ReviewPanel({
     (m) =>
       m.kind === "meeting" &&
       m.id !== entry.id &&
-      (!projectId || m.project_id === projectId),
+      (!projectId || m.goal_id === projectId),
   );
   const showRelated = entry.kind === "meeting" && relatedCandidates.length > 0;
 
@@ -145,7 +145,7 @@ export function ReviewPanel({
             </div>
 
             <div>
-              <FieldLabel htmlFor="review-project">Project</FieldLabel>
+              <FieldLabel htmlFor="review-project">Goal</FieldLabel>
               {addingProject ? (
                 <TextField
                   id="review-project"

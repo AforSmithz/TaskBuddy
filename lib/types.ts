@@ -2,6 +2,38 @@
 
 export type Confidence = "High" | "Medium" | "Low";
 
+/**
+ * How sure we are that a completion is real. A task marked done by hand is
+ * `self_assessed`; the strategist auto-completing one is `inferred`; an explicit
+ * check that it meets the definition-of-done is `verified`; `in_progress` is a
+ * provisional "claimed done but not finished" state. Used to tag both task
+ * completion and the meeting of a goal's definition-of-done criteria.
+ */
+export type CompletionConfidence =
+  | "verified"
+  | "self_assessed"
+  | "inferred"
+  | "in_progress";
+
+/**
+ * Strength ordering (higher = surer). Used to take the *weakest* confidence
+ * across a goal's met criteria, and to decide whether a goal is "verified
+ * complete" (every met criterion is `verified`).
+ */
+export const COMPLETION_CONFIDENCE_RANK: Record<CompletionConfidence, number> = {
+  verified: 3,
+  self_assessed: 2,
+  inferred: 1,
+  in_progress: 0,
+};
+
+export const COMPLETION_CONFIDENCE_LABELS: Record<CompletionConfidence, string> = {
+  verified: "Verified",
+  self_assessed: "Self-assessed",
+  inferred: "Inferred",
+  in_progress: "In progress",
+};
+
 /** Result of a login/signup Server Action, surfaced via `useActionState`. */
 export interface AuthState {
   error: string | null;
@@ -64,15 +96,51 @@ export interface DraftClassification {
 
 // --- Database row shapes ----------------------------------------------------
 
-export interface Project {
+/**
+ * A goal — the spine of the app. Owns its tasks directly (`Task.goal_id`) and
+ * carries a definition-of-done (`GoalCriterion[]`) plus a deadline. Subsumes the
+ * old "project" (a project goal = task DAG + deadline; a learning goal will add a
+ * skill graph in a later step). Entries are a provenance/source link, not the
+ * structural parent.
+ */
+export interface Goal {
   id: string;
-  /** Owner of the project. Undefined in offline demo mode. */
+  /** Owner of the goal. Undefined in offline demo mode. */
   user_id?: string | null;
   name: string;
   description: string | null;
   /** The "finish line" the completion forecast is computed against. */
   deadline: string | null;
   created_at: string;
+}
+
+/**
+ * One line of a goal's definition-of-done. The goal counts as complete when its
+ * criteria are non-empty AND all `met` (derived, never stored). `met_confidence`
+ * records how sure we were when it was checked off.
+ */
+export interface GoalCriterion {
+  id: string;
+  goal_id: string;
+  text: string;
+  met: boolean;
+  met_confidence: CompletionConfidence | null;
+  sort_index: number;
+  created_at: string;
+}
+
+/**
+ * A goal's derived completion read (computed in `lib/goal.ts`), for the UI and
+ * the divergence detector. `complete` = criteria non-empty AND all met;
+ * `verified` = complete AND every met criterion is `verified`; `confidence` is
+ * the weakest confidence across met criteria (null when nothing is met).
+ */
+export interface GoalCompletion {
+  complete: boolean;
+  verified: boolean;
+  confidence: CompletionConfidence | null;
+  metCount: number;
+  total: number;
 }
 
 export interface Entry {
@@ -90,7 +158,7 @@ export interface Entry {
   risks: string[];
   kind: EntryKind;
   status: EntryStatus;
-  project_id: string | null;
+  goal_id: string | null;
   parent_entry_id: string | null;
   created_at: string;
 }
@@ -118,6 +186,8 @@ export interface OpenQuestion {
 export interface Task {
   id: string;
   entry_id: string;
+  /** The owning goal — the canonical spine edge. Null only for unfiled drafts. */
+  goal_id: string | null;
   title: string;
   description: string | null;
   owner: string | null;
@@ -141,6 +211,10 @@ export interface Task {
   blocked_by: string | null;
   /** Pushed past the current deadline by a recovery move; excluded from the forecast. */
   deferred: boolean;
+  /** How sure we are this completion is real (set when status → done; null while open). */
+  completion_confidence: CompletionConfidence | null;
+  /** When the task was marked done (null while open). */
+  completed_at: string | null;
   sort_index: number;
   created_at: string;
 }
@@ -354,6 +428,7 @@ export interface DivergenceReason {
     | "at_risk" // open work is below the target probability of finishing on time
     | "overdue_tasks" // open tasks whose due_date has passed
     | "blocked_tasks" // open tasks stuck in `blocked`
+    | "provisional_completion" // done work / met criteria rest on unverified confidence
     | "contention"; // competing with another project for the same shared hours (pit wall)
   /** "critical" = the deadline itself is in jeopardy; "warning" = needs attention but on time. */
   severity: "critical" | "warning";
@@ -601,7 +676,7 @@ export interface EffectiveOrderEntry {
   rank: number;
   /** True when deadline pressure pulled this ahead of more intrinsically important work. */
   pulledAhead: boolean;
-  /** Human-readable reason for the placement (e.g. "pulled ahead — Project X due in 2 days"). */
+  /** Human-readable reason for the placement (e.g. "pulled ahead — Goal X due in 2 days"). */
   reason: string;
 }
 

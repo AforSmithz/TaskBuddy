@@ -494,6 +494,7 @@ export function recurringAgendaTask(
   return {
     id: `recurring:${activity.id}:${today}`,
     entry_id: "",
+    goal_id: null, // synthetic recurring lane — owned by an activity, not a goal
     title: activity.title,
     description: null,
     owner: null,
@@ -516,6 +517,8 @@ export function recurringAgendaTask(
     is_ai_suggested: false,
     blocked_by: null,
     deferred: false,
+    completion_confidence: null,
+    completed_at: null,
     sort_index: 0,
     created_at: activity.created_at,
   };

@@ -19,7 +19,7 @@ import {
   listAllDependencies,
   listAllTasks,
   listEntries,
-  listProjects,
+  listGoals,
 } from "@/lib/store";
 import type { Task } from "@/lib/types";
 import { Card, CardHeader, CardBody } from "@/components/ui/card";
@@ -64,7 +64,7 @@ export default async function TaskPage({
   const [tasks, entries, projects, deps, dashboard] = await Promise.all([
     listAllTasks(),
     listEntries(),
-    listProjects(),
+    listGoals(),
     listAllDependencies(),
     forecastDashboard(),
   ]);
@@ -74,8 +74,8 @@ export default async function TaskPage({
 
   const byId = new Map(tasks.map((t) => [t.id, t]));
   const entry = entries.find((e) => e.id === task.entry_id) ?? null;
-  const project = entry?.project_id
-    ? projects.find((p) => p.id === entry.project_id) ?? null
+  const project = entry?.goal_id
+    ? projects.find((p) => p.id === entry.goal_id) ?? null
     : null;
 
   const { globalPlan, model, forecasts } = dashboard;

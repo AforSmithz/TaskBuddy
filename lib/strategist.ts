@@ -161,7 +161,7 @@ function buildUserPrompt(ctx: RecoveryContext): string {
 
   return [
     `Today's date is ${today}.`,
-    `Project: "${ctx.project.name}" (deadline ${ctx.project.deadline?.slice(0, 10) ?? "none"}).`,
+    `Goal: "${ctx.project.name}" (deadline ${ctx.project.deadline?.slice(0, 10) ?? "none"}).`,
     `Current probability of finishing on time: ${Math.round(ctx.currentProbability * 100)}%.`,
     deficitH > 0
       ? `The open work is roughly ${deficitH}h more than the time budget allows.`
@@ -376,7 +376,7 @@ function buildModifyPrompt(ctx: RecoveryContext): string {
 
   return [
     `Today's date is ${today}.`,
-    `Project: "${ctx.project.name}" (deadline ${ctx.project.deadline?.slice(0, 10) ?? "none"}).`,
+    `Goal: "${ctx.project.name}" (deadline ${ctx.project.deadline?.slice(0, 10) ?? "none"}).`,
     `Current probability of finishing on time: ${Math.round(ctx.currentProbability * 100)}%.`,
     deficitH > 0
       ? `The open work is roughly ${deficitH}h more than the time budget allows — reshaping needs to claw that back.`
@@ -631,7 +631,7 @@ function buildReroutePrompt(ctx: RecoveryContext): string {
 
   return [
     `Today's date is ${today}.`,
-    `Project: "${ctx.project.name}" (deadline ${ctx.project.deadline?.slice(0, 10) ?? "none"}).`,
+    `Goal: "${ctx.project.name}" (deadline ${ctx.project.deadline?.slice(0, 10) ?? "none"}).`,
     `Current probability of finishing on time: ${Math.round(ctx.currentProbability * 100)}%.`,
     deficitH > 0
       ? `The current plan is roughly ${deficitH}h more work than the budget allows — a re-route must claw most of that back.`

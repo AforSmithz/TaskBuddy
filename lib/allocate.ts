@@ -97,7 +97,7 @@ export interface GlobalPlanInput {
 /** The deterministic global plan: one cross-project order + one unified schedule. */
 export interface GlobalPlan {
   order: EffectiveOrderEntry[];
-  /** Project-tagged days over the shared budget. */
+  /** Goal-tagged days over the shared budget. */
   days: ScheduleDay[];
 }
 

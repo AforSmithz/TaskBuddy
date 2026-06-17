@@ -3,7 +3,7 @@
 import { useActionState, useState } from "react";
 import { Loader2, AlertCircle, Wand2, FileText, Target } from "lucide-react";
 import { createEntryAction, type FormState } from "@/lib/actions";
-import { SEED_AREAS, type EntryKind, type Entry, type Project } from "@/lib/types";
+import { SEED_AREAS, type EntryKind, type Entry, type Goal } from "@/lib/types";
 import { Textarea, TextField, FieldLabel, Select } from "@/components/ui/text-field";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
@@ -33,7 +33,7 @@ export function EntryForm({
   projects,
   entries,
 }: {
-  projects: Project[];
+  projects: Goal[];
   entries: Entry[];
 }) {
   const [state, formAction, pending] = useActionState(
@@ -51,7 +51,7 @@ export function EntryForm({
   const projectEntries = entries.filter(
     (m) =>
       m.kind === "meeting" &&
-      (!projectId || projectId === AUTO || m.project_id === projectId),
+      (!projectId || projectId === AUTO || m.goal_id === projectId),
   );
 
   return (
@@ -115,7 +115,7 @@ export function EntryForm({
         </div>
 
         <div>
-          <FieldLabel htmlFor="project">Project (optional)</FieldLabel>
+          <FieldLabel htmlFor="project">Goal (optional)</FieldLabel>
           {addingProject ? (
             <TextField
               id="project"

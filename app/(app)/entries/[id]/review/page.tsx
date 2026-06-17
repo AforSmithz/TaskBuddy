@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 import { ArrowLeft, Target, GitBranch, HelpCircle } from "lucide-react";
-import { getEntry, listEntries, listProjects } from "@/lib/store";
+import { getEntry, listEntries, listGoals } from "@/lib/store";
 import { Card, CardHeader, CardBody } from "@/components/ui/card";
 import { Pill } from "@/components/ui/badge";
 import { ReviewPanel } from "@/components/entries/review-panel";
@@ -16,7 +16,7 @@ export default async function ReviewPage({
   const { id } = await params;
   const [entry, projects, entries] = await Promise.all([
     getEntry(id),
-    listProjects(),
+    listGoals(),
     listEntries(),
   ]);
   if (!entry) notFound();

@@ -14,7 +14,7 @@ import {
   Lightbulb,
   FolderKanban,
 } from "lucide-react";
-import { getEntry, getEntrySchedule, getProject } from "@/lib/store";
+import { getEntry, getEntrySchedule, getGoal } from "@/lib/store";
 import { formatDate } from "@/lib/format";
 import { Card, CardHeader, CardBody } from "@/components/ui/card";
 import { Pill } from "@/components/ui/badge";
@@ -35,7 +35,7 @@ export default async function EntryPage({
 
   const isPlan = entry.kind === "plan";
   const [project, scheduleDays] = await Promise.all([
-    entry.project_id ? getProject(entry.project_id) : Promise.resolve(null),
+    entry.goal_id ? getGoal(entry.goal_id) : Promise.resolve(null),
     getEntrySchedule(entry),
   ]);
 

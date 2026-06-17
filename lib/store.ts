@@ -5,6 +5,7 @@ import type {
   Availability,
   AvailabilityOverride,
   Commitment,
+  CompletionConfidence,
   Conflict,
   PitWallOption,
   Decision,
@@ -17,10 +18,11 @@ import type {
   EstimationModel,
   FactorScores,
   ForecastResult,
+  GoalCriterion,
   OpenQuestion,
   PitCall,
   PortfolioStrategy,
-  Project,
+  Goal,
   ProjectForecast,
   RecoveryPlan,
   RecurringActivity,
@@ -38,6 +40,7 @@ import type {
 import { ON_TRACK_PROBABILITY, isOnTrack } from "./types";
 import { extractEntry } from "./extraction";
 import { estimationModel } from "./generate";
+import { goalCompletion } from "./goal";
 import { computePriority } from "./priority";
 import {
   dayCapacities,
@@ -67,6 +70,7 @@ import {
 import {
   SAMPLE_ACTIVITIES,
   SAMPLE_ENTRIES,
+  SAMPLE_GOAL_CRITERIA,
   SAMPLE_PROJECTS,
   sampleActivityCompletions,
 } from "./sample-data";
@@ -112,7 +116,9 @@ async function currentUserId(supabase: RequestClient): Promise<string> {
 // --- In-memory store (survives HMR via globalThis) --------------------------
 
 interface MemDB {
-  projects: Project[];
+  projects: Goal[];
+  /** Definition-of-done criteria, keyed by goal_id on each row. */
+  goalCriteria: GoalCriterion[];
   entries: Entry[];
   decisions: Decision[];
   questions: OpenQuestion[];
@@ -145,6 +151,7 @@ function memDB(): MemDB {
   if (!g.__taskbuddyDB) {
     g.__taskbuddyDB = {
       projects: [],
+      goalCriteria: [],
       entries: [],
       decisions: [],
       questions: [],
@@ -227,10 +234,10 @@ export async function assembleEntry(
 
   // When the project is left to TaskBuddy, fetch existing projects so the
   // extractor can reuse one by name and so a suggestion can be resolved below.
-  // Skipped otherwise — notably during seeding, where listProjects() would
+  // Skipped otherwise — notably during seeding, where listGoals() would
   // re-enter ensureSeeded().
   const resolveProject = opts.autoProject && !opts.projectId;
-  const projects = resolveProject ? await listProjects() : [];
+  const projects = resolveProject ? await listGoals() : [];
   const { result } = await extractEntry(rawInput, kind, {
     projectNames: projects.map((p) => p.name),
   });
@@ -238,7 +245,7 @@ export async function assembleEntry(
   // Area: an explicit choice wins; otherwise use the extractor's suggestion.
   const area = opts.area ?? result.suggested_area ?? "Work";
 
-  // Project: an explicit choice wins; otherwise, when auto-filing, attach to
+  // Goal: an explicit choice wins; otherwise, when auto-filing, attach to
   // the suggested project — reusing an existing one of that name if it exists.
   let projectId = opts.projectId ?? null;
   if (resolveProject && result.suggested_project) {
@@ -246,7 +253,7 @@ export async function assembleEntry(
     const match = projects.find(
       (p) => p.name.toLowerCase() === name.toLowerCase(),
     );
-    projectId = match ? match.id : await createProject(name);
+    projectId = match ? match.id : await createGoal(name);
   }
 
   const entry: Entry = {
@@ -262,7 +269,7 @@ export async function assembleEntry(
     risks: result.risks,
     kind,
     status: opts.status ?? "active",
-    project_id: projectId,
+    goal_id: projectId,
     parent_entry_id: opts.parentEntryId ?? null,
     created_at: createdAt,
   };
@@ -296,6 +303,8 @@ export async function assembleEntry(
     return {
       id: keyToId.get(t.key)!,
       entry_id: entryId,
+      // The owning goal (the spine). Null on a draft until the goal is confirmed.
+      goal_id: projectId,
       title: t.title,
       description: t.description,
       owner: t.owner,
@@ -318,6 +327,8 @@ export async function assembleEntry(
       is_ai_suggested: t.is_ai_suggested,
       blocked_by: t.blocked_by,
       deferred: false,
+      completion_confidence: null,
+      completed_at: null,
       sort_index: i,
       created_at: createdAt,
     };
@@ -345,11 +356,11 @@ export async function assembleEntry(
 
 // --- Projects ---------------------------------------------------------------
 
-export async function createProject(
+export async function createGoal(
   name: string,
   description: string | null = null,
 ): Promise<string> {
-  const project: Project = {
+  const project: Goal = {
     id: crypto.randomUUID(),
     name,
     description,
@@ -360,7 +371,7 @@ export async function createProject(
     const supabase = await getRequestClient();
     const user_id = await currentUserId(supabase);
     const { error } = await supabase
-      .from("projects")
+      .from("goals")
       .insert({ ...project, user_id });
     if (error) throw new Error(`Supabase project insert failed: ${error.message}`);
   } else {
@@ -370,14 +381,14 @@ export async function createProject(
   return project.id;
 }
 
-export async function listProjects(): Promise<Project[]> {
+export async function listGoals(): Promise<Goal[]> {
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
     const { data } = await supabase
-      .from("projects")
+      .from("goals")
       .select("*")
       .order("created_at", { ascending: false });
-    return (data as Project[]) ?? [];
+    return (data as Goal[]) ?? [];
   }
   await ensureSeeded();
   return [...memDB().projects].sort((a, b) =>
@@ -385,18 +396,110 @@ export async function listProjects(): Promise<Project[]> {
   );
 }
 
-export async function getProject(id: string): Promise<Project | null> {
+export async function getGoal(id: string): Promise<Goal | null> {
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
     const { data } = await supabase
-      .from("projects")
+      .from("goals")
       .select("*")
       .eq("id", id)
       .maybeSingle();
-    return (data as Project) ?? null;
+    return (data as Goal) ?? null;
   }
   await ensureSeeded();
   return memDB().projects.find((p) => p.id === id) ?? null;
+}
+
+// --- Definition of done (goal criteria) -------------------------------------
+
+/** A goal's definition-of-done criteria, in display order. */
+export async function listGoalCriteria(
+  goalId: string,
+): Promise<GoalCriterion[]> {
+  if (isSupabaseConfigured()) {
+    const supabase = await getRequestClient();
+    const { data } = await supabase
+      .from("goal_criteria")
+      .select("*")
+      .eq("goal_id", goalId)
+      .order("sort_index", { ascending: true });
+    return (data as GoalCriterion[]) ?? [];
+  }
+  await ensureSeeded();
+  return memDB()
+    .goalCriteria.filter((c) => c.goal_id === goalId)
+    .sort((a, b) => a.sort_index - b.sort_index);
+}
+
+/** Append a new (unmet) criterion to a goal's definition of done. */
+export async function addGoalCriterion(
+  goalId: string,
+  text: string,
+): Promise<void> {
+  const existing = await listGoalCriteria(goalId);
+  const row: GoalCriterion = {
+    id: crypto.randomUUID(),
+    goal_id: goalId,
+    text: text.trim(),
+    met: false,
+    met_confidence: null,
+    sort_index: existing.length,
+    created_at: new Date().toISOString(),
+  };
+  if (isSupabaseConfigured()) {
+    const supabase = await getRequestClient();
+    const { error } = await supabase.from("goal_criteria").insert(row);
+    if (error)
+      throw new Error(`Supabase goal_criteria insert failed: ${error.message}`);
+  } else {
+    await ensureSeeded();
+    memDB().goalCriteria.push(row);
+  }
+}
+
+/**
+ * Mark a criterion met (at a given confidence) or unmet. Clearing `met` also
+ * clears the recorded confidence.
+ */
+export async function setGoalCriterionMet(
+  id: string,
+  met: boolean,
+  confidence: CompletionConfidence | null,
+): Promise<void> {
+  const patch = {
+    met,
+    met_confidence: met ? confidence : null,
+  };
+  if (isSupabaseConfigured()) {
+    const supabase = await getRequestClient();
+    const { error } = await supabase
+      .from("goal_criteria")
+      .update(patch)
+      .eq("id", id);
+    if (error)
+      throw new Error(`Supabase goal_criteria update failed: ${error.message}`);
+    return;
+  }
+  await ensureSeeded();
+  const row = memDB().goalCriteria.find((c) => c.id === id);
+  if (row) Object.assign(row, patch);
+}
+
+/** Remove a criterion from a goal's definition of done. */
+export async function removeGoalCriterion(id: string): Promise<void> {
+  if (isSupabaseConfigured()) {
+    const supabase = await getRequestClient();
+    const { error } = await supabase
+      .from("goal_criteria")
+      .delete()
+      .eq("id", id);
+    if (error)
+      throw new Error(`Supabase goal_criteria delete failed: ${error.message}`);
+    return;
+  }
+  await ensureSeeded();
+  const db = memDB();
+  db.goalCriteria = db.goalCriteria.filter((c) => c.id !== id);
 }
 
 // --- Entries (meetings & plans) ---------------------------------------------
@@ -439,7 +542,7 @@ export async function confirmDraft(
   // Resolve the confirmed filing. A new project is created on demand; a
   // follow-up link to the entry itself is rejected defensively.
   const projectId = classification.newProjectName
-    ? await createProject(classification.newProjectName)
+    ? await createGoal(classification.newProjectName)
     : classification.projectId;
   const parentEntryId =
     classification.parentEntryId &&
@@ -457,12 +560,17 @@ export async function confirmDraft(
         .delete()
         .in("id", [...declined]);
     }
-    await supabase.from("tasks").update({ area }).eq("entry_id", entryId);
+    // Stamp the confirmed goal onto the entry's tasks (the spine edge) along
+    // with the chosen area.
+    await supabase
+      .from("tasks")
+      .update({ area, goal_id: projectId })
+      .eq("entry_id", entryId);
     await supabase
       .from("entries")
       .update({
         status: "active",
-        project_id: projectId,
+        goal_id: projectId,
         parent_entry_id: parentEntryId,
       })
       .eq("id", entryId);
@@ -478,9 +586,12 @@ export async function confirmDraft(
     (d) => !declined.has(d.task_id) && !declined.has(d.depends_on_task_id),
   );
   const survivors = db.tasks.filter((t) => t.entry_id === entryId);
-  for (const t of survivors) t.area = area;
+  for (const t of survivors) {
+    t.area = area;
+    t.goal_id = projectId;
+  }
   entry.status = "active";
-  entry.project_id = projectId;
+  entry.goal_id = projectId;
   entry.parent_entry_id = parentEntryId;
 }
 
@@ -653,6 +764,9 @@ export async function updateTask(
       | "area"
       | "deferred"
       | "due_date"
+      // Confidence-tagged completion (set when status → done, cleared on reopen).
+      | "completion_confidence"
+      | "completed_at"
       // Reshaped in place by the strategist's scope-down move.
       | "title"
       | "description"
@@ -687,6 +801,7 @@ async function ensureSeeded(): Promise<void> {
   if (!seedPromise) {
     seedPromise = (async () => {
       db.projects.push(...SAMPLE_PROJECTS);
+      db.goalCriteria.push(...SAMPLE_GOAL_CRITERIA);
       for (const sample of SAMPLE_ENTRIES) {
         const assembled = await assembleEntry(sample.notes, {
           kind: sample.kind,
@@ -745,7 +860,7 @@ export async function setProjectDeadline(
 ): Promise<void> {
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
-    await supabase.from("projects").update({ deadline }).eq("id", projectId);
+    await supabase.from("goals").update({ deadline }).eq("id", projectId);
     return;
   }
   await ensureSeeded();
@@ -1310,7 +1425,7 @@ function buildErrandsHoldingEntry(projectId: string): Entry {
     risks: [],
     kind: "plan",
     status: "active",
-    project_id: projectId,
+    goal_id: projectId,
     parent_entry_id: null,
     created_at: new Date().toISOString(),
   };
@@ -1330,7 +1445,7 @@ export async function getOrCreateErrandsProject(): Promise<{
     const supabase = await getRequestClient();
     const user_id = await currentUserId(supabase);
     const { data: proj } = await supabase
-      .from("projects")
+      .from("goals")
       .select("id")
       .eq("name", ERRANDS_PROJECT_NAME)
       .limit(1)
@@ -1338,7 +1453,7 @@ export async function getOrCreateErrandsProject(): Promise<{
     let projectId = (proj as { id: string } | null)?.id;
     if (!projectId) {
       projectId = crypto.randomUUID();
-      const { error } = await supabase.from("projects").insert({
+      const { error } = await supabase.from("goals").insert({
         id: projectId,
         name: ERRANDS_PROJECT_NAME,
         description: "One-off errands.",
@@ -1351,7 +1466,7 @@ export async function getOrCreateErrandsProject(): Promise<{
     const { data: ent } = await supabase
       .from("entries")
       .select("id")
-      .eq("project_id", projectId)
+      .eq("goal_id", projectId)
       .eq("status", "active")
       .limit(1)
       .maybeSingle();
@@ -1381,7 +1496,7 @@ export async function getOrCreateErrandsProject(): Promise<{
     db.projects.unshift(proj);
   }
   let entry = db.entries.find(
-    (e) => e.project_id === proj!.id && e.status === "active",
+    (e) => e.goal_id === proj!.id && e.status === "active",
   );
   if (!entry) {
     entry = buildErrandsHoldingEntry(proj.id);
@@ -1396,7 +1511,7 @@ export async function createErrandTask(
   dueDate?: string | null,
   estimatedMinutes = 30,
 ): Promise<string> {
-  const { entryId } = await getOrCreateErrandsProject();
+  const { projectId, entryId } = await getOrCreateErrandsProject();
   const f: FactorScores = {
     urgency: 3,
     impact: 2,
@@ -1409,6 +1524,7 @@ export async function createErrandTask(
   const task: Task = {
     id: crypto.randomUUID(),
     entry_id: entryId,
+    goal_id: projectId,
     title: title.trim(),
     description: null,
     owner: null,
@@ -1431,6 +1547,8 @@ export async function createErrandTask(
     is_ai_suggested: false,
     blocked_by: null,
     deferred: false,
+    completion_confidence: null,
+    completed_at: null,
     sort_index: 0,
     created_at: new Date().toISOString(),
   };
@@ -1449,14 +1567,14 @@ export async function createErrandTask(
 // --- Forecast ---------------------------------------------------------------
 
 interface ForecastGather {
-  projects: Project[];
+  projects: Goal[];
   /** Open (not done, not deferred) tasks per project — the forecast input. */
   tasksByProject: Map<string, CandidateTask[]>;
   /** All tasks per project (any status) — for divergence detection & sequencing. */
   allTasksByProject: Map<string, Task[]>;
   /** Dependency edges keyed by entry — for the re-sequence recommendation. */
   deps: TaskDependency[];
-  /** entry_id → owning project_id, for mapping tasks to projects. */
+  /** entry_id → the entry's goal (provenance only; tasks map to goals via `Task.goal_id`). */
   projectOfEntry: Map<string, string | null>;
   /** projectId → deadline (or null) for EVERY project — the global allocator spans all. */
   deadlineByProject: Map<string, string | null>;
@@ -1483,7 +1601,7 @@ interface ForecastGather {
 async function gatherForecast(): Promise<ForecastGather> {
   const [projects, entries, tasks, deps, rawBudget, activities, completions, valueModel] =
     await Promise.all([
-      listProjects(),
+      listGoals(),
       listEntries(),
       listAllTasks(),
       listAllDependencies(),
@@ -1503,11 +1621,13 @@ async function gatherForecast(): Promise<ForecastGather> {
     overrides: rawBudget.overrides,
     commitments,
   };
-  const projectOfEntry = new Map(entries.map((e) => [e.id, e.project_id]));
+  const projectOfEntry = new Map(entries.map((e) => [e.id, e.goal_id]));
   const tasksByProject = new Map<string, CandidateTask[]>();
   const allTasksByProject = new Map<string, Task[]>();
   for (const t of tasks) {
-    const pid = projectOfEntry.get(t.entry_id);
+    // The spine: a task belongs to its goal directly (no longer derived through
+    // the entry it was ingested from). Entry is now just provenance.
+    const pid = t.goal_id;
     if (!pid) continue;
     const all = allTasksByProject.get(pid) ?? [];
     all.push(t);
@@ -2366,6 +2486,7 @@ export function detectDivergence(
   tasks: Task[],
   today: string,
   conflicts: Conflict[] = [],
+  criteria: GoalCriterion[] = [],
 ): DivergenceReason[] {
   const reasons: DivergenceReason[] = [];
   const open = tasks.filter((t) => t.status !== "done" && !t.deferred);
@@ -2428,6 +2549,33 @@ export function detectDivergence(
     });
   }
 
+  // Provisional completion (advisory): work marked done — or DoD criteria met —
+  // at less than `verified` confidence. The forecast probability is unchanged
+  // (a done task frees its budget either way); this only nudges the user to
+  // confirm before treating the goal as truly finished. A done task with no
+  // recorded confidence (legacy / pre-feature) is left alone, not flagged.
+  const provisionalDone = tasks.filter(
+    (t) =>
+      t.status === "done" &&
+      t.completion_confidence != null &&
+      t.completion_confidence !== "verified",
+  );
+  const completion = goalCompletion(criteria);
+  const provisionalCriteria = completion.complete && !completion.verified;
+  if (provisionalDone.length > 0 || provisionalCriteria) {
+    const bits: string[] = [];
+    if (provisionalCriteria) bits.push("definition of done met but unverified");
+    if (provisionalDone.length > 0)
+      bits.push(
+        `${provisionalDone.length} task${provisionalDone.length === 1 ? "" : "s"} done but unverified`,
+      );
+    reasons.push({
+      kind: "provisional_completion",
+      severity: "warning",
+      detail: `Provisionally complete — ${bits.join("; ")}. Verify before relying on it.`,
+    });
+  }
+
   // Cross-project signal (the pit wall): this project can't make its deadline
   // once it competes with others for the shared hours. Critical — the deadline
   // itself is in jeopardy, for a reason no per-project view can see.
@@ -2445,7 +2593,7 @@ export function detectDivergence(
  */
 function buildRecoveryPlan(
   g: ForecastGather,
-  project: Project,
+  project: Goal,
   odds: Map<string, number>,
   conflicts: Conflict[] = [],
 ): RecoveryPlan | null {
@@ -2552,7 +2700,7 @@ function buildRecoveryPlan(
 
 /** Everything the strategist needs to propose corrective tasks for one project. */
 export interface RecoveryContext {
-  project: Project;
+  project: Goal;
   /** Open (not done, not deferred) tasks — full rows, for prompt context. */
   openTasks: Task[];
   /** Deployable minutes from today through the deadline. */
@@ -2636,7 +2784,7 @@ export async function addCorrectiveTasks(
   tasks: SuggestedTask[],
 ): Promise<void> {
   if (tasks.length === 0) return;
-  const project = await getProject(projectId);
+  const project = await getGoal(projectId);
   if (!project) return;
 
   const createdAt = new Date().toISOString();
@@ -2691,7 +2839,7 @@ export async function applyTaskModifications(
   mods: TaskModification[],
 ): Promise<void> {
   if (mods.length === 0) return;
-  const project = await getProject(projectId);
+  const project = await getGoal(projectId);
   if (!project) return;
 
   const createdAt = new Date().toISOString();
@@ -2762,7 +2910,7 @@ export async function applyReroute(
   tasks: ReroutePart[],
 ): Promise<void> {
   if (tasks.length === 0) return;
-  const project = await getProject(projectId);
+  const project = await getGoal(projectId);
   if (!project) return;
 
   const createdAt = new Date().toISOString();
@@ -2815,6 +2963,7 @@ function buildRecoveryTaskRow(
   return {
     id: crypto.randomUUID(),
     entry_id: entryId,
+    goal_id: null, // stamped by persistRecoveryEntry once the owning goal is known
     title: input.title,
     description: input.description,
     owner: null,
@@ -2837,6 +2986,8 @@ function buildRecoveryTaskRow(
     is_ai_suggested: true,
     blocked_by: input.blocked_by ?? null,
     deferred: false,
+    completion_confidence: null,
+    completed_at: null,
     sort_index: sortIndex,
     created_at: createdAt,
   };
@@ -2848,14 +2999,17 @@ function buildRecoveryTaskRow(
  * project through the entry with no schema change. No-op when there are no rows.
  */
 async function persistRecoveryEntry(
-  project: Project,
+  project: Goal,
   summary: string,
   taskRows: Task[],
   createdAt: string,
 ): Promise<void> {
   if (taskRows.length === 0) return;
   const entryId = crypto.randomUUID();
-  for (const row of taskRows) row.entry_id = entryId;
+  for (const row of taskRows) {
+    row.entry_id = entryId;
+    row.goal_id = project.id; // the spine edge — these tasks belong to the goal
+  }
 
   const entry: Entry = {
     id: entryId,
@@ -2870,7 +3024,7 @@ async function persistRecoveryEntry(
     risks: [],
     kind: "plan",
     status: "active",
-    project_id: project.id,
+    goal_id: project.id,
     parent_entry_id: null,
     created_at: createdAt,
   };

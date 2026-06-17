@@ -1,12 +1,12 @@
 import { Card, CardBody } from "@/components/ui/card";
 import { EntryForm } from "@/components/create/entry-form";
-import { listEntries, listProjects } from "@/lib/store";
+import { listEntries, listGoals } from "@/lib/store";
 
 export const metadata = { title: "New Entry — TaskBuddy" };
 
 export default async function CreatePage() {
   const [projects, entries] = await Promise.all([
-    listProjects(),
+    listGoals(),
     listEntries(),
   ]);
 

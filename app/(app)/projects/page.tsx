@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { Plus, FolderKanban, ListChecks, ChevronRight } from "lucide-react";
-import { listAllTasks, listEntries, listProjects } from "@/lib/store";
+import { listAllTasks, listEntries, listGoals } from "@/lib/store";
 import { PageHeader } from "@/components/ui/page-header";
 import { Card } from "@/components/ui/card";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -11,21 +11,21 @@ export const metadata = { title: "Projects — TaskBuddy" };
 
 export default async function ProjectsPage() {
   const [projects, entries, tasks] = await Promise.all([
-    listProjects(),
+    listGoals(),
     listEntries(),
     listAllTasks(),
   ]);
 
   const entriesByProject = new Map<string, number>();
   for (const m of entries) {
-    if (m.project_id)
+    if (m.goal_id)
       entriesByProject.set(
-        m.project_id,
-        (entriesByProject.get(m.project_id) ?? 0) + 1,
+        m.goal_id,
+        (entriesByProject.get(m.goal_id) ?? 0) + 1,
       );
   }
 
-  const projectOfEntry = new Map(entries.map((m) => [m.id, m.project_id]));
+  const projectOfEntry = new Map(entries.map((m) => [m.id, m.goal_id]));
   const tasksByProject = new Map<string, { total: number; open: number }>();
   for (const t of tasks) {
     const pid = projectOfEntry.get(t.entry_id);
