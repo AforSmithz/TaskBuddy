@@ -1,4 +1,5 @@
 import { Sidebar } from "@/components/layout/sidebar";
+import { TopBar } from "@/components/layout/top-bar";
 import { isSupabaseConfigured } from "@/lib/store";
 import { isLLMConfigured } from "@/lib/extraction";
 import { requireUser, displayName } from "@/lib/auth";
@@ -13,15 +14,18 @@ export default async function AppLayout({
 }: Readonly<{ children: React.ReactNode }>) {
   const user = await requireUser();
   const demoMode = !isSupabaseConfigured() || !isLLMConfigured();
+  const name = displayName(user);
+  const firstName = name.split(/\s+/)[0];
 
   return (
     <>
-      <Sidebar
-        demoMode={demoMode}
-        userName={displayName(user)}
-        userEmail={user.email ?? ""}
-      />
-      <div className="ml-[var(--spacing-sidebar)] min-h-screen">{children}</div>
+      <Sidebar demoMode={demoMode} userName={name} userEmail={user.email ?? ""} />
+      <div className="ml-[var(--spacing-sidebar)] min-h-screen">
+        <div className="mx-auto max-w-[960px] px-8 pt-6">
+          <TopBar firstName={firstName} />
+        </div>
+        {children}
+      </div>
     </>
   );
 }
