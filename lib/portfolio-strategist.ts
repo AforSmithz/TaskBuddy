@@ -15,6 +15,7 @@ import type {
   TaskModification,
 } from "./types";
 import { isOnTrack } from "./types";
+import { movePref, type ValueModel } from "./value-model";
 import type { ChatMessage } from "./openrouter";
 import { isLLMConfigured } from "./extraction";
 import {
@@ -74,6 +75,12 @@ const MOD_KINDS: ModificationKind[] = ["scope_down", "split"];
 const JOINT_MIN_GAIN = 0.01;
 /** Hard cap on the greedy plan length (keeps the steady-plan card readable). */
 const JOINT_MOVE_CAP = 6;
+/**
+ * Conjunction gain within this band counts as an odds "tie" — only then does the
+ * Value Model's recovery-style preference break it (taste never overrides a real
+ * gain). Decision: keep the math primary, let the model shape close calls.
+ */
+const PREF_TIE_EPS = 0.02;
 
 // --- C. Fingerprint ---------------------------------------------------------
 
@@ -1021,6 +1028,7 @@ function onTrackCount(byProject: Map<string, number>): number {
 function optimizeJointPlan(
   scorer: JointScorer,
   candidates: Candidate[],
+  vm: ValueModel,
 ): { moves: StrategyMove[]; afterEach: number[]; combined: number } {
   const picked: StrategyMove[] = [];
   const remaining = [...candidates];
@@ -1030,17 +1038,32 @@ function optimizeJointPlan(
     // Everyone deadlined is already on track — nothing left worth doing.
     if (onTrackCount(current.byProject) >= current.byProject.size) break;
 
-    let best: { idx: number; result: { byProject: Map<string, number>; allOnTime: number } } | null = null;
+    let best:
+      | { idx: number; result: { byProject: Map<string, number>; allOnTime: number }; pref: number }
+      | null = null;
     for (let i = 0; i < remaining.length; i++) {
       const result = scorer.score([...picked, remaining[i].move]);
-      if (
-        !best ||
-        onTrackCount(result.byProject) > onTrackCount(best.result.byProject) ||
-        (onTrackCount(result.byProject) === onTrackCount(best.result.byProject) &&
-          result.allOnTime > best.result.allOnTime)
-      ) {
-        best = { idx: i, result };
+      const pref = movePref(vm, remaining[i].move.kind);
+      if (best === null) {
+        best = { idx: i, result, pref };
+        continue;
       }
+      // Lexicographic objective: (#on-track ↑, then conjunction ↑) — UNCHANGED.
+      // The Value Model only arbitrates when the conjunction is within an
+      // epsilon: a true odds tie defers to the user's recovery-style preference.
+      const otc = onTrackCount(result.byProject);
+      const botc = onTrackCount(best.result.byProject);
+      let better: boolean;
+      if (otc !== botc) {
+        better = otc > botc;
+      } else {
+        const delta = result.allOnTime - best.result.allOnTime;
+        better =
+          Math.abs(delta) <= PREF_TIE_EPS
+            ? pref > best.pref || (pref === best.pref && delta > 0)
+            : delta > 0;
+      }
+      if (better) best = { idx: i, result, pref };
     }
     if (!best) break;
 
@@ -1090,7 +1113,7 @@ function deterministicFallback(
     scorer.recoveries.length === 0 && scorer.pitWall.conflicts.length === 0;
   const { moves, combined } = onTrack
     ? { moves: [] as StrategyMove[], combined: scorer.baseAllOnTime }
-    : optimizeJointPlan(scorer, candidates);
+    : optimizeJointPlan(scorer, candidates, scorer.valueModel);
 
   return {
     assessment: templateAssessment(onTrack),
@@ -1221,7 +1244,7 @@ export async function generatePortfolioStrategy(
 
   // Grounded "steady plan" tier (decision #1): mechanical-only moves chosen by the
   // joint greedy optimizer. Null when there's nothing mechanical worth doing.
-  const groundedPlan = optimizeJointPlan(scorer, candidates);
+  const groundedPlan = optimizeJointPlan(scorer, candidates, scorer.valueModel);
   const grounded =
     groundedPlan.moves.length > 0
       ? {
