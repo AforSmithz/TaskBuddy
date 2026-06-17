@@ -8,6 +8,7 @@ import {
   type TaskStatus,
 } from "@/lib/types";
 import { TaskDetailRow, taskToRowData } from "@/components/entries/task-detail-row";
+import { CompletionChip } from "@/components/tasks/completion-chip";
 import {
   updateTaskStatusAction,
   logActualTimeAction,
@@ -50,22 +51,25 @@ export function TaskList({ tasks }: { tasks: Task[] }) {
             data={taskToRowData(task)}
             href={`/tasks/${task.id}`}
             metaTrailing={
-              <label className="flex items-center gap-1.5">
-                <span className="font-mono text-[var(--color-fg-subtle)]">
-                  actual
-                </span>
-                <input
-                  type="number"
-                  min={0}
-                  defaultValue={task.actual_minutes || ""}
-                  placeholder="min"
-                  onBlur={(e) => {
-                    const v = Number(e.target.value);
-                    if (v !== task.actual_minutes) logTime(task.id, v);
-                  }}
-                  className="h-6 w-16 rounded-xs border border-[var(--color-border)] bg-[var(--color-surface)] px-1.5 text-[12px] focus:border-[var(--color-accent)] focus:outline-none"
-                />
-              </label>
+              <span className="flex items-center gap-2.5">
+                <CompletionChip task={task} />
+                <label className="flex items-center gap-1.5">
+                  <span className="font-mono text-[var(--color-fg-subtle)]">
+                    actual
+                  </span>
+                  <input
+                    type="number"
+                    min={0}
+                    defaultValue={task.actual_minutes || ""}
+                    placeholder="min"
+                    onBlur={(e) => {
+                      const v = Number(e.target.value);
+                      if (v !== task.actual_minutes) logTime(task.id, v);
+                    }}
+                    className="h-6 w-16 rounded-xs border border-[var(--color-border)] bg-[var(--color-surface)] px-1.5 text-[12px] focus:border-[var(--color-accent)] focus:outline-none"
+                  />
+                </label>
+              </span>
             }
             trailing={
               <select

@@ -81,7 +81,8 @@ function applyMove(payload: StrategyMovePayload, projectId: string): Promise<unk
     case "unblock":
       return unblockTaskAction(payload.taskId);
     case "mark_done":
-      return updateTaskStatusAction(payload.taskId, "done");
+      // The strategist inferred this is done — tag it as such (not user-verified).
+      return updateTaskStatusAction(payload.taskId, "done", "inferred");
     case "triage":
       return applyTriageAction(payload.taskIds);
     case "add_tasks":

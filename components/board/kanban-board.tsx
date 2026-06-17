@@ -11,6 +11,7 @@ import {
   type TaskStatus,
 } from "@/lib/types";
 import { PriorityBadge } from "@/components/ui/badge";
+import { CompletionChip } from "@/components/tasks/completion-chip";
 import { formatDate, formatMinutes, isOverdue } from "@/lib/format";
 import { cn } from "@/lib/cn";
 import { updateTaskStatusAction } from "@/lib/actions";
@@ -233,6 +234,7 @@ function KanbanCard({
         <span className="font-mono text-[var(--color-fg-subtle)]">
           {formatMinutes(task.estimated_minutes)}
         </span>
+        <CompletionChip task={task} />
       </div>
 
       <select

@@ -10,9 +10,10 @@ import {
 } from "lucide-react";
 import {
   forecastProjectWithRecovery,
-  getProject,
+  getGoal,
   listAllTasks,
   listEntries,
+  listGoalCriteria,
 } from "@/lib/store";
 import { Card, CardHeader, CardBody } from "@/components/ui/card";
 import { Pill } from "@/components/ui/badge";
@@ -23,6 +24,7 @@ import { ForecastMeter, ForecastCalibration } from "@/components/forecast/foreca
 import { DeadlineEditor } from "@/components/forecast/deadline-editor";
 import { RecoveryCallout } from "@/components/forecast/recovery-callout";
 import { DeferredTasks } from "@/components/forecast/deferred-tasks";
+import { DefinitionOfDone } from "@/components/goals/definition-of-done";
 
 export default async function ProjectPage({
   params,
@@ -30,19 +32,21 @@ export default async function ProjectPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
-  const [project, entries, tasks, fr] = await Promise.all([
-    getProject(id),
+  const [project, entries, tasks, criteria, fr] = await Promise.all([
+    getGoal(id),
     listEntries(),
     listAllTasks(),
+    listGoalCriteria(id),
     forecastProjectWithRecovery(id),
   ]);
   if (!project) notFound();
   const { forecast, recovery, model } = fr;
 
-  const projectEntries = entries.filter((m) => m.project_id === id);
-  const entryIds = new Set(projectEntries.map((m) => m.id));
+  const projectEntries = entries.filter((m) => m.goal_id === id);
+  // Tasks belong to the goal directly now (the spine) — no longer derived
+  // through the entry they were ingested from.
   const allProjectTasks = tasks
-    .filter((t) => entryIds.has(t.entry_id))
+    .filter((t) => t.goal_id === id)
     .sort((a, b) => (b.priority_score ?? 0) - (a.priority_score ?? 0));
 
   // Deferred tasks are pushed past the deadline; surface them separately so
@@ -114,6 +118,11 @@ export default async function ProjectPage({
           )}
         </CardBody>
       </Card>
+
+      {/* Definition of done — the goal's real finish line (vs. "all tasks done"). */}
+      <div className="mt-5">
+        <DefinitionOfDone goalId={project.id} criteria={criteria} />
+      </div>
 
       <div className="mt-5 grid grid-cols-1 gap-5 lg:grid-cols-3">
         <div className="lg:col-span-2">
