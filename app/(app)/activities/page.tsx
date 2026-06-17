@@ -17,7 +17,7 @@ export default async function ActivitiesPage() {
       <Reveal>
         <PageHeader
           title="Routines & goals"
-          description="The recurring things you want to keep up — daily routines you build a streak on, and weekly goals you make steady progress toward. They compete for the same hours as your projects."
+          description="The recurring things you want to keep up — daily routines you build a streak on, and weekly goals you make steady progress toward. They compete for the same hours as your goals."
         />
       </Reveal>
 

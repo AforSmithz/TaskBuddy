@@ -5,15 +5,10 @@ export type Confidence = "High" | "Medium" | "Low";
 /**
  * How sure we are that a completion is real. A task marked done by hand is
  * `self_assessed`; the strategist auto-completing one is `inferred`; an explicit
- * check that it meets the definition-of-done is `verified`; `in_progress` is a
- * provisional "claimed done but not finished" state. Used to tag both task
+ * check that it meets the definition-of-done is `verified`. Used to tag both task
  * completion and the meeting of a goal's definition-of-done criteria.
  */
-export type CompletionConfidence =
-  | "verified"
-  | "self_assessed"
-  | "inferred"
-  | "in_progress";
+export type CompletionConfidence = "verified" | "self_assessed" | "inferred";
 
 /**
  * Strength ordering (higher = surer). Used to take the *weakest* confidence
@@ -24,14 +19,12 @@ export const COMPLETION_CONFIDENCE_RANK: Record<CompletionConfidence, number> = 
   verified: 3,
   self_assessed: 2,
   inferred: 1,
-  in_progress: 0,
 };
 
 export const COMPLETION_CONFIDENCE_LABELS: Record<CompletionConfidence, string> = {
   verified: "Verified",
   self_assessed: "Self-assessed",
   inferred: "Inferred",
-  in_progress: "In progress",
 };
 
 /** Result of a login/signup Server Action, surfaced via `useActionState`. */

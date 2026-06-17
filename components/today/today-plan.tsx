@@ -47,7 +47,7 @@ export function TodayPlan({
           <EmptyState
             icon={CalendarRange}
             title="Nothing to schedule"
-            description="No open, unblocked work across your projects right now."
+            description="No open, unblocked work across your goals right now."
           />
         </div>
       ) : (

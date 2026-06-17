@@ -70,7 +70,7 @@ export default async function ProjectPage({
         className="inline-flex items-center gap-1.5 text-[13px] font-medium text-[var(--color-fg-muted)] transition-colors hover:text-[var(--color-fg)]"
       >
         <ArrowLeft className="size-4" />
-        Projects
+        Goals
       </Link>
 
       <div className="mt-3 flex items-start gap-3">
@@ -136,7 +136,7 @@ export default async function ProjectPage({
               <EmptyState
                 icon={ListChecks}
                 title="No tasks yet"
-                description="Add a meeting or goal to this project to populate its tasks."
+                description="Add a meeting or note to this goal to populate its tasks."
               />
             ) : (
               <TaskList tasks={projectTasks} />

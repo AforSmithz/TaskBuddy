@@ -394,7 +394,7 @@ function MoveTier({
                 "text-[12px] font-semibold tabular-nums",
                 toneText(combinedProbability),
               )}
-              title="Portfolio odds that every deadlined project lands once all these moves are applied."
+              title="Portfolio odds that every deadlined goal lands once all these moves are applied."
             >
               all → {formatPct(combinedProbability)}
             </span>

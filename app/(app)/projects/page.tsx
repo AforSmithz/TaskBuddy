@@ -7,7 +7,7 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { buttonClasses } from "@/components/ui/button";
 import { Reveal } from "@/components/motion/reveal";
 
-export const metadata = { title: "Projects — TaskBuddy" };
+export const metadata = { title: "Goals — TaskBuddy" };
 
 export default async function ProjectsPage() {
   const [projects, entries, tasks] = await Promise.all([
@@ -40,8 +40,8 @@ export default async function ProjectsPage() {
     <main className="mx-auto max-w-[960px] px-8 py-8">
       <Reveal>
         <PageHeader
-          title="Projects"
-          description="Group related meetings and goal plans into a single workspace."
+          title="Goals"
+          description="Group related meetings and plans into a single workspace."
           actions={
             <Link href="/create" className={buttonClasses("primary", "md")}>
               <Plus className="size-4" />
@@ -56,8 +56,8 @@ export default async function ProjectsPage() {
           <Card>
             <EmptyState
               icon={FolderKanban}
-              title="No projects yet"
-              description="Create a project while adding a meeting or goal — it groups everything that belongs together."
+              title="No goals yet"
+              description="Create a goal while adding a meeting or note — it groups everything that belongs together."
               action={
                 <Link
                   href="/create"

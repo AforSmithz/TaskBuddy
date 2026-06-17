@@ -849,7 +849,7 @@ function planVsTimeDrift(
     lines.push(`- ${plan.projectName}: ${parts.join(", ")}.`);
   }
 
-  return lines.length ? lines.join("\n") : "No projects are off track.";
+  return lines.length ? lines.join("\n") : "No goals are off track.";
 }
 
 // --- B3. Synthesis LLM call -------------------------------------------------

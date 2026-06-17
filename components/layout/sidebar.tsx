@@ -31,7 +31,7 @@ const NAV: NavItem[] = [
 ];
 
 const GOALS_NAV: NavItem[] = [
-  { href: "/projects", label: "Goals & projects", icon: Target, exact: false },
+  { href: "/projects", label: "Goals", icon: Target, exact: false },
   { href: "/activities", label: "Routines", icon: RotateCcw, exact: false },
   { href: "/create", label: "New entry", icon: FilePlus2, exact: false },
 ];

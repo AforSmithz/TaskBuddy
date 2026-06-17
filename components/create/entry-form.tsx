@@ -121,7 +121,7 @@ export function EntryForm({
               id="project"
               name="newProjectName"
               autoFocus
-              placeholder="New project name…"
+              placeholder="New goal name…"
               onKeyDown={(e) => {
                 if (e.key === "Escape") setAddingProject(false);
               }}
@@ -140,13 +140,13 @@ export function EntryForm({
               }}
             >
               <option value={AUTO}>Auto — let TaskBuddy decide</option>
-              <option value="">No project</option>
+              <option value="">No goal</option>
               {projects.map((p) => (
                 <option key={p.id} value={p.id}>
                   {p.name}
                 </option>
               ))}
-              <option value={NEW_PROJECT}>＋ New project…</option>
+              <option value={NEW_PROJECT}>＋ New goal…</option>
             </Select>
           )}
         </div>

@@ -50,7 +50,7 @@ export default async function StrategyPage() {
       <Reveal>
         <PageHeader
           title="Strategy"
-          description="The full picture behind your portfolio recommendation — contention, automation, and per-project options."
+          description="The full picture behind your portfolio recommendation — contention, automation, and per-goal options."
         />
       </Reveal>
 
@@ -76,7 +76,7 @@ export default async function StrategyPage() {
       <Reveal delay={0.15} className="mt-7">
         <Card>
           <CardHeader
-            title="By project"
+            title="By goal"
             icon={
               recoveries.length > 0 ? (
                 <AlertTriangle className="size-4 text-[var(--color-danger)]" />
@@ -88,7 +88,7 @@ export default async function StrategyPage() {
           {recoveries.length === 0 ? (
             <p className="flex items-center gap-1.5 px-5 py-6 text-[13px] text-[var(--color-fg-muted)]">
               <ShieldCheck className="size-4 shrink-0 text-[var(--color-status-done)]" />
-              No projects are off track — nothing needs per-project attention.
+              No goals are off track — nothing needs per-goal attention.
             </p>
           ) : (
             <div className="space-y-2 p-3">

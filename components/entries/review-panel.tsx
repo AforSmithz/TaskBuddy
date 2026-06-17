@@ -150,7 +150,7 @@ export function ReviewPanel({
                 <TextField
                   id="review-project"
                   autoFocus
-                  placeholder="New project name…"
+                  placeholder="New goal name…"
                   value={newProjectName}
                   onChange={(e) => setNewProjectName(e.target.value)}
                   onKeyDown={(e) => {
@@ -166,13 +166,13 @@ export function ReviewPanel({
                     else setProjectId(e.target.value);
                   }}
                 >
-                  <option value="">No project</option>
+                  <option value="">No goal</option>
                   {projects.map((p) => (
                     <option key={p.id} value={p.id}>
                       {p.name}
                     </option>
                   ))}
-                  <option value={NEW_PROJECT}>＋ New project…</option>
+                  <option value={NEW_PROJECT}>＋ New goal…</option>
                 </Select>
               )}
             </div>

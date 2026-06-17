@@ -159,7 +159,7 @@ export default async function TodayPage() {
                   <EmptyState
                     icon={Gauge}
                     title="No deadlines set"
-                    description="Give a project a deadline to forecast your odds of finishing it in time."
+                    description="Give a goal a deadline to forecast your odds of finishing it in time."
                   />
                 </div>
               ) : (
