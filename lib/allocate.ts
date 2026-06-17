@@ -69,6 +69,12 @@ export interface AllocTask {
   urgency: number;
   impact: number;
   risk: number;
+  /**
+   * Value-Model importance multiplier on this task's cost-of-delay (its area's
+   * weight; OVERHAUL §5.1). Optional — synthetic recurring lanes omit it and read
+   * as neutral (1), so they keep their existing weight.
+   */
+  importance?: number;
 }
 
 export interface GlobalPlanInput {
@@ -109,7 +115,7 @@ function deadlineOffsetOf(deadline: string | null, today: string): number {
  * the project's deadline approaches and pins at its max once due/overdue.
  */
 export function costOfDelay(
-  task: Pick<AllocTask, "urgency" | "impact" | "risk">,
+  task: Pick<AllocTask, "urgency" | "impact" | "risk" | "importance">,
   deadline: string | null,
   today: string,
 ): number {
@@ -124,7 +130,11 @@ export function costOfDelay(
     // 0 when far out, ramping to 1 at the deadline, capped at 1 once overdue.
     proximity = Math.min(1, Math.max(0, (PROXIMITY_WINDOW_DAYS - daysOut) / PROXIMITY_WINDOW_DAYS));
   }
-  return value + proximity * PROXIMITY_WEIGHT;
+  // The Value Model scales the WHOLE cost of delay (intrinsic value + deadline
+  // pressure), so a more-important area's work both ranks earlier and is protected
+  // harder under contention/triage. Neutral (1) when unweighted.
+  const importance = task.importance ?? 1;
+  return (value + proximity * PROXIMITY_WEIGHT) * importance;
 }
 
 /** WSJF — cost of delay per minute of work (value density). Higher = do sooner. */
