@@ -13,9 +13,12 @@ import {
   createGoal,
   createRecurringActivity,
   discardDraft,
+  getGoal,
   removeGoalCriterion,
+  replaceSkillNodes,
   setGoalCriterionMet,
   setGoalKind,
+  setSkillNodeAttained,
   getCachedStrategy,
   getEntry,
   logActivityCompletion,
@@ -34,6 +37,7 @@ import {
   type NewActivityInput,
 } from "./store";
 import { generateFollowUp } from "./generate";
+import { decomposeLearningGoal } from "./decompose";
 import {
   generateCorrectiveTasks,
   generateReroute,
@@ -227,6 +231,31 @@ export async function setGoalKindAction(
   await requireUser();
   await setGoalKind(goalId, kind);
   revalidatePath("/");
+  revalidatePath("/projects", "layout");
+}
+
+/**
+ * Decompose a learning goal into a skill graph (the LLM-proposes decomposer).
+ * Replaces any prior plan. No-ops for project goals — their decomposition is the
+ * task DAG from extraction.
+ */
+export async function decomposeGoalAction(goalId: string): Promise<void> {
+  await requireUser();
+  const goal = await getGoal(goalId);
+  if (!goal || goal.kind !== "learning") return;
+  const skills = await decomposeLearningGoal(goal.name, goal.description);
+  await replaceSkillNodes(goalId, skills);
+  revalidatePath("/projects", "layout");
+}
+
+/** Mark a skill node attained (at a confidence) or not-yet. */
+export async function setSkillAttainedAction(
+  id: string,
+  attained: boolean,
+  confidence: CompletionConfidence = "self_assessed",
+): Promise<void> {
+  await requireUser();
+  await setSkillNodeAttained(id, attained, attained ? confidence : null);
   revalidatePath("/projects", "layout");
 }
 

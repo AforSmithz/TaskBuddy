@@ -15,6 +15,7 @@ import {
   listAllTasks,
   listEntries,
   listGoalCriteria,
+  listSkillNodes,
 } from "@/lib/store";
 import { Card, CardHeader, CardBody } from "@/components/ui/card";
 import { Pill } from "@/components/ui/badge";
@@ -27,6 +28,7 @@ import { RecoveryCallout } from "@/components/forecast/recovery-callout";
 import { DeferredTasks } from "@/components/forecast/deferred-tasks";
 import { DefinitionOfDone } from "@/components/goals/definition-of-done";
 import { GoalKindEditor } from "@/components/goals/goal-kind-badge";
+import { SkillPlan } from "@/components/goals/skill-plan";
 
 export default async function ProjectPage({
   params,
@@ -34,11 +36,12 @@ export default async function ProjectPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
-  const [project, entries, tasks, criteria, fr] = await Promise.all([
+  const [project, entries, tasks, criteria, skillNodes, fr] = await Promise.all([
     getGoal(id),
     listEntries(),
     listAllTasks(),
     listGoalCriteria(id),
+    listSkillNodes(id),
     forecastProjectWithRecovery(id),
   ]);
   if (!project) notFound();
@@ -125,6 +128,13 @@ export default async function ProjectPage({
           )}
         </CardBody>
       </Card>
+
+      {/* Skill plan — a learning goal's prerequisite ladder of capabilities. */}
+      {project.kind === "learning" && (
+        <div className="mt-5">
+          <SkillPlan goalId={project.id} nodes={skillNodes} />
+        </div>
+      )}
 
       {/* Definition of done — the goal's real finish line (vs. "all tasks done"). */}
       <div className="mt-5">

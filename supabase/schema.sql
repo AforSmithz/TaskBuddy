@@ -232,6 +232,37 @@ create policy goal_criteria_owner on goal_criteria
   with check (exists (select 1 from goals g
                       where g.id = goal_criteria.goal_id and g.user_id = auth.uid()));
 
+-- Skill graph for learning goals (the decomposer / §5.3b data model). A learning
+-- goal decomposes into a prerequisite DAG of capabilities; `prerequisites` holds
+-- the ids that must be attained first; `is_checkpoint` marks a verifiable
+-- milestone (checkpoints drive skill-progress, all nodes' effort drives
+-- effort-progress). Attainment is confidence-tagged like task completion.
+create table if not exists skill_nodes (
+  id                  uuid primary key default gen_random_uuid(),
+  goal_id             uuid not null references goals(id) on delete cascade,
+  title               text not null,
+  description         text,
+  prerequisites       jsonb not null default '[]'::jsonb,
+  is_checkpoint       boolean not null default false,
+  estimated_minutes   integer not null default 60,
+  attained            boolean not null default false,
+  attained_confidence text,
+  attained_at         timestamptz,
+  sort_index          integer not null default 0,
+  created_at          timestamptz not null default now()
+);
+
+create index if not exists skill_nodes_goal_id_idx on skill_nodes(goal_id);
+
+alter table skill_nodes enable row level security;
+drop policy if exists skill_nodes_owner on skill_nodes;
+create policy skill_nodes_owner on skill_nodes
+  for all
+  using (exists (select 1 from goals g
+                 where g.id = skill_nodes.goal_id and g.user_id = auth.uid()))
+  with check (exists (select 1 from goals g
+                      where g.id = skill_nodes.goal_id and g.user_id = auth.uid()));
+
 -- Weekly availability template: baseline deployable hours per weekday
 -- (0=Sun .. 6=Sat, matching JS Date.getDay()).
 create table if not exists availability (

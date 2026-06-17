@@ -154,6 +154,53 @@ export interface GoalCompletion {
   total: number;
 }
 
+/**
+ * One node in a learning goal's skill graph: a capability to attain. The
+ * `prerequisites` are ids of nodes that must be attained first (a DAG). A
+ * `is_checkpoint` node is a verifiable milestone — checkpoints drive *skill*
+ * progress, while every node's effort drives *effort* progress (the two diverge
+ * when you've put in hours but not yet hit a milestone). Attainment is
+ * confidence-tagged exactly like task completion.
+ */
+export interface SkillNode {
+  id: string;
+  goal_id: string;
+  title: string;
+  description: string | null;
+  /** Ids of skill nodes that must be attained before this one is unlocked. */
+  prerequisites: string[];
+  is_checkpoint: boolean;
+  estimated_minutes: number;
+  attained: boolean;
+  attained_confidence: CompletionConfidence | null;
+  attained_at: string | null;
+  sort_index: number;
+  created_at: string;
+}
+
+/**
+ * A learning goal's derived progress (computed in `lib/skill.ts`). The crux of
+ * §5.3b: *effort* progress (minutes attained / total) and *skill* progress
+ * (checkpoints met / total, falling back to nodes when a plan has no
+ * checkpoints) are tracked separately, because grinding hours isn't the same as
+ * demonstrably reaching a milestone. `unlocked` are the not-yet-attained nodes
+ * whose prerequisites are all met — the actionable frontier.
+ */
+export interface SkillProgress {
+  total: number;
+  attained: number;
+  checkpointsTotal: number;
+  checkpointsMet: number;
+  effortMinutesDone: number;
+  effortMinutesTotal: number;
+  /** 0–1: minutes attained over total. */
+  effortPct: number;
+  /** 0–1: checkpoints met over total (or nodes attained when no checkpoints). */
+  skillPct: number;
+  /** Ids of unattained nodes whose prerequisites are all attained. */
+  unlocked: string[];
+}
+
 export interface Entry {
   id: string;
   /** Owner of the entry. Undefined in offline demo mode. */
@@ -532,6 +579,30 @@ export interface ExtractionResult {
     confidence: Confidence;
   }[];
   tasks: ExtractedTask[];
+}
+
+// --- LLM decomposer (learning-goal skill graph) -----------------------------
+
+/**
+ * One skill the decomposer proposes for a learning goal. `key` is a stable slug
+ * the model uses so `prerequisites` can reference other skills (mapped to UUIDs
+ * on persist, exactly like extracted-task `depends_on`). The LLM proposes the
+ * structure; it never decides progress.
+ */
+export interface ExtractedSkill {
+  key: string;
+  title: string;
+  description: string;
+  /** Keys of skills that must be learned first. */
+  prerequisites: string[];
+  /** A verifiable milestone (e.g. "hold a 5-minute conversation"). */
+  is_checkpoint: boolean;
+  estimated_minutes: number;
+}
+
+/** What the decomposer LLM is asked to return for a learning goal. */
+export interface SkillDecomposition {
+  skills: ExtractedSkill[];
 }
 
 // --- LLM strategist (corrective task generation) ----------------------------

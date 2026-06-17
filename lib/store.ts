@@ -1,6 +1,8 @@
 import "server-only";
 import type {
   GoalKind,
+  SkillNode,
+  ExtractedSkill,
   ActivityCadencePeriod,
   ActivityCompletion,
   Availability,
@@ -120,6 +122,8 @@ interface MemDB {
   projects: Goal[];
   /** Definition-of-done criteria, keyed by goal_id on each row. */
   goalCriteria: GoalCriterion[];
+  /** Skill-graph nodes for learning goals, keyed by goal_id on each row. */
+  skillNodes: SkillNode[];
   entries: Entry[];
   decisions: Decision[];
   questions: OpenQuestion[];
@@ -153,6 +157,7 @@ function memDB(): MemDB {
     g.__taskbuddyDB = {
       projects: [],
       goalCriteria: [],
+      skillNodes: [],
       entries: [],
       decisions: [],
       questions: [],
@@ -519,6 +524,100 @@ export async function removeGoalCriterion(id: string): Promise<void> {
   await ensureSeeded();
   const db = memDB();
   db.goalCriteria = db.goalCriteria.filter((c) => c.id !== id);
+}
+
+// --- Skill graph (learning-goal decomposer) ---------------------------------
+
+/** A learning goal's skill nodes, oldest-first (already in graph order). */
+export async function listSkillNodes(goalId: string): Promise<SkillNode[]> {
+  if (isSupabaseConfigured()) {
+    const supabase = await getRequestClient();
+    const { data } = await supabase
+      .from("skill_nodes")
+      .select("*")
+      .eq("goal_id", goalId)
+      .order("sort_index", { ascending: true });
+    return (data as SkillNode[]) ?? [];
+  }
+  await ensureSeeded();
+  return memDB()
+    .skillNodes.filter((n) => n.goal_id === goalId)
+    .sort((a, b) => a.sort_index - b.sort_index);
+}
+
+/**
+ * Persist a freshly decomposed skill graph for a goal, replacing any prior plan.
+ * Maps the decomposer's `key` slugs to UUIDs so `prerequisites` becomes a graph
+ * of real ids (exactly how task `depends_on` keys are wired in `assembleEntry`).
+ */
+export async function replaceSkillNodes(
+  goalId: string,
+  skills: ExtractedSkill[],
+): Promise<void> {
+  const createdAt = new Date().toISOString();
+  const keyToId = new Map<string, string>();
+  for (const s of skills) keyToId.set(s.key, crypto.randomUUID());
+
+  const nodes: SkillNode[] = skills.map((s, i) => ({
+    id: keyToId.get(s.key)!,
+    goal_id: goalId,
+    title: s.title,
+    description: s.description || null,
+    prerequisites: s.prerequisites
+      .map((k) => keyToId.get(k))
+      .filter((id): id is string => Boolean(id)),
+    is_checkpoint: s.is_checkpoint,
+    estimated_minutes: s.estimated_minutes,
+    attained: false,
+    attained_confidence: null,
+    attained_at: null,
+    sort_index: i,
+    created_at: createdAt,
+  }));
+
+  if (isSupabaseConfigured()) {
+    const supabase = await getRequestClient();
+    await supabase.from("skill_nodes").delete().eq("goal_id", goalId);
+    if (nodes.length) {
+      const { error } = await supabase.from("skill_nodes").insert(nodes);
+      if (error)
+        throw new Error(`Supabase skill_nodes insert failed: ${error.message}`);
+    }
+    return;
+  }
+  await ensureSeeded();
+  const db = memDB();
+  db.skillNodes = db.skillNodes.filter((n) => n.goal_id !== goalId);
+  db.skillNodes.push(...nodes);
+}
+
+/**
+ * Mark a skill attained (at a confidence) or not-yet. Clearing attainment also
+ * clears the recorded confidence and timestamp — mirrors task completion.
+ */
+export async function setSkillNodeAttained(
+  id: string,
+  attained: boolean,
+  confidence: CompletionConfidence | null,
+): Promise<void> {
+  const patch = {
+    attained,
+    attained_confidence: attained ? confidence : null,
+    attained_at: attained ? new Date().toISOString() : null,
+  };
+  if (isSupabaseConfigured()) {
+    const supabase = await getRequestClient();
+    const { error } = await supabase
+      .from("skill_nodes")
+      .update(patch)
+      .eq("id", id);
+    if (error)
+      throw new Error(`Supabase skill_nodes update failed: ${error.message}`);
+    return;
+  }
+  await ensureSeeded();
+  const row = memDB().skillNodes.find((n) => n.id === id);
+  if (row) Object.assign(row, patch);
 }
 
 // --- Entries (meetings & plans) ---------------------------------------------
