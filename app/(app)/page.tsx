@@ -14,7 +14,7 @@ import {
   deterministicStrategyFrom,
 } from "@/lib/portfolio-strategist";
 import { isLLMConfigured } from "@/lib/extraction";
-import { PageHeader } from "@/components/ui/page-header";
+import { CaptureBar } from "@/components/today/capture-bar";
 import { Card, CardHeader } from "@/components/ui/card";
 import { EmptyState } from "@/components/ui/empty-state";
 import { buttonClasses } from "@/components/ui/button";
@@ -105,25 +105,10 @@ export default async function TodayPage() {
     taskCountByEntry.set(t.entry_id, counts);
   }
 
-  const today = new Date().toLocaleDateString("en-US", {
-    weekday: "long",
-    month: "long",
-    day: "numeric",
-  });
-
   return (
-    <main className="mx-auto max-w-[960px] px-8 py-8">
+    <main className="mx-auto max-w-[960px] px-8 pb-12 pt-6">
       <Reveal>
-        <PageHeader
-          title="Today"
-          description={`${today} — what to focus on right now.`}
-          actions={
-            <Link href="/create" className={buttonClasses("primary", "md")}>
-              <Plus className="size-4" />
-              New Entry
-            </Link>
-          }
-        />
+        <CaptureBar />
       </Reveal>
 
       {/* One portfolio-wide strategy — the cross-project recommendation. Replaces
