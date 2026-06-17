@@ -77,6 +77,12 @@ import {
   recurringStateFor,
   RECURRING_LANE_ID,
 } from "./recurring";
+import {
+  areaWeight,
+  normalizeValueModel,
+  DEFAULT_VALUE_MODEL,
+  type ValueModel,
+} from "./value-model";
 import { getRequestClient } from "./supabase";
 
 // Central data layer.
@@ -121,6 +127,8 @@ interface MemDB {
   activityCompletions: ActivityCompletion[];
   /** Whether the pit-wall strategist auto-applies obvious triage (vs. surfacing it). */
   autoStrategy: boolean;
+  /** The user's value model (importance weights + recovery style), or null => default. */
+  valueModel: ValueModel | null;
   /** The cached portfolio strategy (Phase 4), or null until first generated. */
   portfolioStrategy: PortfolioStrategy | null;
   seeded: boolean;
@@ -148,6 +156,7 @@ function memDB(): MemDB {
       recurringActivities: [],
       activityCompletions: [],
       autoStrategy: false,
+      valueModel: null,
       portfolioStrategy: null,
       seeded: false,
     };
@@ -821,6 +830,43 @@ export async function setAutoStrategy(value: boolean): Promise<void> {
   memDB().autoStrategy = value;
 }
 
+/** The user's value model — importance weights + recovery style. Defaults when unset. */
+export async function getValueModel(): Promise<ValueModel> {
+  if (isSupabaseConfigured()) {
+    const supabase = await getRequestClient();
+    const { data } = await supabase
+      .from("value_model")
+      .select("model")
+      .maybeSingle();
+    const raw = (data as { model?: unknown } | null)?.model;
+    return raw === undefined || raw === null
+      ? { ...DEFAULT_VALUE_MODEL, areaWeights: {} }
+      : normalizeValueModel(raw);
+  }
+  await ensureSeeded();
+  return memDB().valueModel ?? { ...DEFAULT_VALUE_MODEL, areaWeights: {} };
+}
+
+/** Persist the value model (one row per user, upserted). Input is re-normalized. */
+export async function setValueModel(model: ValueModel): Promise<void> {
+  const clean = normalizeValueModel(model);
+  if (isSupabaseConfigured()) {
+    const supabase = await getRequestClient();
+    const user_id = await currentUserId(supabase);
+    const { error } = await supabase
+      .from("value_model")
+      .upsert(
+        { user_id, model: clean, updated_at: new Date().toISOString() },
+        { onConflict: "user_id" },
+      );
+    if (error)
+      throw new Error(`Supabase value_model upsert failed: ${error.message}`);
+    return;
+  }
+  await ensureSeeded();
+  memDB().valueModel = clean;
+}
+
 // --- Portfolio strategy cache (Phase 4) -------------------------------------
 
 /**
@@ -1428,12 +1474,14 @@ interface ForecastGather {
   /** Recurring activities + their completion log — the inputs a skip-move re-drains. */
   activities: RecurringActivity[];
   completions: ActivityCompletion[];
+  /** The user's value model — importance weights + recovery style (OVERHAUL §5.1). */
+  valueModel: ValueModel;
   today: string;
 }
 
 /** Collect deadlined projects, their open tasks, and the time budget. */
 async function gatherForecast(): Promise<ForecastGather> {
-  const [projects, entries, tasks, deps, rawBudget, activities, completions] =
+  const [projects, entries, tasks, deps, rawBudget, activities, completions, valueModel] =
     await Promise.all([
       listProjects(),
       listEntries(),
@@ -1442,6 +1490,7 @@ async function gatherForecast(): Promise<ForecastGather> {
       getRawTimeBudget(),
       listRecurringActivities(),
       listActivityCompletions(),
+      getValueModel(),
     ]);
   const today = todayISO();
   // Fold the recurring drain into the commitment set the forecast reasons over.
@@ -1496,6 +1545,7 @@ async function gatherForecast(): Promise<ForecastGather> {
     realCommitments: rawBudget.commitments,
     activities,
     completions,
+    valueModel,
     today,
   };
 }
@@ -1523,6 +1573,8 @@ function buildAllocTasks(g: ForecastGather): AllocTask[] {
         urgency: t.urgency_score ?? 3,
         impact: t.impact_score ?? 3,
         risk: t.risk_score ?? 3,
+        // Value Model: scale this task's cost-of-delay by its life-area's importance.
+        importance: areaWeight(g.valueModel, t.area),
       });
     }
   }
@@ -1870,6 +1922,8 @@ export interface JointScorer {
   pitWall: PitWall;
   /** Active recurring activities — the pool of `skip_activity` candidates. */
   activities: RecurringActivity[];
+  /** The user's value model — the optimizer reads its recovery-style move prefs. */
+  valueModel: ValueModel;
   /** Current joint odds per deadlined project, no moves applied. */
   baseByProject: Map<string, number>;
   /** Current portfolio conjunction (P(all land)), no moves applied. */
@@ -1897,6 +1951,7 @@ export async function createJointScorer(): Promise<JointScorer> {
     recoveries,
     pitWall,
     activities: g.activities.filter((a) => a.active),
+    valueModel: g.valueModel,
     baseByProject,
     baseAllOnTime: base.allOnTime,
     score: (moves) => jointOddsWithMoves(g, ctx, moves, JOINT_PROBE_ITERATIONS),
