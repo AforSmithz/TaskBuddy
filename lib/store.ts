@@ -545,6 +545,21 @@ export async function listSkillNodes(goalId: string): Promise<SkillNode[]> {
     .sort((a, b) => a.sort_index - b.sort_index);
 }
 
+/** Every skill node across all goals — the forecast gather's bulk read (one query
+ *  instead of N), so a learning goal's effort can enter the joint forecast. */
+export async function listAllSkillNodes(): Promise<SkillNode[]> {
+  if (isSupabaseConfigured()) {
+    const supabase = await getRequestClient();
+    const { data } = await supabase
+      .from("skill_nodes")
+      .select("*")
+      .order("sort_index", { ascending: true });
+    return (data as SkillNode[]) ?? [];
+  }
+  await ensureSeeded();
+  return [...memDB().skillNodes].sort((a, b) => a.sort_index - b.sort_index);
+}
+
 /**
  * Persist a freshly decomposed skill graph for a goal, replacing any prior plan.
  * Maps the decomposer's `key` slugs to UUIDs so `prerequisites` becomes a graph
@@ -1696,6 +1711,14 @@ interface ForecastGather {
   tasksByProject: Map<string, CandidateTask[]>;
   /** All tasks per project (any status) — for divergence detection & sequencing. */
   allTasksByProject: Map<string, Task[]>;
+  /**
+   * A learning goal's unattained skill effort as synthetic work the ONE joint
+   * forecast reasons over (alloc tasks + prereq dep edges + remaining estimates).
+   * Keyed by goal id; only present for goals that have an open skill graph. This
+   * is how skill progress moves the odds (OVERHAUL §5.4 follow-on). Recovery's
+   * defer-moves deliberately ignore it — you can't yet "defer" a skill row.
+   */
+  skillWorkByProject: Map<string, SkillWork>;
   /** Dependency edges keyed by entry — for the re-sequence recommendation. */
   deps: TaskDependency[];
   /** entry_id → the entry's goal (provenance only; tasks map to goals via `Task.goal_id`). */
@@ -1721,9 +1744,57 @@ interface ForecastGather {
   today: string;
 }
 
+/** A learning goal's skill graph rendered as joint-forecast inputs. */
+interface SkillWork {
+  /** One synthetic alloc task per unattained skill — enters the global plan. */
+  tasks: AllocTask[];
+  /** Prereq edges among still-open skills (attained prereqs no longer constrain). */
+  deps: DependencyEdge[];
+  /** Unattained effort minutes — the per-goal forecast's remaining work. */
+  estimates: number[];
+}
+
+/** Skill alloc-task ids are namespaced so they never collide with real task uuids
+ *  (and so the recovery/conflict code, which targets real rows, can tell them apart). */
+const SKILL_TASK_PREFIX = "skill:";
+
+/**
+ * Turn a learning goal's skill nodes into work the joint forecast can reason
+ * over. Attained skills are "done" — dropped, exactly like done tasks; only the
+ * unattained frontier consumes budget and carries prerequisite ordering. Pure.
+ */
+function skillAllocWork(
+  nodes: SkillNode[],
+  projectId: string,
+  projectName: string,
+): SkillWork {
+  const open = nodes.filter((n) => !n.attained);
+  const openIds = new Set(open.map((n) => n.id));
+  const tasks = open.map((n) =>
+    syntheticAllocTask(SKILL_TASK_PREFIX + n.id, projectId, projectName, n.title, n.estimated_minutes, {
+      urgency: 3,
+      // A checkpoint is a gate — weight it a touch higher so it orders ahead.
+      impact: n.is_checkpoint ? 4 : 3,
+      dependency: 3,
+      risk: 3,
+      effort: 3,
+      confidence: 3,
+    }),
+  );
+  const deps: DependencyEdge[] = [];
+  for (const n of open) {
+    for (const pre of n.prerequisites) {
+      if (openIds.has(pre)) {
+        deps.push({ task_id: SKILL_TASK_PREFIX + n.id, depends_on_task_id: SKILL_TASK_PREFIX + pre });
+      }
+    }
+  }
+  return { tasks, deps, estimates: open.map((n) => n.estimated_minutes) };
+}
+
 /** Collect deadlined projects, their open tasks, and the time budget. */
 async function gatherForecast(): Promise<ForecastGather> {
-  const [projects, entries, tasks, deps, rawBudget, activities, completions, valueModel] =
+  const [projects, entries, tasks, deps, rawBudget, activities, completions, valueModel, allSkillNodes] =
     await Promise.all([
       listGoals(),
       listEntries(),
@@ -1733,6 +1804,7 @@ async function gatherForecast(): Promise<ForecastGather> {
       listRecurringActivities(),
       listActivityCompletions(),
       getValueModel(),
+      listAllSkillNodes(),
     ]);
   const today = todayISO();
   // Fold the recurring drain into the commitment set the forecast reasons over.
@@ -1773,10 +1845,24 @@ async function gatherForecast(): Promise<ForecastGather> {
   // only deadlined projects receive a forecast probability.
   const deadlineByProject = new Map(projects.map((p) => [p.id, p.deadline]));
   const projectNameById = new Map(projects.map((p) => [p.id, p.name]));
+  // Render each learning goal's open skill graph into joint-forecast work, so a
+  // skill cleared frees budget and contention is shared with project tasks.
+  const skillNodesByProject = new Map<string, SkillNode[]>();
+  for (const n of allSkillNodes) {
+    const list = skillNodesByProject.get(n.goal_id) ?? [];
+    list.push(n);
+    skillNodesByProject.set(n.goal_id, list);
+  }
+  const skillWorkByProject = new Map<string, SkillWork>();
+  for (const [pid, nodes] of skillNodesByProject) {
+    const work = skillAllocWork(nodes, pid, projectNameById.get(pid) ?? "");
+    if (work.tasks.length) skillWorkByProject.set(pid, work);
+  }
   return {
     projects: projects.filter((p) => p.deadline),
     tasksByProject,
     allTasksByProject,
+    skillWorkByProject,
     deps,
     projectOfEntry,
     deadlineByProject,
@@ -1822,6 +1908,8 @@ function buildAllocTasks(g: ForecastGather): AllocTask[] {
       });
     }
   }
+  // Learning goals' unattained skills compete for the same hours as project tasks.
+  for (const work of g.skillWorkByProject.values()) out.push(...work.tasks);
   return out;
 }
 
@@ -1845,10 +1933,14 @@ function allocContext(
   const budget = { availability: g.availability, overrides: g.overrides, commitments };
   return {
     tasks: buildAllocTasks(g),
-    deps: g.deps.map((d) => ({
-      task_id: d.task_id,
-      depends_on_task_id: d.depends_on_task_id,
-    })),
+    deps: [
+      ...g.deps.map((d) => ({
+        task_id: d.task_id,
+        depends_on_task_id: d.depends_on_task_id,
+      })),
+      // Skill prerequisites order the learning frontier inside the same plan.
+      ...[...g.skillWorkByProject.values()].flatMap((w) => w.deps),
+    ],
     budget,
     capacities: dayCapacities(budget, g.today),
   };
@@ -2406,8 +2498,11 @@ function buildForecasts(
       commitments,
     });
     const tasks = g.tasksByProject.get(p.id) ?? [];
+    // A learning goal carries no tasks — its remaining work is the unattained
+    // skill effort. A project carries no skills. Union covers both kinds.
+    const skillEstimates = g.skillWorkByProject.get(p.id)?.estimates ?? [];
     const result = forecast(
-      tasks.map((t) => t.estimated_minutes),
+      [...tasks.map((t) => t.estimated_minutes), ...skillEstimates],
       dep,
       forecastOptions(g.model),
     );
@@ -2614,7 +2709,9 @@ export function detectDivergence(
 ): DivergenceReason[] {
   const reasons: DivergenceReason[] = [];
   const open = tasks.filter((t) => t.status !== "done" && !t.deferred);
-  const hasOpen = open.length > 0;
+  // A learning goal has no task rows — its open work shows up as the forecast's
+  // open count (unattained skills). Either source means there's work in jeopardy.
+  const hasOpen = open.length > 0 || fc.openTaskCount > 0;
 
   // Timing signals — these mean the deadline itself is in jeopardy (critical).
   if (deadline) {
@@ -2724,7 +2821,11 @@ function buildRecoveryPlan(
   if (!project.deadline) return null;
   const projectId = project.id;
   const candidates = g.tasksByProject.get(projectId) ?? [];
-  const estimates = candidates.map((t) => t.estimated_minutes);
+  // Forecast over BOTH real tasks and unattained skill effort (a learning goal's
+  // remaining work); defer-moves below still draw only from `candidates` (real
+  // task rows) — there's no "defer a skill" move yet.
+  const skillEstimates = g.skillWorkByProject.get(projectId)?.estimates ?? [];
+  const estimates = [...candidates.map((t) => t.estimated_minutes), ...skillEstimates];
   const budget = {
     today: g.today,
     availability: g.availability,
