@@ -1,0 +1,188 @@
+"use client";
+
+import { useState, useTransition } from "react";
+import { Check } from "lucide-react";
+import { updateValueModelAction } from "@/lib/actions";
+import {
+  NEUTRAL_AREA_WEIGHT,
+  VALUE_MODEL_VERSION,
+  type RecoveryStyle,
+  type ValueModel,
+} from "@/lib/value-model";
+import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/cn";
+
+/** Discrete importance presets — friendlier than a raw 0.25–3 slider. */
+const WEIGHT_OPTIONS: { label: string; value: number }[] = [
+  { label: "Background", value: 0.5 },
+  { label: "Normal", value: 1 },
+  { label: "High", value: 2 },
+  { label: "Critical", value: 3 },
+];
+
+const RECOVERY_OPTIONS: {
+  value: RecoveryStyle;
+  label: string;
+  blurb: string;
+}[] = [
+  {
+    value: "protect_work",
+    label: "Protect the work",
+    blurb: "Keep the tasks — move deadlines or lighten scope before dropping anything.",
+  },
+  {
+    value: "protect_dates",
+    label: "Protect the dates",
+    blurb: "Hold the deadlines — cut or shed lower-value work to hit them.",
+  },
+  {
+    value: "balanced",
+    label: "Balanced",
+    blurb: "No lean — let the odds alone pick the recovery.",
+  },
+];
+
+/**
+ * Edits the Value Model: a recovery-style lean + a per-area importance weight.
+ * Weights default to Normal; only non-neutral ones are persisted. The save action
+ * re-normalizes server-side, so the form just sends its current view.
+ */
+export function ValueModelForm({
+  model,
+  areas,
+}: {
+  model: ValueModel;
+  areas: string[];
+}) {
+  const [pending, startTransition] = useTransition();
+  const [saved, setSaved] = useState(false);
+  const [style, setStyle] = useState<RecoveryStyle>(model.recoveryStyle);
+  const [weights, setWeights] = useState<Record<string, number>>(() =>
+    Object.fromEntries(
+      areas.map((a) => [a, model.areaWeights[a] ?? NEUTRAL_AREA_WEIGHT]),
+    ),
+  );
+
+  function setWeight(area: string, value: number) {
+    setWeights((w) => ({ ...w, [area]: value }));
+    setSaved(false);
+  }
+  function pickStyle(next: RecoveryStyle) {
+    setStyle(next);
+    setSaved(false);
+  }
+
+  function save() {
+    if (pending) return;
+    const areaWeights: Record<string, number> = {};
+    for (const [area, value] of Object.entries(weights)) {
+      if (value !== NEUTRAL_AREA_WEIGHT) areaWeights[area] = value;
+    }
+    startTransition(async () => {
+      await updateValueModelAction({
+        version: VALUE_MODEL_VERSION,
+        areaWeights,
+        recoveryStyle: style,
+      });
+      setSaved(true);
+    });
+  }
+
+  return (
+    <div className="space-y-8">
+      {/* Recovery style */}
+      <fieldset className="space-y-3">
+        <legend className="text-[14px] font-semibold text-[var(--color-fg)]">
+          When something slips
+        </legend>
+        <p className="text-[13px] text-[var(--color-fg-muted)]">
+          How the strategist should lean when projects compete for the same hours.
+          It only breaks ties — the odds still decide.
+        </p>
+        <div className="grid gap-2.5 sm:grid-cols-3">
+          {RECOVERY_OPTIONS.map((opt) => (
+            <button
+              key={opt.value}
+              type="button"
+              aria-pressed={style === opt.value}
+              onClick={() => pickStyle(opt.value)}
+              className={cn(
+                "rounded-[14px] border p-3.5 text-left transition-colors",
+                style === opt.value
+                  ? "border-[var(--color-accent)] bg-[var(--color-accent-subtle)]"
+                  : "border-[var(--color-border)] hover:border-[var(--color-fg-subtle)]",
+              )}
+            >
+              <span
+                className={cn(
+                  "block text-[13.5px] font-semibold",
+                  style === opt.value
+                    ? "text-[var(--color-accent-fg)]"
+                    : "text-[var(--color-fg)]",
+                )}
+              >
+                {opt.label}
+              </span>
+              <span className="mt-1 block text-[12px] leading-snug text-[var(--color-fg-muted)]">
+                {opt.blurb}
+              </span>
+            </button>
+          ))}
+        </div>
+      </fieldset>
+
+      {/* Area importance */}
+      <fieldset className="space-y-3">
+        <legend className="text-[14px] font-semibold text-[var(--color-fg)]">
+          What matters most
+        </legend>
+        <p className="text-[13px] text-[var(--color-fg-muted)]">
+          Weight a life-area up and its work is scheduled earlier and protected
+          harder when the week gets tight.
+        </p>
+        <div className="space-y-2.5">
+          {areas.map((area) => (
+            <div
+              key={area}
+              className="flex flex-wrap items-center justify-between gap-3 rounded-[14px] border border-[var(--color-border)] px-3.5 py-3"
+            >
+              <span className="text-[13.5px] font-medium text-[var(--color-fg)]">
+                {area}
+              </span>
+              <div className="flex overflow-hidden rounded-[11px] border border-[var(--color-border)]">
+                {WEIGHT_OPTIONS.map((opt) => (
+                  <button
+                    key={opt.value}
+                    type="button"
+                    aria-pressed={weights[area] === opt.value}
+                    onClick={() => setWeight(area, opt.value)}
+                    className={cn(
+                      "px-3 py-1.5 text-[12.5px] font-medium transition-colors",
+                      weights[area] === opt.value
+                        ? "bg-[var(--color-accent-subtle)] text-[var(--color-accent-fg)]"
+                        : "text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]",
+                    )}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      </fieldset>
+
+      <div className="flex items-center gap-3">
+        <Button type="button" variant="primary" onClick={save} loading={pending}>
+          Save changes
+        </Button>
+        {saved && !pending && (
+          <span className="flex items-center gap-1.5 text-[13px] text-[var(--color-accent-fg)]">
+            <Check className="size-4" />
+            Saved
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}

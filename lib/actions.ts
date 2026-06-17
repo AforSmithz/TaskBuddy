@@ -21,6 +21,7 @@ import {
   setCachedStrategy,
   setOverride,
   setProjectDeadline,
+  setValueModel,
   skipActivity,
   skipActivityForWeek,
   unskipActivity,
@@ -36,6 +37,7 @@ import {
 } from "./strategist";
 import { generatePortfolioStrategy } from "./portfolio-strategist";
 import { requireUser } from "./auth";
+import type { ValueModel } from "./value-model";
 import type {
   DraftClassification,
   EntryKind,
@@ -280,6 +282,17 @@ export async function setAutoStrategyAction(value: boolean): Promise<void> {
   await requireUser();
   await setAutoStrategy(value);
   revalidatePath("/");
+}
+
+/**
+ * Save the Value Model (area importance + recovery style). It re-weights the
+ * allocator's cost-of-delay and the strategist's move preference, so revalidate
+ * everywhere odds/order surface. The payload is re-normalized server-side.
+ */
+export async function updateValueModelAction(model: ValueModel): Promise<void> {
+  await requireUser();
+  await setValueModel(model);
+  revalidateAll();
 }
 
 /** Override deployable hours for one specific date. */
