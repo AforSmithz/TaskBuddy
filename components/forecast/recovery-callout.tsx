@@ -117,6 +117,14 @@ export function RecoveryCallout({ plan }: { plan: RecoveryPlan }) {
               {plan.cause.detail}
             </p>
           )}
+          {plan.goalCost && (
+            <p className="mt-1.5 text-[12px] text-[var(--color-fg-subtle)]">
+              <span className="font-medium text-[var(--color-cut-fg)]">
+                Even so:{" "}
+              </span>
+              {plan.goalCost.detail}
+            </p>
+          )}
         </div>
       </div>
 

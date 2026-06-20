@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, useTransition } from "react";
-import { ArrowRight, Check, Loader2, Route } from "lucide-react";
+import { AlertTriangle, ArrowRight, Check, Loader2, Route } from "lucide-react";
 import type { RecoveryPlan, RerouteSuggestion } from "@/lib/types";
 import { applyRerouteAction, suggestRerouteAction } from "@/lib/actions";
 import { formatPct } from "@/components/forecast/forecast-meter";
@@ -81,8 +81,9 @@ export function RecoveryReroute({ plan }: { plan: RecoveryPlan }) {
     if (!suggestion) return;
     const replacedTaskIds = suggestion.replaces.map((r) => r.taskId);
     const tasks = suggestion.tasks;
+    const degraded = suggestion.degradedCriteria;
     startTransition(async () => {
-      await applyRerouteAction(plan.projectId, replacedTaskIds, tasks);
+      await applyRerouteAction(plan.projectId, replacedTaskIds, tasks, degraded);
       setSwitched(true);
     });
   }
@@ -133,6 +134,26 @@ export function RecoveryReroute({ plan }: { plan: RecoveryPlan }) {
             </li>
           ))}
         </ul>
+
+        {/* The honest cost: definition-of-done this lighter route lowers (§5 gate
+            check 2) — recorded as degraded notes on accept, never silently. */}
+        {suggestion.degradedCriteria.length > 0 && (
+          <>
+            <p className="mt-2 flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wide text-[var(--color-cut-fg)]">
+              <AlertTriangle className="size-3" /> Lowers your definition of done
+            </p>
+            <ul className="mt-1 space-y-0.5">
+              {suggestion.degradedCriteria.map((d) => (
+                <li key={d.criterionId} className="text-[12px] leading-snug">
+                  <span className="text-[var(--color-fg-subtle)] line-through">
+                    {d.text}
+                  </span>{" "}
+                  <span className="text-[var(--color-cut-fg)]">→ {d.note}</span>
+                </li>
+              ))}
+            </ul>
+          </>
+        )}
       </div>
 
       <div className="flex items-center justify-between gap-2 pt-1">

@@ -1,7 +1,9 @@
 import "server-only";
 
 import type {
+  DegradedCriterion,
   GapKind,
+  GoalCriterion,
   ModificationKind,
   ModificationPart,
   ModificationSuggestion,
@@ -530,6 +532,10 @@ Return ONLY a JSON object with this exact shape (no markdown, no commentary):
     "effort": number,            // 1-5
     "confidence": number,        // 1-5
     "priority_reason": string    // one sentence explaining the priority
+  }],
+  "degraded_criteria": [{        // OPTIONAL — only if the lighter route lowers a stated definition-of-done item
+    "criterion_id": string,      // the id (e.g. "C2") of the compromised criterion, from the list in the request
+    "note": string               // short phrase: how it's lowered (e.g. "managed provider, no SSO")
   }]
 }
 
@@ -543,6 +549,12 @@ Rules:
 - Keep it to a handful of concrete, actionable tasks. Estimate minutes honestly.
 - Score each 1-5 factor (urgency, impact, dependency, risk, effort, confidence),
   same scale as the original tasks.
+- HONESTY: if a definition-of-done list is given in the request and your lighter
+  route lowers any of those items, you MUST name each compromised one in
+  "degraded_criteria" by its id with a short note on how it's lowered. If the
+  route preserves the full definition of done, return an empty list. Only ever
+  reference ids from the provided list — never invent one. This makes the cost of
+  the cut honest; it is not optional when you genuinely lower the bar.
 - NEVER output a probability, percentage, or likelihood. You propose the route;
   TaskBuddy scores the odds.`;
 
@@ -550,6 +562,7 @@ interface RawReroute {
   approach?: unknown;
   rationale?: unknown;
   tasks?: unknown;
+  degraded_criteria?: unknown;
 }
 
 /**
@@ -610,6 +623,9 @@ export async function generateReroute(
       title: t.title,
       estimated_minutes: t.estimated_minutes,
     })),
+    // The definition-of-done items this lighter route lowers — validated against
+    // the goal's real criteria, recorded as degraded notes on accept (§5 check 2).
+    degradedCriteria: normalizeDegradedCriteria(raw.degraded_criteria, ctx.criteria),
     previewProbability,
   };
 }
@@ -629,6 +645,20 @@ function buildReroutePrompt(ctx: RecoveryContext): string {
 
   const deficitH = Math.max(0, Math.round((estimateTotal(ctx) - ctx.deployable) / 60));
 
+  // The definition of done, handle-tagged (C1, C2, …) so the model can flag — by
+  // handle, never by raw id — any criterion its lighter route would lower. The
+  // handles are the criteria's stable order, the same order the normalizer reads.
+  const dod = ctx.criteria.length
+    ? [
+        ``,
+        `The goal's definition of done — if your lighter route lowers any of these, you MUST list it in "degraded_criteria" by its id:`,
+        ...ctx.criteria.map(
+          (c, i) =>
+            `- [${criterionHandle(i)}] "${c.text}"${c.met ? " (already met)" : ""}`,
+        ),
+      ].join("\n")
+    : "";
+
   return [
     `Today's date is ${today}.`,
     `Goal: "${ctx.project.name}" (deadline ${ctx.project.deadline?.slice(0, 10) ?? "none"}).`,
@@ -639,9 +669,44 @@ function buildReroutePrompt(ctx: RecoveryContext): string {
     ``,
     `The current plan (this is what a re-route would replace):`,
     open,
+    dod,
     ``,
     `Propose a complete alternative plan that reaches the same deliverable with materially less work, or an empty list if no genuinely different approach exists.`,
   ].join("\n");
+}
+
+/** Stable C1..Cn handle for a criterion at index `i` — the LLM round-trips this
+ *  short handle instead of a raw UUID (far less error-prone), and the normalizer
+ *  derives the same mapping from the criteria in their stored order. */
+function criterionHandle(i: number): string {
+  return `C${i + 1}`;
+}
+
+/**
+ * Validate the model's degraded-DoD claims against the goal's real criteria.
+ * Drops anything that doesn't map to a provided handle or carries no note, and
+ * dedups — so a hallucinated id can never write a `degraded_note` (§0: which
+ * criteria exist is the data's call, only the human note is the model's).
+ */
+function normalizeDegradedCriteria(
+  raw: unknown,
+  criteria: GoalCriterion[],
+): DegradedCriterion[] {
+  if (!Array.isArray(raw) || criteria.length === 0) return [];
+  const byHandle = new Map(criteria.map((c, i) => [criterionHandle(i), c]));
+  const seen = new Set<string>();
+  const out: DegradedCriterion[] = [];
+  for (const item of raw) {
+    if (typeof item !== "object" || item === null) continue;
+    const r = item as Record<string, unknown>;
+    const handle = typeof r.criterion_id === "string" ? r.criterion_id.trim() : "";
+    const note = typeof r.note === "string" ? r.note.trim() : "";
+    const c = byHandle.get(handle);
+    if (!c || !note || seen.has(c.id)) continue;
+    seen.add(c.id);
+    out.push({ criterionId: c.id, text: c.text, note });
+  }
+  return out;
 }
 
 /** Clamp/coerce the model's alternative tasks into ReroutePart, dedup, cap the count. */

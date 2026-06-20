@@ -2,9 +2,15 @@ import type {
   CauseDiagnosis,
   DivergenceReason,
   EstimationModel,
+  GoalCriterion,
+  GoalCutCost,
+  GoalKind,
+  SkillNode,
   Task,
 } from "./types";
 import { MIN_ESTIMATION_SAMPLES } from "./types";
+import { goalCompletion } from "./goal";
+import { skillProgress } from "./skill";
 
 // Step 5 (§5 / vision §4.1) — cause-diagnosis.
 //
@@ -164,5 +170,65 @@ export function diagnoseCause(input: CauseInput): CauseDiagnosis {
     cause: "scope_structural",
     detail:
       "There's more committed work here than the time allows — this needs shedding or reshaping, not just reordering.",
+  };
+}
+
+// Step 5 (§5 / vision §4.3) — the grounding gate's "cost to the goal" check.
+//
+// A recovery move reports its odds gain ("+30% on time"). But a deadline-buying
+// cut can lift the odds while doing nothing for the goal's *reason for being* —
+// its definition of done (project) or its skill milestones (learning). This
+// function computes that cost so it can be shown beside the odds gain: the bar
+// the move leaves unaddressed. Fully derived from `goalCompletion` /
+// `skillProgress` (§0 — never authored), so a green number can't hide a goal
+// being quietly abandoned.
+
+/**
+ * The honest cost-to-the-goal beyond the deadline. Returns null when there's no
+ * recorded bar to measure against (no criteria / no skills), or when the bar is
+ * already fully cleared — in those cases a cut carries no hidden goal cost.
+ */
+export function goalCutCost(
+  kind: GoalKind,
+  criteria: GoalCriterion[],
+  skills: SkillNode[],
+): GoalCutCost | null {
+  if (kind === "learning") {
+    if (skills.length === 0) return null;
+    const sp = skillProgress(skills);
+    // Fully attained — nothing left for a deadline move to skip past.
+    if (sp.skillPct >= 1) return null;
+    const pct = Math.round(sp.skillPct * 100);
+    const detail =
+      sp.checkpointsTotal > 0
+        ? `Buying the date doesn't earn the learning — ${sp.checkpointsMet}/${sp.checkpointsTotal} milestones reached (${pct}% skill).`
+        : `Buying the date doesn't earn the learning — ${pct}% of the way there.`;
+    return {
+      kind,
+      criteriaUnmet: 0,
+      criteriaTotal: 0,
+      checkpointsMet: sp.checkpointsMet,
+      checkpointsTotal: sp.checkpointsTotal,
+      skillPct: sp.skillPct,
+      detail,
+    };
+  }
+
+  if (criteria.length === 0) return null;
+  const gc = goalCompletion(criteria);
+  const unmet = gc.total - gc.metCount;
+  // Definition of done already fully met — the date is all that's left at stake.
+  if (unmet === 0) return null;
+  const detail = `The date moves, the goal's bar doesn't — ${unmet} of ${gc.total} definition-of-done ${
+    unmet === 1 ? "criterion is" : "criteria are"
+  } still unmet.`;
+  return {
+    kind,
+    criteriaUnmet: unmet,
+    criteriaTotal: gc.total,
+    checkpointsMet: 0,
+    checkpointsTotal: 0,
+    skillPct: 0,
+    detail,
   };
 }

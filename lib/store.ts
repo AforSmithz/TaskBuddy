@@ -17,6 +17,7 @@ import type {
   DraftClassification,
   EntryKind,
   EntryStatus,
+  DegradedCriterion,
   Entry,
   EntryDetail,
   EstimationModel,
@@ -46,7 +47,7 @@ import { ON_TRACK_PROBABILITY, isOnTrack } from "./types";
 import { extractEntry } from "./extraction";
 import { estimationModel } from "./generate";
 import { goalCompletion } from "./goal";
-import { diagnoseCause, type CauseBaseline } from "./grounding";
+import { diagnoseCause, goalCutCost, type CauseBaseline } from "./grounding";
 import { formatMinutes } from "./format";
 import { computePriority } from "./priority";
 import {
@@ -472,6 +473,7 @@ export async function addGoalCriterion(
     text: text.trim(),
     met: false,
     met_confidence: null,
+    degraded_note: null,
     sort_index: existing.length,
     created_at: new Date().toISOString(),
   };
@@ -529,6 +531,46 @@ export async function removeGoalCriterion(id: string): Promise<void> {
   await ensureSeeded();
   const db = memDB();
   db.goalCriteria = db.goalCriteria.filter((c) => c.id !== id);
+}
+
+/**
+ * Record how a scope-cutting recovery move degraded a criterion (§5 grounding
+ * gate check 2). The original `text` is left intact; `degraded_note` carries the
+ * compromise (e.g. "now: managed provider, no SSO"). Passing null clears it.
+ */
+export async function setGoalCriterionDegraded(
+  id: string,
+  note: string | null,
+): Promise<void> {
+  const degraded_note = note?.trim() || null;
+  if (isSupabaseConfigured()) {
+    const supabase = await getRequestClient();
+    const { error } = await supabase
+      .from("goal_criteria")
+      .update({ degraded_note })
+      .eq("id", id);
+    if (error)
+      throw new Error(`Supabase goal_criteria update failed: ${error.message}`);
+    return;
+  }
+  await ensureSeeded();
+  const row = memDB().goalCriteria.find((c) => c.id === id);
+  if (row) row.degraded_note = degraded_note;
+}
+
+/** Every definition-of-done criterion across all goals — the forecast gather's
+ *  bulk read (one query instead of N), so divergence detection sees real DoD. */
+export async function listAllGoalCriteria(): Promise<GoalCriterion[]> {
+  if (isSupabaseConfigured()) {
+    const supabase = await getRequestClient();
+    const { data } = await supabase
+      .from("goal_criteria")
+      .select("*")
+      .order("sort_index", { ascending: true });
+    return (data as GoalCriterion[]) ?? [];
+  }
+  await ensureSeeded();
+  return [...memDB().goalCriteria].sort((a, b) => a.sort_index - b.sort_index);
 }
 
 // --- Skill graph (learning-goal decomposer) ---------------------------------
@@ -1725,6 +1767,10 @@ interface ForecastGather {
    * defer-moves deliberately ignore it — you can't yet "defer" a skill row.
    */
   skillWorkByProject: Map<string, SkillWork>;
+  /** A goal's raw skill nodes (any state) — for the learning goal-cost read. */
+  skillNodesByProject: Map<string, SkillNode[]>;
+  /** A goal's definition-of-done criteria — for divergence detection & goal-cost. */
+  criteriaByProject: Map<string, GoalCriterion[]>;
   /** Dependency edges keyed by entry — for the re-sequence recommendation. */
   deps: TaskDependency[];
   /** entry_id → the entry's goal (provenance only; tasks map to goals via `Task.goal_id`). */
@@ -1800,7 +1846,7 @@ function skillAllocWork(
 
 /** Collect deadlined projects, their open tasks, and the time budget. */
 async function gatherForecast(): Promise<ForecastGather> {
-  const [projects, entries, tasks, deps, rawBudget, activities, completions, valueModel, allSkillNodes] =
+  const [projects, entries, tasks, deps, rawBudget, activities, completions, valueModel, allSkillNodes, allGoalCriteria] =
     await Promise.all([
       listGoals(),
       listEntries(),
@@ -1811,6 +1857,7 @@ async function gatherForecast(): Promise<ForecastGather> {
       listActivityCompletions(),
       getValueModel(),
       listAllSkillNodes(),
+      listAllGoalCriteria(),
     ]);
   const today = todayISO();
   // Fold the recurring drain into the commitment set the forecast reasons over.
@@ -1864,11 +1911,21 @@ async function gatherForecast(): Promise<ForecastGather> {
     const work = skillAllocWork(nodes, pid, projectNameById.get(pid) ?? "");
     if (work.tasks.length) skillWorkByProject.set(pid, work);
   }
+  // A goal's definition-of-done, grouped — divergence detection & the §5 goal-cost
+  // read it per goal off the single bulk fetch (no per-goal round-trips).
+  const criteriaByProject = new Map<string, GoalCriterion[]>();
+  for (const c of allGoalCriteria) {
+    const list = criteriaByProject.get(c.goal_id) ?? [];
+    list.push(c);
+    criteriaByProject.set(c.goal_id, list);
+  }
   return {
     projects: projects.filter((p) => p.deadline),
     tasksByProject,
     allTasksByProject,
     skillWorkByProject,
+    skillNodesByProject,
+    criteriaByProject,
     deps,
     projectOfEntry,
     deadlineByProject,
@@ -2854,6 +2911,9 @@ function buildRecoveryPlan(
   };
 
   const allTasks = g.allTasksByProject.get(projectId) ?? [];
+  // The goal's definition of done — real now (was [] before §5 gate slice 3), so
+  // a met-but-unverified DoD surfaces as a provisional-completion symptom.
+  const criteria = g.criteriaByProject.get(projectId) ?? [];
   // Fold in any cross-project conflict touching this project (the pit-wall reason).
   const projectConflicts = conflicts.filter((c) => c.projectId === projectId);
   const reasons = detectDivergence(
@@ -2862,6 +2922,7 @@ function buildRecoveryPlan(
     allTasks,
     g.today,
     projectConflicts,
+    criteria,
   );
   if (reasons.length === 0) return null;
 
@@ -2941,12 +3002,20 @@ function buildRecoveryPlan(
       })
     : null;
 
+  // Cost to the goal beyond the deadline (§5 gate check 3): the unmet definition
+  // of done / skill milestones a deadline-buying move does nothing for. Shown
+  // beside the moves so an odds gain can't hide that the goal's bar is unmoved.
+  const goalCost = offTrack
+    ? goalCutCost(project.kind, criteria, g.skillNodesByProject.get(projectId) ?? [])
+    : null;
+
   return {
     projectId: project.id,
     projectName: project.name,
     currentProbability: fc.probability,
     reasons,
     cause,
+    goalCost,
     defer,
     reschedule,
     sequence,
@@ -2964,6 +3033,8 @@ export interface RecoveryContext {
   openTasks: Task[];
   /** Completed (done) tasks — the per-goal residual sample for cause-diagnosis. */
   completedTasks: Task[];
+  /** The goal's definition-of-done — for the gate's degraded-DoD + goal-cost checks. */
+  criteria: GoalCriterion[];
   /** Deployable minutes from today through the deadline. */
   deployable: number;
   /** Why the project was flagged off-track. */
@@ -3008,7 +3079,15 @@ export async function getRecoveryContext(
   );
 
   const allTasks = g.allTasksByProject.get(projectId) ?? [];
-  const reasons = detectDivergence(fc, project.deadline, allTasks, g.today);
+  const criteria = g.criteriaByProject.get(projectId) ?? [];
+  const reasons = detectDivergence(
+    fc,
+    project.deadline,
+    allTasks,
+    g.today,
+    [],
+    criteria,
+  );
   if (reasons.length === 0) return null;
 
   const openTasks = allTasks.filter((t) => t.status !== "done" && !t.deferred);
@@ -3045,6 +3124,7 @@ export async function getRecoveryContext(
     project,
     openTasks,
     completedTasks,
+    criteria,
     deployable,
     reasons,
     currentProbability: fc.probability,
@@ -3224,6 +3304,7 @@ export async function applyReroute(
   projectId: string,
   replacedTaskIds: string[],
   tasks: ReroutePart[],
+  degradedCriteria: DegradedCriterion[] = [],
 ): Promise<void> {
   if (tasks.length === 0) return;
   const project = await getGoal(projectId);
@@ -3252,6 +3333,14 @@ export async function applyReroute(
     taskRows,
     createdAt,
   );
+
+  // §5 gate check 2: a lighter route that lowers the goal's definition of done
+  // records how on each compromised criterion — the original text stays intact,
+  // the note carries the compromise — so switching approach can't quietly
+  // redefine the goal down ("no silent erosion").
+  for (const d of degradedCriteria) {
+    await setGoalCriterionDegraded(d.criterionId, d.note);
+  }
 }
 
 // --- Recovery-entry persistence (shared by Generate + Modify) ---------------

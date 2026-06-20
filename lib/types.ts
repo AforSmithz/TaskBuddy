@@ -136,6 +136,13 @@ export interface GoalCriterion {
   text: string;
   met: boolean;
   met_confidence: CompletionConfidence | null;
+  /**
+   * How a scope-cutting recovery move lowered this criterion's ambition (e.g.
+   * "now: managed provider, no SSO"), or null while it stands intact. The
+   * original `text` is kept verbatim; this records the compromise so a goal can't
+   * be quietly redefined down (§5 grounding gate check 2 — "no silent erosion").
+   */
+  degraded_note: string | null;
   sort_index: number;
   created_at: string;
 }
@@ -533,6 +540,30 @@ export interface CauseDiagnosis {
   detail: string;
 }
 
+/**
+ * The honest "cost to the goal, not just the deadline" shown beside a recovery
+ * move's odds gain (§5 grounding gate check 3). A deadline-buying cut can lift
+ * the odds while doing nothing for the goal's reason for being — its definition
+ * of done (project) or its skill milestones (learning). Computed deterministically
+ * from `goalCompletion` / `skillProgress` (never authored), so vibe-cutting can't
+ * hide behind a green number.
+ */
+export interface GoalCutCost {
+  kind: GoalKind;
+  /** Definition-of-done criteria still unmet (project goals). */
+  criteriaUnmet: number;
+  /** Total definition-of-done criteria recorded (project goals; 0 when none). */
+  criteriaTotal: number;
+  /** Skill milestones cleared (learning goals). */
+  checkpointsMet: number;
+  /** Total skill milestones (learning goals; 0 when none). */
+  checkpointsTotal: number;
+  /** 0–1 demonstrable-skill progress (learning goals). */
+  skillPct: number;
+  /** One-line honest summary for the UI. */
+  detail: string;
+}
+
 /** A move that re-dates the project to the earliest deadline that clears the target. */
 export interface RescheduleMove {
   /** ISO date of the earliest achievable deadline. */
@@ -559,6 +590,13 @@ export interface RecoveryPlan {
    * off track (a blocked/overdue warning with no divergence to explain).
    */
   cause: CauseDiagnosis | null;
+  /**
+   * The cost to the goal beyond the deadline — its unmet definition of done
+   * (project) or skill milestones (learning) that a deadline-buying move does
+   * nothing for. Null when the goal records no DoD/skills to measure against, or
+   * when it isn't genuinely off track. §5 grounding gate check 3.
+   */
+  goalCost: GoalCutCost | null;
   /** Defer these (lowest-priority-first) to recover; best improvement first. */
   defer: RecoveryMove[];
   /** Earliest deadline clearing the target probability, or null if out of reach. */
@@ -763,6 +801,23 @@ export interface ReroutePart extends FactorScores {
 }
 
 /**
+ * A definition-of-done criterion a reroute explicitly compromises, with the
+ * one-line note recording how (§5 grounding gate check 2). The LLM may author the
+ * note (narration), but `criterionId` is validated against the goal's real
+ * criteria — which criteria exist and the odds are never the model's call (§0).
+ * Recorded as the criterion's `degraded_note` on accept, so switching to a
+ * lighter approach can't quietly redefine the goal down.
+ */
+export interface DegradedCriterion {
+  /** The real criterion being lowered (validated against the goal's DoD). */
+  criterionId: string;
+  /** The criterion's current text, for the before/after display. */
+  text: string;
+  /** How the reroute lowers this bar (e.g. "managed provider, no SSO"). */
+  note: string;
+}
+
+/**
  * The strategist's boldest move: a complete alternative plan that hits the same
  * deliverable by a fundamentally different approach (buy vs build, a managed
  * service vs custom, a template vs from-scratch). It replaces the entire current
@@ -780,6 +835,13 @@ export interface RerouteSuggestion {
   tasks: ReroutePart[];
   /** Current open tasks this plan swaps out (deferred on accept), for the before/after. */
   replaces: { taskId: string; title: string; estimated_minutes: number }[];
+  /**
+   * Definition-of-done criteria this lighter route lowers, with how (§5 gate
+   * check 2) — empty when the route preserves the full bar. Recorded as each
+   * criterion's `degraded_note` on accept, and shown in the before/after so the
+   * odds gain can't hide a quiet redefinition of done.
+   */
+  degradedCriteria: DegradedCriterion[];
   /** Completion probability after switching to this plan — from `forecast()`. */
   previewProbability: number;
 }

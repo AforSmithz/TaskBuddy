@@ -48,6 +48,7 @@ import { requireUser } from "./auth";
 import type { ValueModel } from "./value-model";
 import type {
   CompletionConfidence,
+  DegradedCriterion,
   DraftClassification,
   EntryKind,
   GoalKind,
@@ -505,9 +506,10 @@ export async function applyRerouteAction(
   projectId: string,
   replacedTaskIds: string[],
   tasks: ReroutePart[],
+  degradedCriteria: DegradedCriterion[] = [],
 ): Promise<void> {
   await requireUser();
-  await applyReroute(projectId, replacedTaskIds, tasks);
+  await applyReroute(projectId, replacedTaskIds, tasks, degradedCriteria);
   revalidateAll();
 }
 

@@ -218,6 +218,7 @@ create table if not exists goal_criteria (
   text           text not null,
   met            boolean not null default false,
   met_confidence text,                              -- verified|self_assessed|inferred|in_progress (null until met)
+  degraded_note  text,                              -- how a scope-cut lowered this bar (null = intact); §5 gate check 2
   sort_index     integer not null default 0,
   created_at     timestamptz not null default now()
 );
