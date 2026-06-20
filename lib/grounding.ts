@@ -187,19 +187,26 @@ export function diagnoseCause(input: CauseInput): CauseDiagnosis {
 // the cause itself is computed deterministically by `diagnoseCause`).
 //
 // Mirrors the design table:
-//   one_off_slip      → hold / single defer / small reschedule (don't cut scope)
+//   one_off_slip      → smallest defer / reschedule (don't cut scope)
 //   chronic_velocity  → re-estimate (reshape) / move the deadline (the estimates,
 //                       not the arrangement, are wrong)
 //   constraint_change → reroute / reschedule / triage (re-plan around the change)
 //   scope_structural  → triage / reroute (shed genuine over-commitment)
+//
+// NOTE — no `hold` entry: nothing enumerates a `hold` candidate for the optimizer
+// to choose, so a `hold` bias would be inert. "Do nothing" is already expressed
+// by `JOINT_MIN_GAIN` (a move that fails the gain gate means "wait"). The blip
+// intent is carried entirely by the *negative* biases on reshape/reroute/triage,
+// which steer one_off_slip away from cutting scope. Promoting hold to a first-
+// class candidate that records a "chose to wait" decision rides with substrate S1
+// (see design/step5 → "Comprehensive remediation plan").
 
 export const CAUSE_MOVE_PREFERENCES: Record<
   DivergenceCause,
   Partial<Record<StrategyMoveKind, number>>
 > = {
-  // A blip — hold or make the smallest reschedule; never cut scope for it.
+  // A blip — make the smallest reschedule; never cut scope for it.
   one_off_slip: {
-    hold: 1,
     defer: 0.5,
     reschedule_task: 0.5,
     reschedule_deadline: 0.25,
@@ -230,9 +237,9 @@ export const CAUSE_MOVE_PREFERENCES: Record<
 
 /**
  * Tiebreak bias for a move kind given the diagnosed cause (0 when the cause is
- * unknown or the kind isn't listed). Summed with the value model's recovery-style
- * `movePref` in the joint optimizer — both apply only within the odds epsilon, so
- * the forecast is never overridden.
+ * unknown or the kind isn't listed). Weighted-summed with the value model's
+ * recovery-style `movePref` in the joint optimizer — both apply only within the
+ * odds epsilon, so the forecast is never overridden.
  */
 export function causeMovePref(
   cause: DivergenceCause | null,
@@ -240,6 +247,31 @@ export function causeMovePref(
 ): number {
   if (cause === null) return 0;
   return CAUSE_MOVE_PREFERENCES[cause]?.[kind] ?? 0;
+}
+
+/**
+ * Cause bias for a move that touches *several* goals at once (a portfolio-wide
+ * triage / activity skip has no single owning goal). Returns the weighted mean of
+ * each touched goal's `causeMovePref`, so the bias reflects the goals the move
+ * actually serves and the most-weighted ones dominate (a triage that mostly
+ * rescues a `scope_structural` goal still leans triage even if one touched goal is
+ * a `one_off_slip`). Weights are caller-supplied (risk = `1 − currentProbability`
+ * in v1, until per-goal *value* lands in the Value Model). Returns 0 when there
+ * are no positively-weighted entries, matching the unknown-cause default.
+ */
+export function aggregateCauseMovePref(
+  entries: { cause: DivergenceCause | null; weight: number }[],
+  kind: StrategyMoveKind,
+): number {
+  let weightSum = 0;
+  let acc = 0;
+  for (const e of entries) {
+    const w = Math.max(e.weight, 0);
+    if (w <= 0) continue;
+    weightSum += w;
+    acc += w * causeMovePref(e.cause, kind);
+  }
+  return weightSum > 0 ? acc / weightSum : 0;
 }
 
 // Step 5 (§5 / vision §4.3) — the grounding gate's "cost to the goal" check.

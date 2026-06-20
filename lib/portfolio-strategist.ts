@@ -16,7 +16,7 @@ import type {
   TaskModification,
 } from "./types";
 import { isOnTrack } from "./types";
-import { causeMovePref } from "./grounding";
+import { causeMovePref, aggregateCauseMovePref } from "./grounding";
 import { movePref, type ValueModel } from "./value-model";
 import type { ChatMessage } from "./openrouter";
 import { isLLMConfigured } from "./extraction";
@@ -83,6 +83,17 @@ const JOINT_MOVE_CAP = 6;
  * gain). Decision: keep the math primary, let the model shape close calls.
  */
 const PREF_TIE_EPS = 0.02;
+
+/**
+ * Relative weights of the two odds-tie nudges: the user's recovery *style*
+ * (`movePref`) and the diagnosed *cause*'s preferred move family (`causeMovePref`).
+ * Both default to 1.0 (co-equal — the historical behaviour), but they are named
+ * knobs rather than an implicit 1:1 sum so the ratio can be tuned — or learned —
+ * once S2's live data exists (design/step5 → "Comprehensive remediation plan").
+ * Both still apply only within `PREF_TIE_EPS`, so the forecast always decides first.
+ */
+const STYLE_PREF_WEIGHT = 1;
+const CAUSE_PREF_WEIGHT = 1;
 
 // --- C. Fingerprint ---------------------------------------------------------
 
@@ -1038,13 +1049,28 @@ function optimizeJointPlan(
 
   // Step 5 slice 4: each project's diagnosed cause picks which move *family* fits,
   // applied alongside the value model's recovery-style taste in the odds-tie
-  // tiebreak below. Cross-project moves (projectId "") carry no single cause.
+  // tiebreak below. A cross-project move (projectId "" — portfolio-wide triage,
+  // activity skip) has no single owning goal, so its cause bias is the risk-
+  // weighted mean over every diagnosed goal (the goals it actually serves; the
+  // most at-risk dominate). Risk = 1 − currentProbability is the v1 weight until
+  // per-goal value lands in the Value Model.
   const causeByProject = new Map<string, DivergenceCause>();
+  const crossProjectCauses: { cause: DivergenceCause | null; weight: number }[] = [];
   for (const r of scorer.recoveries) {
-    if (r.cause) causeByProject.set(r.projectId, r.cause.cause);
+    if (r.cause) {
+      causeByProject.set(r.projectId, r.cause.cause);
+      crossProjectCauses.push({
+        cause: r.cause.cause,
+        weight: Math.max(1 - r.currentProbability, 0),
+      });
+    }
   }
+  const causePrefFor = (m: StrategyMove): number =>
+    m.projectId === ""
+      ? aggregateCauseMovePref(crossProjectCauses, m.kind)
+      : causeMovePref(causeByProject.get(m.projectId) ?? null, m.kind);
   const prefFor = (m: StrategyMove): number =>
-    movePref(vm, m.kind) + causeMovePref(causeByProject.get(m.projectId) ?? null, m.kind);
+    STYLE_PREF_WEIGHT * movePref(vm, m.kind) + CAUSE_PREF_WEIGHT * causePrefFor(m);
 
   while (picked.length < JOINT_MOVE_CAP && remaining.length > 0) {
     // Everyone deadlined is already on track — nothing left worth doing.
