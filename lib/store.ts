@@ -2334,7 +2334,16 @@ export interface JointScorer {
 }
 
 export async function createJointScorer(): Promise<JointScorer> {
-  const g = await gatherForecast();
+  // The cached strategy is the temporal baseline for cause-diagnosis: the
+  // optimizer reads each recovery's `cause` for the step-5 response-class
+  // tiebreak, and `constraint_change` can only be diagnosed against it (a task
+  // added since, or odds that have since dropped). Without it the optimizer's
+  // causes would silently collapse to the residual-only classes. Loaded in
+  // parallel with the gather so it adds no latency.
+  const [g, cachedStrategy] = await Promise.all([
+    gatherForecast(),
+    getCachedStrategy(),
+  ]);
   const ctx = allocContext(g, g.commitments);
   const base = jointOddsWithMoves(g, ctx, []);
   const baseByProject = base.byProject;
@@ -2342,7 +2351,7 @@ export async function createJointScorer(): Promise<JointScorer> {
   const forecasts = buildForecasts(g, g.commitments, baseByProject);
   const pitWall = buildPitWall(g, ctx, baseByProject);
   const recoveries = g.projects
-    .map((p) => buildRecoveryPlan(g, p, baseByProject, pitWall.conflicts))
+    .map((p) => buildRecoveryPlan(g, p, baseByProject, pitWall.conflicts, cachedStrategy))
     .filter((plan): plan is RecoveryPlan => plan !== null);
 
   return {
