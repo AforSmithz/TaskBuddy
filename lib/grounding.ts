@@ -1,11 +1,13 @@
 import type {
   CauseDiagnosis,
+  DivergenceCause,
   DivergenceReason,
   EstimationModel,
   GoalCriterion,
   GoalCutCost,
   GoalKind,
   SkillNode,
+  StrategyMoveKind,
   Task,
 } from "./types";
 import { MIN_ESTIMATION_SAMPLES } from "./types";
@@ -171,6 +173,73 @@ export function diagnoseCause(input: CauseInput): CauseDiagnosis {
     detail:
       "There's more committed work here than the time allows — this needs shedding or reshaping, not just reordering.",
   };
+}
+
+// Step 5 slice 4 (§5 / vision §4.1) — response class: cause → preferred move family.
+//
+// The diagnosed cause picks which *family* of recovery moves fits the situation,
+// so the strategist doesn't reflexively cut scope for a one-off slip, or merely
+// re-date a project whose estimates are the real problem. Like the value model's
+// recovery-style preference, these are TIEBREAKERS (bounded, same ±1 scale): the
+// joint optimizer only consults them when two candidates' odds are within an
+// epsilon, so the forecast always decides first and the cause only arbitrates a
+// genuine tie. The cause picks the family; the odds still decide within it (§0 —
+// the cause itself is computed deterministically by `diagnoseCause`).
+//
+// Mirrors the design table:
+//   one_off_slip      → hold / single defer / small reschedule (don't cut scope)
+//   chronic_velocity  → re-estimate (reshape) / move the deadline (the estimates,
+//                       not the arrangement, are wrong)
+//   constraint_change → reroute / reschedule / triage (re-plan around the change)
+//   scope_structural  → triage / reroute (shed genuine over-commitment)
+
+export const CAUSE_MOVE_PREFERENCES: Record<
+  DivergenceCause,
+  Partial<Record<StrategyMoveKind, number>>
+> = {
+  // A blip — hold or make the smallest reschedule; never cut scope for it.
+  one_off_slip: {
+    hold: 1,
+    defer: 0.5,
+    reschedule_task: 0.5,
+    reschedule_deadline: 0.25,
+    reshape: -0.5,
+    reroute: -1,
+    triage: -1,
+  },
+  // The estimates are systematically low — re-shape (re-estimate / scope down) or
+  // move the date; re-arranging the same work won't fix a pace problem.
+  chronic_velocity: {
+    reshape: 1,
+    reschedule_deadline: 0.5,
+    reroute: -0.25,
+  },
+  // The world moved — re-plan around the new constraint rather than blaming pace.
+  constraint_change: {
+    reroute: 1,
+    reschedule_deadline: 0.5,
+    triage: 0.5,
+  },
+  // Genuine over-commitment — shed or replace work; re-dating alone won't fit it.
+  scope_structural: {
+    triage: 1,
+    reroute: 0.5,
+    defer: 0.25,
+  },
+};
+
+/**
+ * Tiebreak bias for a move kind given the diagnosed cause (0 when the cause is
+ * unknown or the kind isn't listed). Summed with the value model's recovery-style
+ * `movePref` in the joint optimizer — both apply only within the odds epsilon, so
+ * the forecast is never overridden.
+ */
+export function causeMovePref(
+  cause: DivergenceCause | null,
+  kind: StrategyMoveKind,
+): number {
+  if (cause === null) return 0;
+  return CAUSE_MOVE_PREFERENCES[cause]?.[kind] ?? 0;
 }
 
 // Step 5 (§5 / vision §4.3) — the grounding gate's "cost to the goal" check.

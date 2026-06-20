@@ -2,6 +2,7 @@ import "server-only";
 
 import { createHash } from "crypto";
 import type {
+  DivergenceCause,
   FactorScores,
   ModificationKind,
   ModificationPart,
@@ -15,6 +16,7 @@ import type {
   TaskModification,
 } from "./types";
 import { isOnTrack } from "./types";
+import { causeMovePref } from "./grounding";
 import { movePref, type ValueModel } from "./value-model";
 import type { ChatMessage } from "./openrouter";
 import { isLLMConfigured } from "./extraction";
@@ -1034,6 +1036,16 @@ function optimizeJointPlan(
   const remaining = [...candidates];
   let current = { byProject: scorer.baseByProject, allOnTime: scorer.baseAllOnTime };
 
+  // Step 5 slice 4: each project's diagnosed cause picks which move *family* fits,
+  // applied alongside the value model's recovery-style taste in the odds-tie
+  // tiebreak below. Cross-project moves (projectId "") carry no single cause.
+  const causeByProject = new Map<string, DivergenceCause>();
+  for (const r of scorer.recoveries) {
+    if (r.cause) causeByProject.set(r.projectId, r.cause.cause);
+  }
+  const prefFor = (m: StrategyMove): number =>
+    movePref(vm, m.kind) + causeMovePref(causeByProject.get(m.projectId) ?? null, m.kind);
+
   while (picked.length < JOINT_MOVE_CAP && remaining.length > 0) {
     // Everyone deadlined is already on track — nothing left worth doing.
     if (onTrackCount(current.byProject) >= current.byProject.size) break;
@@ -1043,14 +1055,15 @@ function optimizeJointPlan(
       | null = null;
     for (let i = 0; i < remaining.length; i++) {
       const result = scorer.score([...picked, remaining[i].move]);
-      const pref = movePref(vm, remaining[i].move.kind);
+      const pref = prefFor(remaining[i].move);
       if (best === null) {
         best = { idx: i, result, pref };
         continue;
       }
       // Lexicographic objective: (#on-track ↑, then conjunction ↑) — UNCHANGED.
-      // The Value Model only arbitrates when the conjunction is within an
-      // epsilon: a true odds tie defers to the user's recovery-style preference.
+      // Taste only arbitrates when the conjunction is within an epsilon: a true
+      // odds tie defers to the user's recovery-style preference plus the diagnosed
+      // cause's preferred move family (step 5 slice 4) — never overriding real odds.
       const otc = onTrackCount(result.byProject);
       const botc = onTrackCount(best.result.byProject);
       let better: boolean;
