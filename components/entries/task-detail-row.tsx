@@ -10,8 +10,9 @@ import {
   ChevronDown,
   FolderKanban,
   MoonStar,
+  Coins,
 } from "lucide-react";
-import type { PriorityLabel, Task } from "@/lib/types";
+import type { PriorityLabel, Task, TaskOrigin } from "@/lib/types";
 import { PriorityBadge, Pill } from "@/components/ui/badge";
 import { formatDate, formatMinutes, isOverdue } from "@/lib/format";
 import { cn } from "@/lib/cn";
@@ -48,6 +49,8 @@ export interface TaskRowData {
   factors?: RowFactors | null;
   /** Which project this task belongs to — shown as a tag in cross-project views. */
   projectName?: string | null;
+  /** Provenance — `"debt"` renders an "Owed" tag (a materialized scope-cut). */
+  origin?: TaskOrigin | null;
 }
 
 /** Lift a stored task into the row shape — the canonical full-detail mapping. */
@@ -64,6 +67,7 @@ export function taskToRowData(t: Task): TaskRowData {
     sourceQuote: t.source_quote,
     priorityReason: t.priority_reason,
     blockedBy: t.blocked_by,
+    origin: t.origin,
     factors: {
       urgency: t.urgency_score,
       impact: t.impact_score,
@@ -171,10 +175,12 @@ export function TaskDetailRow({
     data.factors != null &&
     FACTORS.some((f) => typeof data.factors![f.key] === "number");
   const overdue = !deferred && data.dueDate != null && isOverdue(data.dueDate);
+  const isDebt = data.origin === "debt";
   const hasBadgeRow =
     data.priorityLabel != null ||
     data.projectName != null ||
     deferred ||
+    isDebt ||
     data.isAiSuggested;
 
   return (
@@ -198,6 +204,12 @@ export function TaskDetailRow({
               <Pill className="gap-1 bg-[var(--color-surface-overlay)] text-[var(--color-fg-muted)]">
                 <MoonStar className="size-3" />
                 Deferred
+              </Pill>
+            )}
+            {isDebt && (
+              <Pill className="gap-1 bg-[var(--color-cut-subtle)] text-[var(--color-cut-fg)]">
+                <Coins className="size-3" />
+                Owed
               </Pill>
             )}
             {data.isAiSuggested && (

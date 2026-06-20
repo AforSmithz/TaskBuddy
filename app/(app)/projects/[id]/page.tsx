@@ -203,7 +203,12 @@ export default async function ProjectPage({
             action={<Pill>{deferredTasks.length}</Pill>}
           />
           <DeferredTasks
-            tasks={deferredTasks.map((t) => ({ id: t.id, title: t.title }))}
+            tasks={deferredTasks.map((t) => ({
+              id: t.id,
+              title: t.title,
+              origin: t.origin,
+              estimatedMinutes: t.estimated_minutes,
+            }))}
           />
         </Card>
       )}

@@ -7,6 +7,7 @@ import type {
   ActivityCompletion,
   Availability,
   AvailabilityOverride,
+  CauseDiagnosis,
   Commitment,
   CompletionConfidence,
   Conflict,
@@ -37,6 +38,7 @@ import type {
   Task,
   TaskDependency,
   TaskModification,
+  TaskOrigin,
   TaskStatus,
   TriageMove,
 } from "./types";
@@ -44,6 +46,8 @@ import { ON_TRACK_PROBABILITY, isOnTrack } from "./types";
 import { extractEntry } from "./extraction";
 import { estimationModel } from "./generate";
 import { goalCompletion } from "./goal";
+import { diagnoseCause, type CauseBaseline } from "./grounding";
+import { formatMinutes } from "./format";
 import { computePriority } from "./priority";
 import {
   dayCapacities,
@@ -335,6 +339,7 @@ export async function assembleEntry(
       deferred: false,
       completion_confidence: null,
       completed_at: null,
+      origin: null,
       sort_index: i,
       created_at: createdAt,
     };
@@ -1688,6 +1693,7 @@ export async function createErrandTask(
     deferred: false,
     completion_confidence: null,
     completed_at: null,
+    origin: null,
     sort_index: 0,
     created_at: new Date().toISOString(),
   };
@@ -2536,17 +2542,18 @@ export async function forecastDashboard(): Promise<{
   agendaOrder: GlobalPlan["order"];
   model: EstimationModel;
 }> {
-  const [g, activities, completions] = await Promise.all([
+  const [g, activities, completions, cachedStrategy] = await Promise.all([
     gatherForecast(),
     listRecurringActivities(),
     listActivityCompletions(),
+    getCachedStrategy(),
   ]);
   const ctx = allocContext(g, g.commitments);
   const odds = jointOdds(g, ctx);
   const forecasts = buildForecasts(g, g.commitments, odds);
   const pitWall = buildPitWall(g, ctx, odds);
   const recoveries = g.projects
-    .map((p) => buildRecoveryPlan(g, p, odds, pitWall.conflicts))
+    .map((p) => buildRecoveryPlan(g, p, odds, pitWall.conflicts, cachedStrategy))
     .filter((plan): plan is RecoveryPlan => plan !== null);
   // The canonical plan over all current open work (no triage shedding) — the
   // cross-project order + the unified schedule. Recurring is NOT in here, so the
@@ -2583,7 +2590,10 @@ export async function forecastProjectWithRecovery(projectId: string): Promise<{
   recovery: RecoveryPlan | null;
   model: EstimationModel;
 }> {
-  const g = await gatherForecast();
+  const [g, cachedStrategy] = await Promise.all([
+    gatherForecast(),
+    getCachedStrategy(),
+  ]);
   const project = g.projects.find((p) => p.id === projectId);
   if (!project) return { forecast: null, recovery: null, model: g.model };
   // Build the plan over the FULL gather (all projects) so contention is real,
@@ -2595,7 +2605,7 @@ export async function forecastProjectWithRecovery(projectId: string): Promise<{
     buildForecasts({ ...g, projects: [project] }, g.commitments, odds)[0] ?? null;
   return {
     forecast: projectForecast,
-    recovery: buildRecoveryPlan(g, project, odds, conflicts),
+    recovery: buildRecoveryPlan(g, project, odds, conflicts, cachedStrategy),
     model: g.model,
   };
 }
@@ -2817,6 +2827,7 @@ function buildRecoveryPlan(
   project: Goal,
   odds: Map<string, number>,
   conflicts: Conflict[] = [],
+  baselineStrategy: PortfolioStrategy | null = null,
 ): RecoveryPlan | null {
   if (!project.deadline) return null;
   const projectId = project.id;
@@ -2908,11 +2919,34 @@ function buildRecoveryPlan(
     .filter((t) => t.status === "blocked")
     .map((t) => ({ taskId: t.id, title: t.title, blockedBy: t.blocked_by }));
 
+  // Diagnose the cause behind a genuine divergence (off-track only — a
+  // warning-only flag has no cause to explain). The baseline comes from the last
+  // cached strategy when the caller supplies one; without it constraint_change
+  // simply can't fire and the cause falls through to the residual-based classes.
+  const completedTasks = allTasks.filter((t) => t.status === "done");
+  const baseline: CauseBaseline | null = baselineStrategy
+    ? {
+        generatedAt: baselineStrategy.generatedAt,
+        probability: baselineStrategy.odds[projectId] ?? null,
+      }
+    : null;
+  const cause = offTrack
+    ? diagnoseCause({
+        model: g.model,
+        completedTasks,
+        openTasks,
+        reasons,
+        currentProbability: fc.probability,
+        baseline,
+      })
+    : null;
+
   return {
     projectId: project.id,
     projectName: project.name,
     currentProbability: fc.probability,
     reasons,
+    cause,
     defer,
     reschedule,
     sequence,
@@ -2928,6 +2962,8 @@ export interface RecoveryContext {
   project: Goal;
   /** Open (not done, not deferred) tasks — full rows, for prompt context. */
   openTasks: Task[];
+  /** Completed (done) tasks — the per-goal residual sample for cause-diagnosis. */
+  completedTasks: Task[];
   /** Deployable minutes from today through the deadline. */
   deployable: number;
   /** Why the project was flagged off-track. */
@@ -2938,6 +2974,10 @@ export interface RecoveryContext {
   model: EstimationModel;
   /** Life-area to file new tasks under (from existing tasks; "Work" by default). */
   area: string;
+  /** The temporal/odds anchor from the last cached strategy (null when none). */
+  baseline: CauseBaseline | null;
+  /** The diagnosed cause behind the divergence (null when not genuinely off-track). */
+  cause: CauseDiagnosis | null;
 }
 
 /**
@@ -2972,14 +3012,46 @@ export async function getRecoveryContext(
   if (reasons.length === 0) return null;
 
   const openTasks = allTasks.filter((t) => t.status !== "done" && !t.deferred);
+  const completedTasks = allTasks.filter((t) => t.status === "done");
+
+  // Baseline = the last cached strategy: its per-project odds snapshot + when it
+  // was generated. During portfolio generation this is the still-current `prev`
+  // (not yet overwritten), so cause-diagnosis compares "now" against the world
+  // the standing plan was built for. Cheap, additive — no new persistence (S1).
+  const cached = await getCachedStrategy();
+  const baseline: CauseBaseline | null = cached
+    ? {
+        generatedAt: cached.generatedAt,
+        probability: cached.odds[projectId] ?? null,
+      }
+    : null;
+
+  // Diagnose the cause only for a genuine divergence — a warning-only flag (a
+  // blocked/overdue task on an otherwise on-track project) has no cause to explain.
+  const offTrack =
+    !isOnTrack(fc.probability) || reasons.some((r) => r.severity === "critical");
+  const cause = offTrack
+    ? diagnoseCause({
+        model: g.model,
+        completedTasks,
+        openTasks,
+        reasons,
+        currentProbability: fc.probability,
+        baseline,
+      })
+    : null;
+
   return {
     project,
     openTasks,
+    completedTasks,
     deployable,
     reasons,
     currentProbability: fc.probability,
     model: g.model,
     area: openTasks[0]?.area ?? "Work",
+    baseline,
+    cause,
   };
 }
 
@@ -3074,11 +3146,30 @@ export async function applyTaskModifications(
     if (mod.kind === "scope_down") {
       const part = mod.replacements[0];
       if (!part) continue;
-      await updateTask(mod.taskId, {
+      // Reshape the task in place (lighter title/description, smaller estimate).
+      const original = await updateTask(mod.taskId, {
         title: part.title,
         description: part.description,
         estimated_minutes: part.estimated_minutes,
       });
+      // Materialize the trimmed work as a debt task (§5 gate check 4): scope_down
+      // is the one reshape that genuinely erases work — the estimate shrinks in
+      // place with no other record. The debt task makes that cost owed, not
+      // erased. It's deferred (so it stays OUT of this deadline's forecast — the
+      // cut's odds gain holds) and due past the deadline, marked origin "debt".
+      const trimmed = mod.originalEstimate - part.estimated_minutes;
+      if (trimmed > 0) {
+        newRows.push(
+          buildDebtTaskRow(
+            mod.taskTitle,
+            trimmed,
+            original?.area ?? "Work",
+            project,
+            newRows.length,
+            createdAt,
+          ),
+        );
+      }
     } else {
       // Split: the monolith is replaced by its steps. Defer it out of the
       // forecast (reversible); the steps inherit its life-area (updateTask
@@ -3175,6 +3266,10 @@ type RecoveryTaskInput = FactorScores & {
   priority_reason: string;
   area: string;
   status: TaskStatus;
+  /** Set-aside on creation (e.g. a debt task parked past the deadline). */
+  deferred?: boolean;
+  /** Provenance — `"debt"` for a materialized scope-cut follow-up. */
+  origin?: TaskOrigin | null;
 };
 
 /** Build a persistable Task row from strategist output, scored deterministically. */
@@ -3210,12 +3305,72 @@ function buildRecoveryTaskRow(
     source_quote: null,
     is_ai_suggested: true,
     blocked_by: input.blocked_by ?? null,
-    deferred: false,
+    deferred: input.deferred ?? false,
     completion_confidence: null,
     completed_at: null,
+    origin: input.origin ?? null,
     sort_index: sortIndex,
     created_at: createdAt,
   };
+}
+
+/** Days a debt task is parked past the goal deadline before it comes due. */
+const DEBT_DUE_BUFFER_DAYS = 7;
+
+/** Map minutes onto the strategist's 1-5 effort scale (5 = >4h … 1 = <30m). */
+function effortFromMinutes(min: number): number {
+  if (min > 240) return 5;
+  if (min > 120) return 4;
+  if (min > 60) return 3;
+  if (min > 30) return 2;
+  return 1;
+}
+
+/** The day a debt task comes due — `buffer` days past the deadline, or null. */
+function dueAfterDeadline(deadline: string | null): string | null {
+  if (!deadline) return null;
+  const ms =
+    Date.parse(`${deadline.slice(0, 10)}T00:00:00Z`) +
+    DEBT_DUE_BUFFER_DAYS * 86_400_000;
+  return new Date(ms).toISOString().slice(0, 10);
+}
+
+/**
+ * Build the deferred follow-up that captures work a scope-cut trimmed (§5 gate
+ * check 4). Parked (deferred) so it stays out of the current deadline's forecast
+ * — the cut's odds gain holds — yet persisted as a real, owed task: due past the
+ * deadline, area inherited, origin "debt", provenance in its reason.
+ */
+function buildDebtTaskRow(
+  originalTitle: string,
+  trimmedMinutes: number,
+  area: string,
+  project: Goal,
+  sortIndex: number,
+  createdAt: string,
+): Task {
+  return buildRecoveryTaskRow(
+    {
+      urgency: 2,
+      impact: 3,
+      effort: effortFromMinutes(trimmedMinutes),
+      dependency: 1,
+      risk: 2,
+      confidence: 4,
+      title: `Restore trimmed scope: ${originalTitle}`,
+      description: `${formatMinutes(trimmedMinutes)} of "${originalTitle}" was set aside to scope it down for ${project.name}'s deadline. Owed, not erased — pick this up after the deadline.`,
+      estimated_minutes: trimmedMinutes,
+      due_date: dueAfterDeadline(project.deadline),
+      priority_reason: `Debt from scoping down "${originalTitle}" on ${project.name}.`,
+      area,
+      status: "todo",
+      deferred: true,
+      origin: "debt",
+    },
+    "",
+    sortIndex,
+    createdAt,
+  );
 }
 
 /**

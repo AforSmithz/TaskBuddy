@@ -111,6 +111,7 @@ create table if not exists tasks (
   deferred          boolean not null default false, -- pushed past the deadline by a recovery move
   completion_confidence text,                       -- verified|self_assessed|inferred|in_progress (null while open)
   completed_at      timestamptz,                    -- set when status → done
+  origin            text,                            -- 'debt' for materialized scope-cut follow-ups (null = ordinary task)
   sort_index        integer default 0,
   created_at        timestamptz not null default now()
 );

@@ -109,6 +109,14 @@ export function RecoveryCallout({ plan }: { plan: RecoveryPlan }) {
           <p className="mt-1 text-[12px] text-[var(--color-fg-muted)]">
             {plan.reasons.map((r) => r.detail).join(" · ")}
           </p>
+          {plan.cause && (
+            <p className="mt-1.5 text-[12px] text-[var(--color-fg-subtle)]">
+              <span className="font-medium text-[var(--color-fg-muted)]">
+                Why:{" "}
+              </span>
+              {plan.cause.detail}
+            </p>
+          )}
         </div>
       </div>
 

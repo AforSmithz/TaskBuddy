@@ -519,6 +519,7 @@ export function recurringAgendaTask(
     deferred: false,
     completion_confidence: null,
     completed_at: null,
+    origin: null,
     sort_index: 0,
     created_at: activity.created_at,
   };

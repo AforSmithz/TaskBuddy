@@ -241,6 +241,15 @@ export interface OpenQuestion {
   created_at: string;
 }
 
+/**
+ * Where a task came from, when that provenance changes how it's treated.
+ * `"debt"` marks a follow-up materialized by a scope-cutting recovery move — the
+ * trimmed work, owed after the deadline rather than silently erased (§5 gate
+ * check 4). Null for an ordinary task. Stored as free text so future origins
+ * extend without a migration.
+ */
+export type TaskOrigin = "debt";
+
 export interface Task {
   id: string;
   entry_id: string;
@@ -273,6 +282,8 @@ export interface Task {
   completion_confidence: CompletionConfidence | null;
   /** When the task was marked done (null while open). */
   completed_at: string | null;
+  /** Provenance when it changes treatment — `"debt"` for a scope-cut follow-up. */
+  origin: TaskOrigin | null;
   sort_index: number;
   created_at: string;
 }
@@ -501,6 +512,27 @@ export interface DivergenceReason {
   detail: string;
 }
 
+/**
+ * The diagnosed *cause* behind a divergence — one level deeper than the
+ * symptom-level {@link DivergenceReason}. The cause picks the response *class*
+ * (which family of moves to prefer) so the strategist doesn't reflexively cut
+ * scope for a one-off slip. Computed deterministically from estimation residuals
+ * and a temporal baseline (see `lib/grounding.ts`); the LLM may narrate it but
+ * never decides it (§0).
+ */
+export type DivergenceCause =
+  | "one_off_slip" // a single task blew up; the underlying pace is fine
+  | "chronic_velocity" // estimates are systematically low — a pattern, not an event
+  | "constraint_change" // the world moved since the plan was made
+  | "scope_structural"; // simply too much committed work for the time
+
+/** A diagnosed cause plus the one-line, deterministic "why" shown to the user. */
+export interface CauseDiagnosis {
+  cause: DivergenceCause;
+  /** Human-readable explanation — computed from signals, never authored by the LLM. */
+  detail: string;
+}
+
 /** A move that re-dates the project to the earliest deadline that clears the target. */
 export interface RescheduleMove {
   /** ISO date of the earliest achievable deadline. */
@@ -521,6 +553,12 @@ export interface RecoveryPlan {
   currentProbability: number;
   /** Why we flagged the project. */
   reasons: DivergenceReason[];
+  /**
+   * The diagnosed cause behind the divergence — the "why" one level below the
+   * symptoms. Null when the project is flagged for attention but not genuinely
+   * off track (a blocked/overdue warning with no divergence to explain).
+   */
+  cause: CauseDiagnosis | null;
   /** Defer these (lowest-priority-first) to recover; best improvement first. */
   defer: RecoveryMove[];
   /** Earliest deadline clearing the target probability, or null if out of reach. */
