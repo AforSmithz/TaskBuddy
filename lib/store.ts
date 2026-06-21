@@ -1425,13 +1425,20 @@ export async function commitStrategyBundle(
     if (eff.activityCompletionIds) activityCompletionIds.push(...eff.activityCompletionIds);
   }
 
+  // Odds are informational (history display), but the columns are NOT NULL and
+  // `JSON.stringify(NaN/undefined)` → null — a degraded cache (no resolveInput, a
+  // non-finite combinedProbability) applied before auto-regen would otherwise throw
+  // on insert and kill the whole Apply. Coerce to a finite value so a commit never
+  // fails over a cosmetic number.
+  const safeOdds = (n: number) => (Number.isFinite(n) ? n : 0);
+
   const version: PlanVersion = {
     id: crypto.randomUUID(),
     createdAt: new Date().toISOString(),
     reason: meta.reason,
     moves: ordered,
-    oddsBefore: meta.oddsBefore,
-    oddsAfter: meta.oddsAfter,
+    oddsBefore: safeOdds(meta.oddsBefore),
+    oddsAfter: safeOdds(meta.oddsAfter),
     restore: {
       tasks: [...taskSnap.values()],
       goals: [...goalSnap.values()],
