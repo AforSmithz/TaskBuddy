@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, useTransition } from "react";
+import { useEffect, useMemo, useRef, useState, useTransition } from "react";
 import Link from "next/link";
 import {
   ArrowRight,
@@ -22,6 +22,10 @@ import type {
   StrategyMoveKind,
   StrategyMovePayload,
 } from "@/lib/types";
+import {
+  resolveSubsetCumulative,
+  type ResolveInput,
+} from "@/lib/portfolio-state";
 import {
   acceptRecoveryTasksAction,
   applyModificationsAction,
@@ -200,6 +204,10 @@ function MoveRow({
   pending,
   onApply,
   projectNames,
+  canToggle,
+  included,
+  onToggleInclude,
+  liveJoint,
 }: {
   move: StrategyMove;
   busy: boolean;
@@ -207,6 +215,14 @@ function MoveRow({
   onApply: () => void;
   /** taskId → project name, for tagging deferred tasks (esp. cross-project triage). */
   projectNames: Record<string, string>;
+  /** Whether the include-toggle is offered (only when a live re-solve is possible). */
+  canToggle: boolean;
+  /** Is this move part of the staged "apply" set (drives the live odds + the dim). */
+  included: boolean;
+  onToggleInclude: () => void;
+  /** The LIVE cumulative portfolio odds after this move within the included set —
+   *  overrides the baked `portfolioProbabilityAfter` once the user has toggled. */
+  liveJoint?: number;
 }) {
   const [open, setOpen] = useState(false);
   const Icon = MOVE_ICON[move.kind];
@@ -214,7 +230,7 @@ function MoveRow({
   // conjunction after this step (shown so a move that helps its project but
   // leaves the portfolio gated by another deadline doesn't read as "→ 0%").
   const solo = move.probabilityAfter;
-  const joint = move.portfolioProbabilityAfter;
+  const joint = liveJoint ?? move.portfolioProbabilityAfter;
   const showAll = Number.isFinite(joint) && formatPct(joint) !== formatPct(solo);
 
   // Defers can span projects (cross-project triage), so each row resolves its own
@@ -237,8 +253,32 @@ function MoveRow({
         : `Adds ${adds.length} task${adds.length > 1 ? "s" : ""}`;
 
   return (
-    <div className="rounded-md bg-[var(--color-surface-raised)] px-2.5 py-2">
+    <div
+      className={cn(
+        "rounded-md bg-[var(--color-surface-raised)] px-2.5 py-2 transition-opacity",
+        canToggle && !included && "opacity-50",
+      )}
+    >
       <div className="flex items-center gap-2">
+        {canToggle && (
+          <button
+            type="button"
+            role="checkbox"
+            aria-checked={included}
+            aria-label={
+              included ? "Exclude this move from the plan" : "Include this move in the plan"
+            }
+            onClick={onToggleInclude}
+            className={cn(
+              "flex size-4 shrink-0 items-center justify-center rounded-full border transition-colors",
+              included
+                ? "border-[var(--color-accent)] bg-[var(--color-accent)] text-[var(--color-bg)]"
+                : "border-[var(--color-border)] text-transparent hover:border-[var(--color-fg-subtle)]",
+            )}
+          >
+            <Check className="size-2.5" strokeWidth={3} />
+          </button>
+        )}
         <Icon className="size-3.5 shrink-0 text-[var(--color-fg-subtle)]" />
         <p className="min-w-0 flex-1 text-[12px] text-[var(--color-fg-muted)]">
           {move.rationale}
@@ -248,12 +288,12 @@ function MoveRow({
             <span
               className={cn(
                 "text-[12px] font-semibold tabular-nums",
-                toneText(solo),
+                included ? toneText(solo) : "text-[var(--color-fg-subtle)]",
               )}
             >
               → {formatPct(solo)}
             </span>
-            {showAll && (
+            {showAll && included && (
               <span className="text-[10px] tabular-nums text-[var(--color-fg-subtle)]">
                 all {formatPct(joint)}
               </span>
@@ -309,6 +349,7 @@ function MoveTier({
   combinedProbability,
   label,
   projectNames,
+  resolveInput,
   collapsible = false,
   defaultOpen = true,
 }: {
@@ -316,13 +357,50 @@ function MoveTier({
   combinedProbability: number;
   label: string;
   projectNames: Record<string, string>;
+  /** The serialized re-solve inputs; when present, each move gets an include-toggle
+   *  and the odds recompute live client-side (OVERHAUL S1 / vision §8.2). */
+  resolveInput?: ResolveInput;
   collapsible?: boolean;
   defaultOpen?: boolean;
 }) {
   const [applied, setApplied] = useState<Set<number>>(new Set());
+  // Every move starts in the staged "apply" set; toggling one off re-solves the
+  // portfolio odds over the remaining included moves before the user commits.
+  const [included, setIncluded] = useState<Set<number>>(
+    () => new Set(moves.map((_, i) => i)),
+  );
   const [busy, setBusy] = useState<number | "all" | null>(null);
   const [pending, startTransition] = useTransition();
   const [open, setOpen] = useState(defaultOpen);
+
+  const canResolve = Boolean(resolveInput) && moves.length > 0;
+
+  // Live re-solve: the running portfolio odds after each INCLUDED, not-yet-applied
+  // move (in recommended order) plus the combined — recomputed client-side from the
+  // serialized inputs, identical to the server's baked numbers for the same subset.
+  // §0 holds: the odds still come from `forecast()`; the browser only relocates it.
+  const live = useMemo(() => {
+    if (!resolveInput) return null;
+    const seq = moves
+      .map((move, index) => ({ move, index }))
+      .filter(({ index }) => !applied.has(index) && included.has(index));
+    const { afterEach, combined } = resolveSubsetCumulative(
+      resolveInput,
+      seq.map((x) => x.move),
+    );
+    const byIndex = new Map<number, number>();
+    seq.forEach((x, i) => byIndex.set(x.index, afterEach[i]));
+    return { byIndex, combined };
+  }, [resolveInput, moves, applied, included]);
+
+  function toggleInclude(index: number) {
+    setIncluded((s) => {
+      const next = new Set(s);
+      if (next.has(index)) next.delete(index);
+      else next.add(index);
+      return next;
+    });
+  }
 
   function applyOne(index: number, move: StrategyMove) {
     setBusy(index);
@@ -338,13 +416,18 @@ function MoveTier({
     startTransition(async () => {
       const ordered = moves
         .map((move, index) => ({ move, index }))
-        .filter(({ index }) => !applied.has(index))
+        .filter(({ index }) => !applied.has(index) && included.has(index))
         .sort((a, b) => applyOrder(a.move, b.move));
       // Sequential — a deadline reschedule must see the deferrals' freed hours.
       for (const { move } of ordered) {
         await applyMove(move.payload, move.projectId);
       }
-      setApplied(new Set(moves.map((_, i) => i)));
+      // Only the included moves were committed; any excluded ones stay listed.
+      setApplied((s) => {
+        const next = new Set(s);
+        for (const { index } of ordered) next.add(index);
+        return next;
+      });
       setBusy(null);
     });
   }
@@ -354,11 +437,15 @@ function MoveTier({
   const remaining = moves
     .map((move, index) => ({ move, index }))
     .filter(({ index }) => !applied.has(index));
+  // The staged set the "Apply" commits + the live odds reflect: included & unapplied.
+  const inPlay = remaining.filter(({ index }) => included.has(index));
 
-  // A strategy cached before Phase 5 has no cumulative odds — fall back to the
-  // move's solo odds for rows, and hide the combined chip when it isn't finite,
-  // so a stale-schema cache degrades gracefully instead of showing "NaN%".
-  const showCombined = Number.isFinite(combinedProbability);
+  // The headline combined: the LIVE re-solve when toggles are available, else the
+  // baked number. A strategy cached before Phase 5 has no cumulative odds — fall
+  // back to the move's solo odds for rows, and hide the combined chip when it isn't
+  // finite, so a stale-schema cache degrades gracefully instead of showing "NaN%".
+  const headlineCombined = live ? live.combined : combinedProbability;
+  const showCombined = Number.isFinite(headlineCombined);
 
   const header = (
     <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
@@ -386,17 +473,17 @@ function MoveTier({
           </span>
         )}
       </button>
-      {open && remaining.length > 1 && (
+      {open && inPlay.length > 1 && (
         <div className="flex items-center gap-2">
           {showCombined && (
             <span
               className={cn(
                 "text-[12px] font-semibold tabular-nums",
-                toneText(combinedProbability),
+                toneText(headlineCombined),
               )}
-              title="Portfolio odds that every deadlined goal lands once all these moves are applied."
+              title="Portfolio odds that every deadlined goal lands once the included moves are applied."
             >
-              all → {formatPct(combinedProbability)}
+              all → {formatPct(headlineCombined)}
             </span>
           )}
           <Button
@@ -406,7 +493,7 @@ function MoveTier({
             disabled={pending}
             onClick={applyAll}
           >
-            Apply all {remaining.length}
+            Apply {inPlay.length}
           </Button>
         </div>
       )}
@@ -432,6 +519,10 @@ function MoveTier({
                 pending={pending}
                 onApply={() => applyOne(index, move)}
                 projectNames={projectNames}
+                canToggle={canResolve}
+                included={included.has(index)}
+                onToggleInclude={() => toggleInclude(index)}
+                liveJoint={live?.byIndex.get(index)}
               />
             ))
           )}
@@ -629,6 +720,7 @@ export function StrategyCard({
           combinedProbability={current.combinedProbability}
           label="Recommended moves"
           projectNames={projectNames}
+          resolveInput={current.resolveInput}
         />
 
         {/* Grounded tier — mechanical-only joint plan, collapsible. */}
@@ -639,6 +731,7 @@ export function StrategyCard({
             combinedProbability={current.grounded.combinedProbability}
             label="Steady plan"
             projectNames={projectNames}
+            resolveInput={current.resolveInput}
             collapsible
             defaultOpen={steadyPlanDefaultOpen}
           />
