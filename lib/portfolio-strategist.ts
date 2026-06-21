@@ -1164,6 +1164,7 @@ function deterministicFallback(
     usedLLM: false,
     combinedProbability: combined,
     grounded: null,
+    resolveInput: scorer.resolveInput,
   };
 }
 
@@ -1302,5 +1303,6 @@ export async function generatePortfolioStrategy(
     usedLLM: true,
     combinedProbability: bold.combined,
     grounded,
+    resolveInput: scorer.resolveInput,
   };
 }
