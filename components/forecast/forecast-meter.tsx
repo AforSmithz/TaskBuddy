@@ -2,6 +2,7 @@ import Link from "next/link";
 import type { EstimationModel, ForecastResult } from "@/lib/types";
 import { MIN_ESTIMATION_SAMPLES, isOnTrack } from "@/lib/types";
 import { formatDate, formatMinutes } from "@/lib/format";
+import { criticalChainBuffer } from "@/lib/buffer";
 import { cn } from "@/lib/cn";
 
 // Presentational forecast UI. Pure (no "use client"), so both server and
@@ -48,6 +49,10 @@ export function ForecastMeter({
 }) {
   const b = band(forecast.probability);
   const slack = forecast.slackMinutes;
+  // Critical-chain buffer (§5a S3a): the p90−p50 safety margin the variance
+  // demands, and how much of it the deadline leaves uncovered. Toned only when it
+  // needs attention; null (hidden) when no buffer is defined.
+  const buffer = criticalChainBuffer(forecast);
   return (
     <div>
       <div className="flex items-start justify-between gap-3">
@@ -90,6 +95,20 @@ export function ForecastMeter({
         {forecast.openTaskCount > 0 && forecast.p90Minutes > forecast.p10Minutes && (
           <span>
             {formatMinutes(forecast.p10Minutes)}–{formatMinutes(forecast.p90Minutes)} likely
+          </span>
+        )}
+        {buffer && (
+          <span
+            className={
+              buffer.tone === "breached"
+                ? "text-[var(--color-danger)]"
+                : buffer.tone === "thin"
+                  ? "text-[var(--color-accent-fg)]"
+                  : undefined
+            }
+          >
+            {formatMinutes(buffer.bufferMinutes)} buffer ·{" "}
+            {Math.round(buffer.consumedFraction * 100)}% used
           </span>
         )}
         <span className={slack < 0 ? "text-[var(--color-danger)]" : undefined}>

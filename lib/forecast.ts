@@ -158,6 +158,7 @@ export function forecast(
     slackMinutes: deployable - expectedMinutes,
     openTaskCount: open.length,
     p10Minutes: 0,
+    p50Minutes: 0,
     p90Minutes: 0,
   };
 
@@ -189,6 +190,7 @@ export function forecast(
   const withInterval = {
     ...base,
     p10Minutes: Math.round(percentile(totals, 0.1)),
+    p50Minutes: Math.round(percentile(totals, 0.5)),
     p90Minutes: Math.round(percentile(totals, 0.9)),
   };
 

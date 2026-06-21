@@ -48,6 +48,7 @@ import { extractEntry } from "./extraction";
 import { estimationModel } from "./generate";
 import { goalCompletion } from "./goal";
 import { diagnoseCause, goalCutCost, type CauseBaseline } from "./grounding";
+import { isBufferLow } from "./buffer";
 import { formatMinutes } from "./format";
 import { computePriority } from "./priority";
 import {
@@ -2819,6 +2820,20 @@ export function detectDivergence(
       kind: "over_budget",
       severity: "critical",
       detail: `${Math.ceil(-fc.slackMinutes / 60)}h more work than the budget allows`,
+    });
+  }
+
+  // Critical-chain buffer early-warning (§5a S3a): the deadline clears the
+  // on-track line but not the comfortable one, so the p90−p50 safety margin is
+  // mostly committed and a single overrun could flip the goal. Advisory — the
+  // forecast probability is unchanged (`forecast()` owns the odds, §0). The
+  // `isBufferLow` gate is inherently on-track, so this never double-lists with the
+  // critical `at_risk` / `over_budget` reasons above (and `isOnTrack ⇒ slack > 0`).
+  if (isBufferLow(fc)) {
+    reasons.push({
+      kind: "buffer_low",
+      severity: "warning",
+      detail: "On track, but the safety margin is thin — a single overrun could flip this.",
     });
   }
 

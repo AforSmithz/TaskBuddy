@@ -450,10 +450,14 @@ export interface ForecastResult {
   /**
    * 80% central interval of the *remaining work* (minutes), from the same Monte
    * Carlo that prices the odds: the work lands between `p10Minutes` and
-   * `p90Minutes` in ~80% of sampled futures. Turns the single `expectedMinutes`
-   * point estimate into an honest range. Both 0 when there's no open work.
+   * `p90Minutes` in ~80% of sampled futures, with `p50Minutes` the median
+   * outcome. Turns the single `expectedMinutes` point estimate into an honest
+   * range — and `p50`/`p90` anchor the critical-chain buffer (`lib/buffer.ts`):
+   * the gap between the safe (p90) and median (p50) outcome is the safety margin
+   * the variance demands. All 0 when there's no open work.
    */
   p10Minutes: number;
+  p50Minutes: number;
   p90Minutes: number;
 }
 
@@ -510,6 +514,7 @@ export interface DivergenceReason {
     | "over_budget" // negative slack: the open work doesn't fit the time budget
     | "deadline_past" // the deadline is already behind us
     | "at_risk" // open work is below the target probability of finishing on time
+    | "buffer_low" // on track, but the critical-chain safety buffer is mostly committed
     | "overdue_tasks" // open tasks whose due_date has passed
     | "blocked_tasks" // open tasks stuck in `blocked`
     | "provisional_completion" // done work / met criteria rest on unverified confidence
