@@ -26,6 +26,7 @@ import type {
   GoalCriterion,
   OpenQuestion,
   PitCall,
+  PlanVersion,
   PortfolioStrategy,
   Goal,
   ProjectForecast,
@@ -34,7 +35,9 @@ import type {
   RecurringState,
   ReroutePart,
   RescheduleMove,
+  RowSnapshot,
   StrategyMove,
+  StrategyMoveKind,
   SuggestedTask,
   Task,
   TaskDependency,
@@ -156,6 +159,8 @@ interface MemDB {
   valueModel: ValueModel | null;
   /** The cached portfolio strategy (Phase 4), or null until first generated. */
   portfolioStrategy: PortfolioStrategy | null;
+  /** Applied strategy bundles, newest-first — the plan version history (§1.3). */
+  planVersions: PlanVersion[];
   seeded: boolean;
 }
 
@@ -185,6 +190,7 @@ function memDB(): MemDB {
       autoStrategy: false,
       valueModel: null,
       portfolioStrategy: null,
+      planVersions: [],
       seeded: false,
     };
   }
@@ -1223,6 +1229,404 @@ export async function setCachedStrategy(
   memDB().portfolioStrategy = strategy;
 }
 
+// --- Plan version history (S1 step 3 / vision §1.3) -------------------------
+//
+// Every applied strategy bundle is snapshotted as a `PlanVersion`: the committed
+// moves, the odds the user accepted, and a `restore` (prior row values + inserted
+// row ids). One snapshot per bundle ⇒ undo reverts the whole strategy at once.
+// `commitStrategyBundle` is the single server-side authority for *applying* a move
+// — the card routes every "Apply" through it, so the previewed odds and the
+// committed change share one persist mapping (`applyMoveEffect`).
+
+/** Soft cap on retained versions per user; oldest pruned beyond this (decision #3). */
+const PLAN_VERSION_CAP = 50;
+
+/** Inserted-row ids returned by the recovery applies, so undo can delete them. */
+interface RecoveryInserts {
+  insertedTaskIds: string[];
+  insertedEntryIds: string[];
+}
+
+/** Read the current value of specific fields off live task rows (the pre-image a
+ *  bundle snapshots before it mutates them). */
+async function snapshotTaskFields(
+  ids: string[],
+  fields: (keyof Task)[],
+): Promise<(Partial<Task> & { id: string })[]> {
+  const rows = await getTasksByIds(ids);
+  return rows.map((t) => {
+    const snap: Partial<Task> & { id: string } = { id: t.id };
+    for (const f of fields) (snap as Record<string, unknown>)[f] = t[f];
+    return snap;
+  });
+}
+
+/** Batch-read tasks by id (current values) — for snapshotting + restore reads. */
+async function getTasksByIds(ids: string[]): Promise<Task[]> {
+  if (ids.length === 0) return [];
+  if (isSupabaseConfigured()) {
+    const supabase = await getRequestClient();
+    const { data } = await supabase.from("tasks").select("*").in("id", ids);
+    return (data as Task[]) ?? [];
+  }
+  await ensureSeeded();
+  const set = new Set(ids);
+  return memDB().tasks.filter((t) => set.has(t.id));
+}
+
+/**
+ * The PRIOR row values a single move would mutate — read BEFORE any apply, so the
+ * snapshot is the true pre-image. Only the fields the move's apply touches are
+ * captured (so restore writes back exactly those). Inserted synthetic rows are
+ * captured at apply time (`applyMoveEffect`), not here.
+ */
+async function snapshotMoveRows(
+  move: StrategyMove,
+): Promise<{ tasks: (Partial<Task> & { id: string })[]; goals: (Partial<Goal> & { id: string })[] }> {
+  const p = move.payload;
+  switch (p.kind) {
+    case "defer":
+      return { tasks: await snapshotTaskFields([p.taskId], ["deferred"]), goals: [] };
+    case "triage":
+      return { tasks: await snapshotTaskFields(p.taskIds, ["deferred"]), goals: [] };
+    case "reschedule_task":
+      return { tasks: await snapshotTaskFields([p.taskId], ["due_date"]), goals: [] };
+    case "unblock":
+      return {
+        tasks: await snapshotTaskFields([p.taskId], ["status", "blocked_by"]),
+        goals: [],
+      };
+    case "mark_done":
+      return {
+        tasks: await snapshotTaskFields(
+          [p.taskId],
+          ["status", "completion_confidence", "completed_at"],
+        ),
+        goals: [],
+      };
+    case "reschedule_deadline": {
+      const goal = await getGoal(move.projectId);
+      return { tasks: [], goals: goal ? [{ id: goal.id, deadline: goal.deadline }] : [] };
+    }
+    case "reshape": {
+      // scope_down rewrites a task in place; split defers the monolith. Snapshot
+      // the touched task's pre-image per mod (the inserted steps/debt are captured
+      // at apply time).
+      const tasks: (Partial<Task> & { id: string })[] = [];
+      for (const m of p.mods) {
+        const fields: (keyof Task)[] =
+          m.kind === "scope_down"
+            ? ["title", "description", "estimated_minutes"]
+            : ["deferred"];
+        tasks.push(...(await snapshotTaskFields([m.taskId], fields)));
+      }
+      return { tasks, goals: [] };
+    }
+    case "reroute":
+      return { tasks: await snapshotTaskFields(p.replacedTaskIds, ["deferred"]), goals: [] };
+    case "add_tasks":
+    case "skip_activity":
+    case "hold":
+      return { tasks: [], goals: [] };
+  }
+}
+
+/**
+ * Apply a single move's real effect and return the synthetic-row ids it inserted.
+ * The SINGLE server-side persist mapping (the card's old per-kind switch is gone) —
+ * so the previewed odds and the committed change can't drift. `mark_done` stamps
+ * `inferred` (the strategist inferred it), matching the old action.
+ */
+async function applyMoveEffect(
+  move: StrategyMove,
+): Promise<Partial<Pick<RowSnapshot, "insertedTaskIds" | "insertedEntryIds" | "activityCompletionIds">>> {
+  const p = move.payload;
+  switch (p.kind) {
+    case "defer":
+      await updateTask(p.taskId, { deferred: true });
+      return {};
+    case "reschedule_deadline":
+      await setProjectDeadline(move.projectId, p.deadline);
+      return {};
+    case "reschedule_task":
+      await updateTask(p.taskId, { due_date: p.dueDate });
+      return {};
+    case "unblock":
+      await updateTask(p.taskId, { status: "todo", blocked_by: null });
+      return {};
+    case "mark_done":
+      await updateTask(p.taskId, {
+        status: "done",
+        completion_confidence: "inferred",
+        completed_at: new Date().toISOString(),
+      });
+      return {};
+    case "triage":
+      await Promise.all(p.taskIds.map((id) => updateTask(id, { deferred: true })));
+      return {};
+    case "add_tasks": {
+      const r = await addCorrectiveTasks(move.projectId, p.tasks);
+      return { insertedTaskIds: r.insertedTaskIds, insertedEntryIds: r.insertedEntryIds };
+    }
+    case "reshape": {
+      const r = await applyTaskModifications(move.projectId, p.mods);
+      return { insertedTaskIds: r.insertedTaskIds, insertedEntryIds: r.insertedEntryIds };
+    }
+    case "reroute": {
+      const r = await applyReroute(move.projectId, p.replacedTaskIds, p.tasks);
+      return { insertedTaskIds: r.insertedTaskIds, insertedEntryIds: r.insertedEntryIds };
+    }
+    case "skip_activity":
+      return { activityCompletionIds: await skipActivityForWeek(p.activityId) };
+    case "hold":
+      return {};
+  }
+}
+
+/** Deadline-moving reschedules go last so deferrals free their hours first — the
+ *  single apply-order authority (was duplicated in the card). */
+function strategyApplyOrder(a: StrategyMove, b: StrategyMove): number {
+  const last = (k: StrategyMoveKind) => (k === "reschedule_deadline" ? 1 : 0);
+  return last(a.kind) - last(b.kind);
+}
+
+/**
+ * Apply a strategy bundle and record it as a `PlanVersion`. (1) snapshot the prior
+ * values of every row the moves will touch; (2) apply each move (deadline
+ * reschedules last) capturing inserted ids; (3) persist the version. Returns the
+ * version so the caller can offer an immediate Undo. `meta.odds*` are the previewed
+ * numbers the user accepted (from the client re-solve) — informational, for the
+ * history view.
+ */
+export async function commitStrategyBundle(
+  moves: StrategyMove[],
+  meta: { oddsBefore: number; oddsAfter: number; reason: string },
+): Promise<PlanVersion> {
+  const ordered = [...moves].sort(strategyApplyOrder);
+
+  // 1. Snapshot prior values BEFORE applying (dedup by id; keep the first read so a
+  //    later move in the same bundle can't overwrite an earlier move's pre-image).
+  const taskSnap = new Map<string, Partial<Task> & { id: string }>();
+  const goalSnap = new Map<string, Partial<Goal> & { id: string }>();
+  for (const move of ordered) {
+    const { tasks, goals } = await snapshotMoveRows(move);
+    for (const t of tasks) if (!taskSnap.has(t.id)) taskSnap.set(t.id, t);
+    for (const goal of goals) if (!goalSnap.has(goal.id)) goalSnap.set(goal.id, goal);
+  }
+
+  // 2. Apply, accumulating the synthetic rows inserted (so undo can delete them).
+  const insertedTaskIds: string[] = [];
+  const insertedEntryIds: string[] = [];
+  const activityCompletionIds: string[] = [];
+  for (const move of ordered) {
+    const eff = await applyMoveEffect(move);
+    if (eff.insertedTaskIds) insertedTaskIds.push(...eff.insertedTaskIds);
+    if (eff.insertedEntryIds) insertedEntryIds.push(...eff.insertedEntryIds);
+    if (eff.activityCompletionIds) activityCompletionIds.push(...eff.activityCompletionIds);
+  }
+
+  const version: PlanVersion = {
+    id: crypto.randomUUID(),
+    createdAt: new Date().toISOString(),
+    reason: meta.reason,
+    moves: ordered,
+    oddsBefore: meta.oddsBefore,
+    oddsAfter: meta.oddsAfter,
+    restore: {
+      tasks: [...taskSnap.values()],
+      goals: [...goalSnap.values()],
+      insertedTaskIds,
+      insertedEntryIds,
+      activityCompletionIds,
+    },
+    revertedAt: null,
+  };
+
+  await insertPlanVersion(version);
+  return version;
+}
+
+/** A plan_versions row (snake_case) ↔ the camelCase `PlanVersion` domain type. */
+interface PlanVersionRow {
+  id: string;
+  created_at: string;
+  reverted_at: string | null;
+  reason: string;
+  odds_before: number;
+  odds_after: number;
+  moves: StrategyMove[];
+  restore: RowSnapshot;
+}
+
+function rowToPlanVersion(r: PlanVersionRow): PlanVersion {
+  return {
+    id: r.id,
+    createdAt: r.created_at,
+    reason: r.reason,
+    moves: r.moves,
+    oddsBefore: r.odds_before,
+    oddsAfter: r.odds_after,
+    restore: r.restore,
+    revertedAt: r.reverted_at,
+  };
+}
+
+async function insertPlanVersion(version: PlanVersion): Promise<void> {
+  if (isSupabaseConfigured()) {
+    const supabase = await getRequestClient();
+    const user_id = await currentUserId(supabase);
+    const { error } = await supabase.from("plan_versions").insert({
+      id: version.id,
+      user_id,
+      created_at: version.createdAt,
+      reverted_at: version.revertedAt,
+      reason: version.reason,
+      odds_before: version.oddsBefore,
+      odds_after: version.oddsAfter,
+      moves: version.moves,
+      restore: version.restore,
+    });
+    if (error)
+      throw new Error(`Supabase plan_versions insert failed: ${error.message}`);
+    await prunePlanVersions(supabase);
+    return;
+  }
+  await ensureSeeded();
+  const db = memDB();
+  db.planVersions.unshift(version);
+  if (db.planVersions.length > PLAN_VERSION_CAP)
+    db.planVersions.length = PLAN_VERSION_CAP;
+}
+
+/** Delete versions older than the most recent `PLAN_VERSION_CAP` (soft cap). */
+async function prunePlanVersions(supabase: RequestClient): Promise<void> {
+  const { data } = await supabase
+    .from("plan_versions")
+    .select("id")
+    .order("created_at", { ascending: false })
+    .range(PLAN_VERSION_CAP, PLAN_VERSION_CAP + 1000);
+  const stale = (data as { id: string }[] | null) ?? [];
+  if (stale.length)
+    await supabase
+      .from("plan_versions")
+      .delete()
+      .in(
+        "id",
+        stale.map((r) => r.id),
+      );
+}
+
+/** The plan version history, newest-first (capped at `PLAN_VERSION_CAP`). */
+export async function listPlanVersions(): Promise<PlanVersion[]> {
+  if (isSupabaseConfigured()) {
+    const supabase = await getRequestClient();
+    const { data } = await supabase
+      .from("plan_versions")
+      .select("*")
+      .order("created_at", { ascending: false })
+      .limit(PLAN_VERSION_CAP);
+    return ((data as PlanVersionRow[]) ?? []).map(rowToPlanVersion);
+  }
+  await ensureSeeded();
+  return memDB().planVersions;
+}
+
+async function getPlanVersion(id: string): Promise<PlanVersion | null> {
+  if (isSupabaseConfigured()) {
+    const supabase = await getRequestClient();
+    const { data } = await supabase
+      .from("plan_versions")
+      .select("*")
+      .eq("id", id)
+      .maybeSingle();
+    return data ? rowToPlanVersion(data as PlanVersionRow) : null;
+  }
+  await ensureSeeded();
+  return memDB().planVersions.find((v) => v.id === id) ?? null;
+}
+
+async function markPlanVersionReverted(id: string): Promise<void> {
+  const revertedAt = new Date().toISOString();
+  if (isSupabaseConfigured()) {
+    const supabase = await getRequestClient();
+    await supabase
+      .from("plan_versions")
+      .update({ reverted_at: revertedAt })
+      .eq("id", id);
+    return;
+  }
+  await ensureSeeded();
+  const v = memDB().planVersions.find((x) => x.id === id);
+  if (v) v.revertedAt = revertedAt;
+}
+
+/**
+ * Revert one applied bundle whole (vision §8.2): write the snapshotted prior values
+ * back, delete the synthetic rows the bundle inserted, and mark the version
+ * reverted (it stays in history, struck through). No-op if already reverted.
+ */
+export async function undoPlanVersion(id: string): Promise<void> {
+  const version = await getPlanVersion(id);
+  if (!version || version.revertedAt) return;
+  const { restore } = version;
+
+  // Restore prior task values (exactly the snapshotted fields).
+  for (const t of restore.tasks) {
+    const { id: taskId, ...patch } = t;
+    if (Object.keys(patch).length) await updateTask(taskId, patch);
+  }
+  // Restore prior goal deadlines.
+  for (const goal of restore.goals) {
+    if ("deadline" in goal) await setProjectDeadline(goal.id, goal.deadline ?? null);
+  }
+  // Delete the synthetic rows the bundle inserted (tasks, their recovery entries,
+  // and any skip rows).
+  await deleteTasks(restore.insertedTaskIds);
+  await deleteEntries(restore.insertedEntryIds);
+  await deleteActivityCompletions(restore.activityCompletionIds);
+
+  await markPlanVersionReverted(id);
+}
+
+async function deleteTasks(ids: string[]): Promise<void> {
+  if (ids.length === 0) return;
+  if (isSupabaseConfigured()) {
+    const supabase = await getRequestClient();
+    await supabase.from("tasks").delete().in("id", ids);
+    return;
+  }
+  await ensureSeeded();
+  const set = new Set(ids);
+  const db = memDB();
+  db.tasks = db.tasks.filter((t) => !set.has(t.id));
+}
+
+async function deleteEntries(ids: string[]): Promise<void> {
+  if (ids.length === 0) return;
+  if (isSupabaseConfigured()) {
+    const supabase = await getRequestClient();
+    await supabase.from("entries").delete().in("id", ids);
+    return;
+  }
+  await ensureSeeded();
+  const set = new Set(ids);
+  const db = memDB();
+  db.entries = db.entries.filter((e) => !set.has(e.id));
+}
+
+async function deleteActivityCompletions(ids: string[]): Promise<void> {
+  if (ids.length === 0) return;
+  if (isSupabaseConfigured()) {
+    const supabase = await getRequestClient();
+    await supabase.from("activity_completions").delete().in("id", ids);
+    return;
+  }
+  await ensureSeeded();
+  const set = new Set(ids);
+  const db = memDB();
+  db.activityCompletions = db.activityCompletions.filter((c) => !set.has(c.id));
+}
+
 /** Override the template for one specific date. */
 export async function setOverride(date: string, hours: number): Promise<void> {
   if (isSupabaseConfigured()) {
@@ -1552,15 +1956,15 @@ export async function getRecurringState(): Promise<RecurringState[]> {
  * instances the forecast probe freed, so the applied effect matches the shown
  * odds. Reversible by logging real sessions (or unskipping the dates).
  */
-export async function skipActivityForWeek(activityId: string): Promise<void> {
+export async function skipActivityForWeek(activityId: string): Promise<string[]> {
   const [activities, completions] = await Promise.all([
     listRecurringActivities(),
     listActivityCompletions(),
   ]);
   const activity = activities.find((a) => a.id === activityId);
-  if (!activity) return;
+  if (!activity) return [];
   const dates = currentWeekOwedDates(activity, completions, todayISO());
-  if (dates.length === 0) return;
+  if (dates.length === 0) return [];
   const rows: ActivityCompletion[] = dates.map((date) => ({
     id: crypto.randomUUID(),
     activity_id: activityId,
@@ -1577,10 +1981,11 @@ export async function skipActivityForWeek(activityId: string): Promise<void> {
       .insert(rows.map((r) => ({ ...r, user_id })));
     if (error)
       throw new Error(`Supabase activity week-skip insert failed: ${error.message}`);
-    return;
+    return rows.map((r) => r.id);
   }
   await ensureSeeded();
   memDB().activityCompletions.push(...rows);
+  return rows.map((r) => r.id);
 }
 
 // --- Errands (one-off tasks under a reserved, deadline-less project) ---------
@@ -2954,10 +3359,11 @@ export function previewProbabilityWithTasks(
 export async function addCorrectiveTasks(
   projectId: string,
   tasks: SuggestedTask[],
-): Promise<void> {
-  if (tasks.length === 0) return;
+): Promise<RecoveryInserts> {
+  const empty: RecoveryInserts = { insertedTaskIds: [], insertedEntryIds: [] };
+  if (tasks.length === 0) return empty;
   const project = await getGoal(projectId);
-  if (!project) return;
+  if (!project) return empty;
 
   const createdAt = new Date().toISOString();
   const taskRows = tasks.map((t, i) =>
@@ -2968,7 +3374,7 @@ export async function addCorrectiveTasks(
       createdAt,
     ),
   );
-  await persistRecoveryEntry(
+  return persistRecoveryEntry(
     project,
     "AI-suggested corrective tasks to fill gaps in the plan.",
     taskRows,
@@ -3009,10 +3415,11 @@ export function previewProbabilityWithModifications(
 export async function applyTaskModifications(
   projectId: string,
   mods: TaskModification[],
-): Promise<void> {
-  if (mods.length === 0) return;
+): Promise<RecoveryInserts> {
+  const empty: RecoveryInserts = { insertedTaskIds: [], insertedEntryIds: [] };
+  if (mods.length === 0) return empty;
   const project = await getGoal(projectId);
-  if (!project) return;
+  if (!project) return empty;
 
   const createdAt = new Date().toISOString();
   const newRows: Task[] = [];
@@ -3064,7 +3471,7 @@ export async function applyTaskModifications(
     }
   }
 
-  await persistRecoveryEntry(
+  return persistRecoveryEntry(
     project,
     "Tasks reshaped to fit the budget.",
     newRows,
@@ -3100,10 +3507,11 @@ export async function applyReroute(
   replacedTaskIds: string[],
   tasks: ReroutePart[],
   degradedCriteria: DegradedCriterion[] = [],
-): Promise<void> {
-  if (tasks.length === 0) return;
+): Promise<RecoveryInserts> {
+  const empty: RecoveryInserts = { insertedTaskIds: [], insertedEntryIds: [] };
+  if (tasks.length === 0) return empty;
   const project = await getGoal(projectId);
-  if (!project) return;
+  if (!project) return empty;
 
   const createdAt = new Date().toISOString();
 
@@ -3122,7 +3530,7 @@ export async function applyReroute(
       createdAt,
     ),
   );
-  await persistRecoveryEntry(
+  const inserts = await persistRecoveryEntry(
     project,
     "Plan re-routed to a lighter approach.",
     taskRows,
@@ -3136,6 +3544,7 @@ export async function applyReroute(
   for (const d of degradedCriteria) {
     await setGoalCriterionDegraded(d.criterionId, d.note);
   }
+  return inserts;
 }
 
 // --- Recovery-entry persistence (shared by Generate + Modify) ---------------
@@ -3267,8 +3676,9 @@ async function persistRecoveryEntry(
   summary: string,
   taskRows: Task[],
   createdAt: string,
-): Promise<void> {
-  if (taskRows.length === 0) return;
+): Promise<RecoveryInserts> {
+  if (taskRows.length === 0)
+    return { insertedTaskIds: [], insertedEntryIds: [] };
   const entryId = crypto.randomUUID();
   for (const row of taskRows) {
     row.entry_id = entryId;
@@ -3308,4 +3718,8 @@ async function persistRecoveryEntry(
     db.entries.unshift(entry);
     db.tasks.push(...taskRows);
   }
+  return {
+    insertedTaskIds: taskRows.map((r) => r.id),
+    insertedEntryIds: [entryId],
+  };
 }
