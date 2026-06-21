@@ -15,6 +15,7 @@ import {
   Shield,
   Sparkles,
   TrafficCone,
+  Undo2,
 } from "lucide-react";
 import type {
   PortfolioStrategy,
@@ -27,17 +28,9 @@ import {
   type ResolveInput,
 } from "@/lib/portfolio-state";
 import {
-  acceptRecoveryTasksAction,
-  applyModificationsAction,
-  applyRerouteAction,
-  applyTriageAction,
-  deferTaskAction,
+  commitStrategyBundleAction,
   refreshPortfolioStrategyAction,
-  rescheduleTaskAction,
-  setProjectDeadlineAction,
-  skipActivityForWeekAction,
-  unblockTaskAction,
-  updateTaskStatusAction,
+  undoPlanVersionAction,
 } from "@/lib/actions";
 import { band, formatPct } from "@/components/forecast/forecast-meter";
 import { Card } from "@/components/ui/card";
@@ -72,45 +65,6 @@ const MOVE_ICON: Record<StrategyMoveKind, typeof ArrowRight> = {
   skip_activity: Repeat,
   hold: Shield,
 };
-
-/** Run a move through its mapped apply action. The probability never moves here. */
-function applyMove(payload: StrategyMovePayload, projectId: string): Promise<unknown> {
-  switch (payload.kind) {
-    case "defer":
-      return deferTaskAction(payload.taskId, true);
-    case "reschedule_deadline":
-      return setProjectDeadlineAction(projectId, payload.deadline);
-    case "reschedule_task":
-      return rescheduleTaskAction(payload.taskId, payload.dueDate);
-    case "unblock":
-      return unblockTaskAction(payload.taskId);
-    case "mark_done":
-      // The strategist inferred this is done — tag it as such (not user-verified).
-      return updateTaskStatusAction(payload.taskId, "done", "inferred");
-    case "triage":
-      return applyTriageAction(payload.taskIds);
-    case "add_tasks":
-      return acceptRecoveryTasksAction(projectId, payload.tasks);
-    case "reshape":
-      return applyModificationsAction(projectId, payload.mods);
-    case "reroute":
-      return applyRerouteAction(
-        projectId,
-        payload.replacedTaskIds,
-        payload.tasks,
-      );
-    case "skip_activity":
-      return skipActivityForWeekAction(payload.activityId);
-    case "hold":
-      return Promise.resolve();
-  }
-}
-
-/** Deadline-moving reschedules go last so deferrals free their hours first. */
-function applyOrder(a: StrategyMove, b: StrategyMove): number {
-  const last = (k: StrategyMoveKind) => (k === "reschedule_deadline" ? 1 : 0);
-  return last(a.kind) - last(b.kind);
-}
 
 /** A strategist proposal (a reroute/add part, or a split step) → the shared row
  *  shape. Proposals carry the 1-5 factor ratings but no computed priority score,
@@ -372,6 +326,13 @@ function MoveTier({
   const [busy, setBusy] = useState<number | "all" | null>(null);
   const [pending, startTransition] = useTransition();
   const [open, setOpen] = useState(defaultOpen);
+  // The most recent committed bundle — backs the inline Undo (vision §8.2). `indices`
+  // are the rows it applied, so undo can bring exactly those back into the list.
+  const [lastVersion, setLastVersion] = useState<{
+    id: string;
+    indices: number[];
+  } | null>(null);
+  const [undoing, setUndoing] = useState(false);
 
   const canResolve = Boolean(resolveInput) && moves.length > 0;
 
@@ -402,33 +363,81 @@ function MoveTier({
     });
   }
 
-  function applyOne(index: number, move: StrategyMove) {
-    setBusy(index);
+  // The before→after odds recorded on the version, for the history view. With the
+  // re-solve inputs these are exact (base vs the committed subset's combined); a
+  // pre-S1 / instant-draft cache can't re-solve subsets, so it records the baked
+  // combined as a coarse placeholder.
+  function oddsFor(committed: StrategyMove[]): { before: number; after: number } {
+    if (resolveInput) {
+      return {
+        before: resolveSubsetCumulative(resolveInput, []).combined,
+        after: resolveSubsetCumulative(resolveInput, committed).combined,
+      };
+    }
+    return { before: combinedProbability, after: combinedProbability };
+  }
+
+  // The single commit path: apply a set of moves as ONE snapshotted bundle, then
+  // remember it for Undo. Both the per-row Apply and "Apply N" funnel through here,
+  // so every change is a recorded, reversible PlanVersion (§1.3). The server orders
+  // the moves (deadline reschedules last) — the card passes recommended order.
+  function commit(
+    entries: { move: StrategyMove; index: number }[],
+    busyKey: number | "all",
+  ) {
+    if (entries.length === 0) return;
+    const movesToApply = entries.map((e) => e.move);
+    const indices = entries.map((e) => e.index);
+    const { before, after } = oddsFor(movesToApply);
+    const reason =
+      movesToApply.length === 1
+        ? movesToApply[0].rationale
+        : `Applied ${movesToApply.length} moves`;
+    setBusy(busyKey);
     startTransition(async () => {
-      await applyMove(move.payload, move.projectId);
-      setApplied((s) => new Set(s).add(index));
+      const version = await commitStrategyBundleAction(
+        movesToApply,
+        before,
+        after,
+        reason,
+      );
+      setApplied((s) => {
+        const next = new Set(s);
+        for (const i of indices) next.add(i);
+        return next;
+      });
+      setLastVersion({ id: version.id, indices });
       setBusy(null);
     });
   }
 
+  function applyOne(index: number, move: StrategyMove) {
+    commit([{ move, index }], index);
+  }
+
   function applyAll() {
-    setBusy("all");
+    // Recompute from current state: included & not-yet-applied, in recommended order.
+    const entries = moves
+      .map((move, index) => ({ move, index }))
+      .filter(({ index }) => !applied.has(index) && included.has(index));
+    commit(entries, "all");
+  }
+
+  // Revert the whole last bundle (§8.2): one snapshot restore, then bring its rows
+  // back into the list so they can be reconsidered.
+  function undo() {
+    if (!lastVersion) return;
+    const { id, indices } = lastVersion;
+    setUndoing(true);
     startTransition(async () => {
-      const ordered = moves
-        .map((move, index) => ({ move, index }))
-        .filter(({ index }) => !applied.has(index) && included.has(index))
-        .sort((a, b) => applyOrder(a.move, b.move));
-      // Sequential — a deadline reschedule must see the deferrals' freed hours.
-      for (const { move } of ordered) {
-        await applyMove(move.payload, move.projectId);
-      }
-      // Only the included moves were committed; any excluded ones stay listed.
+      await undoPlanVersionAction(id);
       setApplied((s) => {
         const next = new Set(s);
-        for (const { index } of ordered) next.add(index);
+        for (const i of indices) next.delete(i);
         return next;
       });
-      setBusy(null);
+      setLastVersion(null);
+      setUndoing(false);
     });
   }
 
@@ -503,6 +512,25 @@ function MoveTier({
   return (
     <div className="mt-3.5">
       {header}
+      {open && lastVersion && (
+        <div className="mt-1.5 flex items-center justify-between gap-2 rounded-md border border-[var(--color-border)] bg-[var(--color-surface-raised)] px-2.5 py-1.5">
+          <span className="flex items-center gap-1.5 text-[11px] text-[var(--color-fg-muted)]">
+            <Check className="size-3.5 shrink-0 text-[var(--color-status-done)]" />
+            Applied {lastVersion.indices.length} move
+            {lastVersion.indices.length > 1 ? "s" : ""}.
+          </span>
+          <Button
+            variant="ghost"
+            size="sm"
+            loading={undoing}
+            disabled={pending}
+            onClick={undo}
+          >
+            <Undo2 className="size-3.5" />
+            Undo
+          </Button>
+        </div>
+      )}
       {open && (
         <div className="mt-1.5 space-y-1.5">
           {remaining.length === 0 ? (

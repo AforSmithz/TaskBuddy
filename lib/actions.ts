@@ -7,6 +7,7 @@ import {
   addGoalCriterion,
   applyReroute,
   applyTaskModifications,
+  commitStrategyBundle,
   confirmDraft,
   createDraft,
   createErrandTask,
@@ -31,6 +32,7 @@ import {
   setValueModel,
   skipActivity,
   skipActivityForWeek,
+  undoPlanVersion,
   unskipActivity,
   updateRecurringActivity,
   updateTask,
@@ -54,10 +56,12 @@ import type {
   GoalKind,
   ModificationSuggestion,
   PitCall,
+  PlanVersion,
   PortfolioStrategy,
   RecoverySuggestion,
   ReroutePart,
   RerouteSuggestion,
+  StrategyMove,
   SuggestedTask,
   Task,
   TaskModification,
@@ -510,6 +514,38 @@ export async function applyRerouteAction(
 ): Promise<void> {
   await requireUser();
   await applyReroute(projectId, replacedTaskIds, tasks, degradedCriteria);
+  revalidateAll();
+}
+
+// --- Strategy bundles: snapshot-on-commit + undo (S1 step 3 / §1.3) ----------
+
+/**
+ * Apply a strategy bundle (one move or a whole tier) as a single snapshotted unit
+ * — the ONE path the card's "Apply" buttons take. Records a `PlanVersion` so the
+ * change is undoable whole (vision §1.3/§8.2) and returns it, so the card can offer
+ * an immediate Undo. `oddsBefore`/`oddsAfter` are the previewed numbers the user
+ * accepted (the client re-solve), surfaced later in the history view.
+ */
+export async function commitStrategyBundleAction(
+  moves: StrategyMove[],
+  oddsBefore: number,
+  oddsAfter: number,
+  reason: string,
+): Promise<PlanVersion> {
+  await requireUser();
+  const version = await commitStrategyBundle(moves, {
+    oddsBefore,
+    oddsAfter,
+    reason,
+  });
+  revalidateAll();
+  return version;
+}
+
+/** Revert one applied bundle whole (vision §8.2): restore its snapshot, then refresh. */
+export async function undoPlanVersionAction(id: string): Promise<void> {
+  await requireUser();
+  await undoPlanVersion(id);
   revalidateAll();
 }
 
