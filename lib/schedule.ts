@@ -187,11 +187,22 @@ export interface DayCapacity {
  * is the same per-day math the forecast's `deployableMinutes` sums — exposed here
  * as a per-day series the packer and the global Monte Carlo both walk.
  */
-export function dayCapacities(
+/** Signed, UNFLOORED per-day slack in hours: availability − all consumed (incl. the
+ *  recurring drain folded into `commitments`). `dayCapacities` is just its non-negative
+ *  floor; the strategy review screen ships the signed value so a multi-skip re-solve can
+ *  add freed drain back and apply the floor ONCE — composing any subset of skips exactly,
+ *  even on a day whose drain already exceeds availability (where per-skip floored vectors
+ *  would under-count). */
+export interface DaySlack {
+  iso: string;
+  slackHours: number;
+}
+
+export function daySlackHours(
   budget: ScheduleBudget,
   anchorDate: string,
   horizonDays = HORIZON_DAYS,
-): DayCapacity[] {
+): DaySlack[] {
   const template = new Map<number, number>();
   for (const a of budget.availability) template.set(a.weekday, a.hours);
   const overrideByDate = new Map<string, number>();
@@ -205,19 +216,27 @@ export function dayCapacities(
   }
 
   const start = parseISODate(anchorDate);
-  const out: DayCapacity[] = [];
+  const out: DaySlack[] = [];
   for (let offset = 0; offset <= horizonDays; offset++) {
     const d = new Date(start);
     d.setUTCDate(d.getUTCDate() + offset);
     const iso = toISODate(d);
     const base = overrideByDate.get(iso) ?? template.get(d.getUTCDay()) ?? 0;
     const consumed = consumedByDate.get(iso) ?? 0;
-    out.push({
-      iso,
-      capacityMinutes: Math.round(Math.max(0, base - consumed) * MINUTES_PER_HOUR),
-    });
+    out.push({ iso, slackHours: base - consumed });
   }
   return out;
+}
+
+export function dayCapacities(
+  budget: ScheduleBudget,
+  anchorDate: string,
+  horizonDays = HORIZON_DAYS,
+): DayCapacity[] {
+  return daySlackHours(budget, anchorDate, horizonDays).map((s) => ({
+    iso: s.iso,
+    capacityMinutes: Math.round(Math.max(0, s.slackHours) * MINUTES_PER_HOUR),
+  }));
 }
 
 /** Index of the first day at or after `from` that has any capacity. */
