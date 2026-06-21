@@ -1,9 +1,10 @@
-import { Compass, AlertTriangle, ShieldCheck } from "lucide-react";
+import { Compass, AlertTriangle, History, ShieldCheck } from "lucide-react";
 import {
   forecastDashboard,
   getAutoStrategy,
   getCachedStrategy,
   listAllTasks,
+  listPlanVersions,
 } from "@/lib/store";
 import {
   assessStaleness,
@@ -14,16 +15,19 @@ import { PageHeader } from "@/components/ui/page-header";
 import { Card, CardHeader } from "@/components/ui/card";
 import { Reveal } from "@/components/motion/reveal";
 import { StrategyCard } from "@/components/strategy/strategy-card";
+import { PlanHistory } from "@/components/strategy/plan-history";
 import { ProjectDisclosure } from "@/components/strategy/project-disclosure";
 import { PitWallCallout } from "@/components/forecast/pit-wall-callout";
 
 export default async function StrategyPage() {
-  const [dashboard, autoStrategy, cached, tasks] = await Promise.all([
-    forecastDashboard(),
-    getAutoStrategy(),
-    getCachedStrategy(),
-    listAllTasks(),
-  ]);
+  const [dashboard, autoStrategy, cached, tasks, planVersions] =
+    await Promise.all([
+      forecastDashboard(),
+      getAutoStrategy(),
+      getCachedStrategy(),
+      listAllTasks(),
+      listPlanVersions(),
+    ]);
   const { forecasts, recoveries, pitWall, globalPlan } = dashboard;
   const tasksById = new Map(tasks.map((t) => [t.id, t]));
   // taskId → project name (every open task is in the global order) so the card can
@@ -99,6 +103,17 @@ export default async function StrategyPage() {
           )}
         </Card>
       </Reveal>
+
+      {/* Plan history — every applied bundle, newest first, with whole-bundle
+          undo (vision §1.3). Shown only once there's something to record. */}
+      {planVersions.length > 0 && (
+        <Reveal delay={0.2} className="mt-7">
+          <Card>
+            <CardHeader title="Plan history" icon={<History className="size-4" />} />
+            <PlanHistory versions={planVersions} />
+          </Card>
+        </Reveal>
+      )}
     </main>
   );
 }
