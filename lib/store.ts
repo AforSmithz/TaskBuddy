@@ -53,6 +53,7 @@ import { formatMinutes } from "./format";
 import { computePriority } from "./priority";
 import {
   dayCapacities,
+  daySlackHours,
   generateSchedule,
   orderSchedulableTasks,
   type DependencyEdge,
@@ -64,7 +65,6 @@ import {
   earliestAchievableDeadline,
   forecast,
   globalForecast,
-  globalForecastJoint,
   recoveryMoves,
   type CandidateTask,
 } from "./forecast";
@@ -84,7 +84,6 @@ import {
   sampleActivityCompletions,
 } from "./sample-data";
 import {
-  activityDrainCommitments,
   currentWeekOwedDates,
   recurringAllocTasksForToday,
   recurringStateFor,
@@ -96,6 +95,15 @@ import {
   DEFAULT_VALUE_MODEL,
   type ValueModel,
 } from "./value-model";
+import {
+  forecastOptions,
+  drainAsCommitments,
+  syntheticAllocTask,
+  jointOddsWithMoves,
+  cumulativeJointOdds,
+  type AllocContext,
+  type ResolveInput,
+} from "./portfolio-state";
 import { getRequestClient } from "./supabase";
 
 // Central data layer.
@@ -1270,22 +1278,6 @@ interface TimeBudget {
  * display/order-only and must never be re-counted against capacity.
  */
 /** Recurring drain as synthetic `Commitment` rows (date + hours; the rest is cosmetic). */
-function drainAsCommitments(
-  activities: RecurringActivity[],
-  completions: ActivityCompletion[],
-  today: string,
-): Commitment[] {
-  return activityDrainCommitments(activities, completions, today).map(
-    (d): Commitment => ({
-      id: `recurring-drain:${d.date}`,
-      date: d.date,
-      hours: d.hours,
-      label: "Routines & goals",
-      created_at: "",
-    }),
-  );
-}
-
 async function appendActivityDrain(budget: TimeBudget): Promise<TimeBudget> {
   const [activities, completions] = await Promise.all([
     listRecurringActivities(),
@@ -1945,10 +1937,6 @@ async function gatherForecast(): Promise<ForecastGather> {
 }
 
 /** Forecast options carrying the learned estimation bias (sigma + meanLog). */
-function forecastOptions(model: EstimationModel) {
-  return { sigma: model.sigma, meanLog: model.meanLog };
-}
-
 /** Every open (not done, not deferred) task across all projects, as the allocator sees it. */
 function buildAllocTasks(g: ForecastGather): AllocTask[] {
   const out: AllocTask[] = [];
@@ -1975,19 +1963,6 @@ function buildAllocTasks(g: ForecastGather): AllocTask[] {
   // Learning goals' unattained skills compete for the same hours as project tasks.
   for (const work of g.skillWorkByProject.values()) out.push(...work.tasks);
   return out;
-}
-
-/**
- * The shared inputs for one global allocation pass: the alloc tasks, dependency
- * edges, and the per-day capacities under a commitment set. Built once so the
- * odds, the conflict detection, and the triage probes all reason over the same
- * contention picture.
- */
-interface AllocContext {
-  tasks: AllocTask[];
-  deps: DependencyEdge[];
-  budget: { availability: Availability[]; overrides: AvailabilityOverride[]; commitments: Pick<Commitment, "date" | "hours">[] };
-  capacities: ReturnType<typeof dayCapacities>;
 }
 
 function allocContext(
@@ -2051,259 +2026,6 @@ function globalOdds(
   return jointOdds(g, allocContext(g, commitments));
 }
 
-// --- Joint scoring of a move combination (Phase 5) --------------------------
-//
-// The portfolio strategy needs to know the TRUE joint odds of a *set* of moves,
-// not the solo per-project odds each move carries. These helpers apply any
-// ordered move combination to a scratch copy of the alloc state and re-run the
-// contention-aware `globalForecastJoint` over it — so the moves interact through
-// the shared hour pool / real cascade, exactly as they will once applied. Pure:
-// nothing here touches the DB or the base gather.
-
-/** The mutable surface a move transforms: the alloc tasks, dep edges, deadlines,
- *  plus synthetic skip rows a `skip_activity` move adds (which re-drain capacity). */
-interface AllocState {
-  tasks: AllocTask[];
-  deps: DependencyEdge[];
-  deadlineByProject: Map<string, string | null>;
-  /** Skip completions injected by skip-moves — they reduce the recurring drain. */
-  skipCompletions: ActivityCompletion[];
-}
-
-/** A synthetic alloc task for injected work, scored from its 1-5 factors so
- *  `buildGlobalPlan` orders it plausibly among the real tasks. */
-function syntheticAllocTask(
-  id: string,
-  projectId: string,
-  projectName: string,
-  title: string,
-  estimatedMinutes: number,
-  f: FactorScores,
-): AllocTask {
-  return {
-    id,
-    title,
-    projectId,
-    projectName,
-    estimatedMinutes,
-    status: "todo",
-    priorityScore: computePriority(f).score,
-    urgency: f.urgency,
-    impact: f.impact,
-    risk: f.risk,
-  };
-}
-
-/**
- * Pure transform of the scratch alloc state for ONE move. Returns a NEW
- * `AllocState` (never mutates the base ctx/gather), so prefixes can be scored
- * independently. Each move maps to the same alloc-level effect its real apply
- * action has on the forecast:
- *  - defer / mark_done  → drop the task (the budget it occupied is freed).
- *  - triage             → drop every task in the batch.
- *  - unblock            → drop dep edges into the task (frees its ordering).
- *  - reschedule_deadline→ move the project's deadline (what `globalForecast` gates on).
- *  - reschedule_task    → near-noop: the project deadline gates the joint odds,
- *                         not a task's own due date (alloc tasks carry no due date).
- *  - reshape            → scope_down shrinks the task's estimate in place; split
- *                         drops the monolith and injects the lighter steps.
- *  - add_tasks          → inject the new tasks for the move's project.
- *  - reroute            → drop the replaced tasks, inject the alternative plan.
- *  - skip_activity      → add skip rows for this activity's CURRENT-week owed
- *                         instances, freeing its drain from capacity (matches the
- *                         apply, which persists exactly those skips).
- *  - hold               → no-op.
- */
-function applyMoveToAlloc(
-  g: ForecastGather,
-  state: AllocState,
-  move: StrategyMove,
-): AllocState {
-  const p = move.payload;
-  const projectName =
-    move.projectName ||
-    state.tasks.find((t) => t.projectId === move.projectId)?.projectName ||
-    "";
-
-  switch (p.kind) {
-    case "defer":
-    case "mark_done":
-      return { ...state, tasks: state.tasks.filter((t) => t.id !== p.taskId) };
-
-    case "triage": {
-      const drop = new Set(p.taskIds);
-      return { ...state, tasks: state.tasks.filter((t) => !drop.has(t.id)) };
-    }
-
-    case "unblock":
-      return { ...state, deps: state.deps.filter((d) => d.task_id !== p.taskId) };
-
-    case "reschedule_deadline": {
-      const deadlineByProject = new Map(state.deadlineByProject);
-      deadlineByProject.set(move.projectId, p.deadline);
-      return { ...state, deadlineByProject };
-    }
-
-    case "reschedule_task":
-      // Near-noop on the joint odds (the project deadline is the gate).
-      return state;
-
-    case "skip_activity": {
-      const activity = g.activities.find((a) => a.id === p.activityId);
-      if (!activity) return state;
-      const dates = currentWeekOwedDates(activity, g.completions, g.today);
-      if (dates.length === 0) return state;
-      const skips: ActivityCompletion[] = dates.map((date) => ({
-        id: "",
-        activity_id: activity.id,
-        date,
-        minutes: 0,
-        skipped: true,
-        created_at: "",
-      }));
-      return { ...state, skipCompletions: [...state.skipCompletions, ...skips] };
-    }
-
-    case "reshape": {
-      let tasks = state.tasks;
-      for (const mod of p.mods) {
-        if (mod.kind === "scope_down") {
-          const lighter = mod.replacements[0];
-          if (!lighter) continue;
-          tasks = tasks.map((t) =>
-            t.id === mod.taskId
-              ? { ...t, estimatedMinutes: lighter.estimated_minutes }
-              : t,
-          );
-        } else {
-          // split: the monolith leaves the plan, its steps take its place.
-          tasks = tasks.filter((t) => t.id !== mod.taskId);
-          tasks = [
-            ...tasks,
-            ...mod.replacements.map((part, i) =>
-              syntheticAllocTask(
-                `synth:reshape:${mod.taskId}:${i}`,
-                move.projectId,
-                projectName,
-                part.title,
-                part.estimated_minutes,
-                part,
-              ),
-            ),
-          ];
-        }
-      }
-      return { ...state, tasks };
-    }
-
-    case "add_tasks": {
-      const injected = p.tasks.map((t, i) =>
-        syntheticAllocTask(
-          `synth:add:${move.projectId}:${i}`,
-          move.projectId,
-          projectName,
-          t.title,
-          t.estimated_minutes,
-          t,
-        ),
-      );
-      return { ...state, tasks: [...state.tasks, ...injected] };
-    }
-
-    case "reroute": {
-      const drop = new Set(p.replacedTaskIds);
-      const remaining = state.tasks.filter((t) => !drop.has(t.id));
-      const injected = p.tasks.map((t, i) =>
-        syntheticAllocTask(
-          `synth:reroute:${move.projectId}:${i}`,
-          move.projectId,
-          projectName,
-          t.title,
-          t.estimated_minutes,
-          t,
-        ),
-      );
-      return { ...state, tasks: [...remaining, ...injected] };
-    }
-
-    case "hold":
-      return state;
-  }
-}
-
-/**
- * One joint forecast of the whole portfolio after applying an ordered move set —
- * the contention-correct read of "do all of these." Folds each move into a
- * scratch alloc state, rebuilds the global order, and runs `globalForecastJoint`
- * over the transformed plan. `allOnTime` is the headline conjunction (P(all
- * deadlined projects land)); `byProject` lets the optimizer count who's on track.
- */
-function jointOddsWithMoves(
-  g: ForecastGather,
-  ctx: AllocContext,
-  moves: StrategyMove[],
-  iterations?: number,
-): { byProject: Map<string, number>; allOnTime: number } {
-  let state: AllocState = {
-    tasks: ctx.tasks,
-    deps: ctx.deps,
-    deadlineByProject: g.deadlineByProject,
-    skipCompletions: [],
-  };
-  for (const move of moves) state = applyMoveToAlloc(g, state, move);
-
-  const plan = buildGlobalPlan({
-    tasks: state.tasks,
-    deps: state.deps,
-    deadlineByProject: state.deadlineByProject,
-    budget: ctx.budget,
-    today: g.today,
-  });
-  // A skip-move frees that activity's current-week hours: recompute capacity with
-  // its drain removed (re-drained over completions + the synthetic skips). Reuses
-  // the base capacities when no skip-move is in the set (the common case).
-  const capacities = state.skipCompletions.length
-    ? dayCapacities(
-        {
-          availability: g.availability,
-          overrides: g.overrides,
-          commitments: [
-            ...g.realCommitments,
-            ...drainAsCommitments(
-              g.activities,
-              [...g.completions, ...state.skipCompletions],
-              g.today,
-            ),
-          ],
-        },
-        g.today,
-      )
-    : ctx.capacities;
-  return globalForecastJoint(plan.order, capacities, state.deadlineByProject, g.today, {
-    ...forecastOptions(g.model),
-    ...(iterations !== undefined ? { iterations } : {}),
-  });
-}
-
-/**
- * The cumulative scorer for the display (decision #5): the running portfolio
- * `allOnTime` after each prefix of the ordered moves, climbing to the combined
- * total (== the last entry). Full iterations — these are the numbers the card
- * shows. `combined` falls back to the base joint odds when there are no moves.
- */
-function cumulativeJointOdds(
-  g: ForecastGather,
-  ctx: AllocContext,
-  ordered: StrategyMove[],
-): { afterEach: number[]; combined: number } {
-  const afterEach = ordered.map(
-    (_, i) => jointOddsWithMoves(g, ctx, ordered.slice(0, i + 1)).allOnTime,
-  );
-  const combined = afterEach.length
-    ? afterEach[afterEach.length - 1]
-    : jointOddsWithMoves(g, ctx, []).allOnTime;
-  return { afterEach, combined };
-}
 
 /** Fewer MC iterations for the optimizer's repeated probes (matches the triage
  *  probes' `TRIAGE_PROBE_ITERATIONS` — a relative read is all the greedy needs). */
@@ -2332,6 +2054,54 @@ export interface JointScorer {
   score(moves: StrategyMove[]): { byProject: Map<string, number>; allOnTime: number };
   /** Full-iteration cumulative odds of an ordered move set — for the display. */
   cumulative(ordered: StrategyMove[]): { afterEach: number[]; combined: number };
+  /** The serialized gather slice the review screen re-solves move subsets against
+   *  client-side (attached to the generated `PortfolioStrategy`). */
+  resolveInput: ResolveInput;
+}
+
+/**
+ * Per-day HOURS that skipping each active recurring activity this week frees back to
+ * the shared pool — its current-week owed instances' drain, attributed by day (the
+ * owed-date logic single-sourced via `currentWeekOwedDates`, matching the skip arm of
+ * `applyMoveToAlloc`). The client adds the selected activities' series onto the SIGNED
+ * base slack (`ResolveInput.baseSlackHours`) and floors ONCE, so any subset of skips
+ * composes EXACTLY as the server's `jointOddsWithMoves` recompute does — even on an
+ * over-subscribed day, where the old floored-per-skip deltas under-counted. An activity
+ * with nothing owed this week frees nothing (a zero series).
+ */
+function skipDrainHoursByActivity(
+  g: ForecastGather,
+  ctx: AllocContext,
+): Record<string, number[]> {
+  const out: Record<string, number[]> = {};
+  const isoIndex = new Map(ctx.capacities.map((c, i) => [c.iso, i] as const));
+  for (const a of g.activities) {
+    if (!a.active) continue;
+    const series = ctx.capacities.map(() => 0);
+    for (const date of currentWeekOwedDates(a, g.completions, g.today)) {
+      const idx = isoIndex.get(date);
+      if (idx !== undefined) series[idx] += a.estimated_minutes / 60;
+    }
+    out[a.id] = series;
+  }
+  return out;
+}
+
+/** Serialize the generation-time gather slice into the plain-JSON `ResolveInput`
+ *  the review screen re-solves move subsets against (OVERHAUL S1 / vision §8.2).
+ *  `baseSlackHours` is the SIGNED slack (its floor is `ctx.capacities`) so multi-skip
+ *  re-solves compose exactly; see `skipDrainHoursByActivity`. */
+function buildResolveInput(g: ForecastGather, ctx: AllocContext): ResolveInput {
+  return {
+    tasks: ctx.tasks,
+    deps: ctx.deps,
+    capacities: ctx.capacities,
+    deadlineByProject: [...g.deadlineByProject],
+    today: g.today,
+    model: { meanLog: g.model.meanLog, sigma: g.model.sigma },
+    baseSlackHours: daySlackHours(ctx.budget, g.today).map((s) => s.slackHours),
+    skipDrainHoursByActivity: skipDrainHoursByActivity(g, ctx),
+  };
 }
 
 export async function createJointScorer(): Promise<JointScorer> {
@@ -2365,6 +2135,7 @@ export async function createJointScorer(): Promise<JointScorer> {
     baseAllOnTime: base.allOnTime,
     score: (moves) => jointOddsWithMoves(g, ctx, moves, JOINT_PROBE_ITERATIONS),
     cumulative: (ordered) => cumulativeJointOdds(g, ctx, ordered),
+    resolveInput: buildResolveInput(g, ctx),
   };
 }
 
