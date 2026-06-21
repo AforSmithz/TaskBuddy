@@ -1061,3 +1061,50 @@ export interface PortfolioStrategy {
    */
   resolveInput?: ResolveInput;
 }
+
+/**
+ * Enough to revert one applied strategy bundle (OVERHAUL S1 step 3 / vision §1.3).
+ * Snapshotted *per bundle* (not per move) — it matches the bundle-level undo and
+ * doubles as the version record. `tasks`/`goals` hold the PRIOR values (id + only
+ * the fields the bundle changed) so a restore writes exactly those back; the
+ * inserted-id arrays name the synthetic rows the bundle created, deleted on undo.
+ */
+export interface RowSnapshot {
+  /** Prior values of tasks the bundle mutated — id + only the changed fields. */
+  tasks: (Partial<Task> & { id: string })[];
+  /** Prior values of goals the bundle mutated — id + the prior deadline. */
+  goals: (Partial<Goal> & { id: string })[];
+  /** Synthetic task rows the bundle inserted (add_tasks / reshape-split / scope-down
+   *  debt / reroute) — deleted on undo. */
+  insertedTaskIds: string[];
+  /** Synthetic recovery entries the inserted tasks were filed under — deleted on undo
+   *  so an undone bundle leaves no dangling empty entry. */
+  insertedEntryIds: string[];
+  /** Skip rows (ActivityCompletion) a `skip_activity` move inserted — deleted on undo. */
+  activityCompletionIds: string[];
+}
+
+/**
+ * One recorded adaptation: a strategy bundle the user applied, with the odds they
+ * accepted and a `restore` snapshot that reverts it whole (OVERHAUL S1 step 3 /
+ * vision §1.3). Every "Apply" — a single move or a whole tier — writes one of
+ * these; the history view lists them (reason · before → after · time) and undo
+ * replays `restore`. Capped at the most recent 50 per user (oldest pruned).
+ */
+export interface PlanVersion {
+  id: string;
+  /** ISO timestamp the bundle was applied. */
+  createdAt: string;
+  /** Human reason: the synthesis assessment, or "Applied N moves". */
+  reason: string;
+  /** The committed bundle (the moves as applied, in apply order). */
+  moves: StrategyMove[];
+  /** Portfolio odds before the bundle (base joint odds). */
+  oddsBefore: number;
+  /** The previewed combined odds the user accepted. */
+  oddsAfter: number;
+  /** Prior values + inserted ids — enough to revert the whole bundle. */
+  restore: RowSnapshot;
+  /** Set when undone; null while the bundle stands. */
+  revertedAt: string | null;
+}
