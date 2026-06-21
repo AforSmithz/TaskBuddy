@@ -1,5 +1,9 @@
 // Shared domain types for TaskBuddy.
 
+// Type-only (erased at runtime → no import cycle): the serialized re-solve inputs
+// the review screen ships to the client live beside the consumer in `portfolio-state`.
+import type { ResolveInput } from "./portfolio-state";
+
 export type Confidence = "High" | "Medium" | "Low";
 
 /**
@@ -1047,4 +1051,13 @@ export interface PortfolioStrategy {
     moves: StrategyMove[];
     combinedProbability: number;
   } | null;
+  /**
+   * The serialized generation-time gather slice that lets the review screen
+   * re-solve an arbitrary move subset client-side (OVERHAUL S1 / vision §8.2) —
+   * toggling a move off recomputes the headline + per-move odds with no round-trip,
+   * matching the baked numbers for the same subset. Optional: the synchronous
+   * instant draft and pre-S1 cached strategies carry none (the card then renders
+   * the baked values without live re-solve, upgrading on the next generation).
+   */
+  resolveInput?: ResolveInput;
 }
