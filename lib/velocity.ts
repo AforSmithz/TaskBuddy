@@ -25,8 +25,12 @@
 // With a single segment, x̄_s IS the global mean, so every μ_s = μ₀ ⇒ bit-
 // identical to today. It can only sharpen, never start worse than the prior.
 
-import type { EstimationModel, SegmentModel, Task } from "./types";
+import type { EstimationModel, SegmentModel, Task, TimeWindow } from "./types";
 import { MIN_ESTIMATION_SAMPLES } from "./types";
+
+// `TimeWindow` lives in types.ts (the `WorkSession` row uses it too); re-exported
+// here so velocity's consumers keep a single import surface for the segment axes.
+export type { TimeWindow } from "./types";
 
 /**
  * One residual observation `log(actual / estimated)` on a completed unit of work,
@@ -44,8 +48,6 @@ export interface ResidualSample {
   /** Time-of-day bucket you WORKED in (post-execution; Slice C). */
   window: TimeWindow;
 }
-
-export type TimeWindow = "early" | "morning" | "afternoon" | "evening" | "night";
 
 /**
  * A fitted, shrunk velocity model over one segment axis. `forSegment(key)` is the
@@ -147,4 +149,19 @@ export function taskResidualSamples(tasks: Task[]): ResidualSample[] {
 /** The forecast-facing slice of a fitted segment model (drops `sampleSize`). */
 export function toSegmentModel(m: EstimationModel): SegmentModel {
   return { meanLog: m.meanLog, sigma: m.sigma };
+}
+
+/**
+ * The local time-of-day bucket for an hour 0–23 (OVERHAUL S2 window axis). Fixed
+ * boundaries — early 05–09 · morning 09–12 · afternoon 12–17 · evening 17–22 ·
+ * night 22–05. Call with the user's LOCAL hour (`new Date().getHours()` on the
+ * client) so the window is in the user's own timezone, never re-derived from a UTC
+ * instant. Used by `localSessionStamp` (slice B capture) and the slice-C energy reads.
+ */
+export function windowOf(localHour: number): TimeWindow {
+  if (localHour >= 5 && localHour < 9) return "early";
+  if (localHour >= 9 && localHour < 12) return "morning";
+  if (localHour >= 12 && localHour < 17) return "afternoon";
+  if (localHour >= 17 && localHour < 22) return "evening";
+  return "night"; // 22:00–04:59
 }

@@ -13,6 +13,7 @@ import {
   updateTaskStatusAction,
   logActualTimeAction,
 } from "@/lib/actions";
+import { localSessionStamp } from "@/lib/work-session";
 
 export function TaskList({ tasks }: { tasks: Task[] }) {
   const [optimistic, setOptimistic] = useOptimistic(
@@ -27,7 +28,9 @@ export function TaskList({ tasks }: { tasks: Task[] }) {
   function changeStatus(id: string, status: TaskStatus) {
     startTransition(async () => {
       setOptimistic({ id, status });
-      await updateTaskStatusAction(id, status);
+      // Local stamp → a status change to done accrues a work session (S2 slice B);
+      // ignored for any other transition.
+      await updateTaskStatusAction(id, status, undefined, localSessionStamp());
     });
   }
 

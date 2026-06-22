@@ -8,6 +8,7 @@ import {
   logActivityCompletionAction,
   setActivityProtectedAction,
 } from "@/lib/actions";
+import { localSessionStamp } from "@/lib/work-session";
 import { Pill } from "@/components/ui/badge";
 import { formatMinutes } from "@/lib/format";
 import { cn } from "@/lib/cn";
@@ -37,7 +38,13 @@ export function ActivityRow({ state }: { state: RecurringState }) {
         type="button"
         onClick={() =>
           !doneToday &&
-          run(() => logActivityCompletionAction(activity.id, activity.estimated_minutes))
+          run(() =>
+            logActivityCompletionAction(
+              activity.id,
+              activity.estimated_minutes,
+              localSessionStamp(),
+            ),
+          )
         }
         disabled={doneToday || pending}
         aria-label={`Log "${activity.title}" today`}

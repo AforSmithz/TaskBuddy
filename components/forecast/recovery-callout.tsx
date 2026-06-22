@@ -17,6 +17,7 @@ import {
   unblockTaskAction,
   updateTaskStatusAction,
 } from "@/lib/actions";
+import { localSessionStamp } from "@/lib/work-session";
 import { band, formatPct } from "@/components/forecast/forecast-meter";
 import { RecoveryModifications } from "@/components/forecast/recovery-modifications";
 import { RecoveryReroute } from "@/components/forecast/recovery-reroute";
@@ -275,7 +276,7 @@ function OverdueRow({ task }: { task: RecoveryPlan["overdue"][number] }) {
   }
   function markDone() {
     startTransition(async () => {
-      await updateTaskStatusAction(task.taskId, "done");
+      await updateTaskStatusAction(task.taskId, "done", undefined, localSessionStamp());
       setApplied(true);
     });
   }

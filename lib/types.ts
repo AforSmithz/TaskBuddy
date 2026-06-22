@@ -404,6 +404,54 @@ export interface ActivityCompletion {
   created_at: string;
 }
 
+/**
+ * Local time-of-day bucket a work session happened in (OVERHAUL S2). Fixed
+ * boundaries: early 05–09 · morning 09–12 · afternoon 12–17 · evening 17–22 ·
+ * night 22–05. Captured from the user's LOCAL clock at write time (`windowOf` in
+ * `lib/velocity.ts`); never re-derived from a stored UTC instant.
+ */
+export type TimeWindow = "early" | "morning" | "afternoon" | "evening" | "night";
+
+/**
+ * One real work session (OVERHAUL S2 slice B) — the WHEN-signal today's data
+ * lacks: `tasks.completed_at` is a single UTC "marked done" instant and
+ * `actual_minutes` is a cumulative total, so neither says when (locally) you
+ * worked. A row records the local time-of-day window + weekday + the day it counts
+ * for, captured at write time. A session is task effort XOR a routine session
+ * (`task_id`/`activity_id`). Slice C reads these (keyed by window/weekday) for
+ * energy windows + adherence; on its own slice B is pure accrual — no behaviour
+ * change.
+ */
+export interface WorkSession {
+  id: string;
+  user_id?: string | null;
+  task_id: string | null;
+  activity_id: string | null;
+  /** ISO YYYY-MM-DD — the local day the work counts for. */
+  logged_for: string;
+  /** Local time-of-day bucket, captured at write time. */
+  time_window: TimeWindow;
+  /** 0=Sun..6=Sat, local. */
+  weekday: number;
+  /** This session's real length; 0 for a length-less completion event. */
+  minutes: number;
+  kind: "progress" | "complete";
+  created_at: string;
+}
+
+/**
+ * The client-captured local stamp a completion/effort-log passes to its server
+ * action so the work session records the user's LOCAL window/weekday — the action
+ * runs server-side and can't read the client clock, so the client must supply it
+ * (the timezone-gotcha resolution). Built by `localSessionStamp()` in
+ * `lib/work-session.ts`.
+ */
+export interface WorkSessionLocal {
+  time_window: TimeWindow;
+  weekday: number;
+  logged_for: string;
+}
+
 /** A recurring activity's derived success state (computed in `lib/recurring.ts`). */
 export type RecurringStatus = "met" | "due" | "missed" | "cold";
 

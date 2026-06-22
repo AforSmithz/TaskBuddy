@@ -5,6 +5,8 @@ import type {
   ExtractedSkill,
   ActivityCadencePeriod,
   ActivityCompletion,
+  WorkSession,
+  WorkSessionLocal,
   Availability,
   AvailabilityOverride,
   CauseDiagnosis,
@@ -160,6 +162,8 @@ interface MemDB {
   recurringActivities: RecurringActivity[];
   /** Logged sessions/skips of recurring activities — the completion log. */
   activityCompletions: ActivityCompletion[];
+  /** Real work sessions — the local when-signal the velocity loop accrues (S2). */
+  workSessions: WorkSession[];
   /** Whether the pit-wall strategist auto-applies obvious triage (vs. surfacing it). */
   autoStrategy: boolean;
   /** The user's value model (importance weights + recovery style), or null => default. */
@@ -194,6 +198,7 @@ function memDB(): MemDB {
       commitments: [],
       recurringActivities: [],
       activityCompletions: [],
+      workSessions: [],
       autoStrategy: false,
       valueModel: null,
       portfolioStrategy: null,
@@ -1936,6 +1941,69 @@ export async function logActivityCompletion(
   }
   await ensureSeeded();
   memDB().activityCompletions.push(row);
+}
+
+/**
+ * Record one real work session — the local when-signal the velocity loop accrues
+ * (OVERHAUL S2 slice B). `local` carries the CLIENT's local window/weekday/day (the
+ * action runs server-side and can't read the browser clock), which resolves the
+ * timezone gotcha. A session is task effort XOR a routine session.
+ *
+ * BEST-EFFORT by contract: this is pure telemetry accrual that must never regress
+ * the completion that triggered it, so a failed insert is logged and swallowed —
+ * never thrown. Nothing reads these rows until slice C.
+ */
+export async function logWorkSession(input: {
+  taskId?: string | null;
+  activityId?: string | null;
+  minutes: number;
+  kind: "progress" | "complete";
+  local: WorkSessionLocal;
+}): Promise<void> {
+  const taskId = input.taskId ?? null;
+  const activityId = input.activityId ?? null;
+  // Enforce the table's XOR at the boundary: exactly one source. A malformed call
+  // skips silently rather than tripping the DB constraint on a completion path.
+  if ((taskId === null) === (activityId === null)) return;
+  const row: WorkSession = {
+    id: crypto.randomUUID(),
+    task_id: taskId,
+    activity_id: activityId,
+    logged_for: input.local.logged_for.slice(0, 10),
+    time_window: input.local.time_window,
+    weekday: input.local.weekday,
+    minutes: Math.max(0, Math.round(input.minutes)),
+    kind: input.kind,
+    created_at: new Date().toISOString(),
+  };
+  try {
+    if (isSupabaseConfigured()) {
+      const supabase = await getRequestClient();
+      const user_id = await currentUserId(supabase);
+      const { error } = await supabase.from("work_sessions").insert({ ...row, user_id });
+      if (error) throw new Error(error.message);
+      return;
+    }
+    await ensureSeeded();
+    memDB().workSessions.push(row);
+  } catch (e) {
+    console.error("logWorkSession failed (accrual skipped):", e);
+  }
+}
+
+/** All work sessions, oldest-first — the slice-C velocity/energy reads' source. */
+export async function listWorkSessions(): Promise<WorkSession[]> {
+  if (isSupabaseConfigured()) {
+    const supabase = await getRequestClient();
+    const { data, error } = await supabase
+      .from("work_sessions")
+      .select("*")
+      .order("logged_for", { ascending: true });
+    if (error) throw new Error(`Supabase work_sessions list failed: ${error.message}`);
+    return (data ?? []) as WorkSession[];
+  }
+  await ensureSeeded();
+  return [...memDB().workSessions];
 }
 
 /**

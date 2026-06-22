@@ -405,3 +405,30 @@ create policy recurring_activities_owner on recurring_activities
 drop policy if exists activity_completions_owner on activity_completions;
 create policy activity_completions_owner on activity_completions
   for all using (user_id = auth.uid()) with check (user_id = auth.uid());
+
+-- One real work session (OVERHAUL S2 slice B): how long you actually sat down +
+-- the LOCAL time-of-day window/weekday you worked in, captured at write time so we
+-- never re-derive a local window from the UTC `tasks.completed_at` instant. The
+-- when-signal the velocity loop's energy-windows + adherence (slice C) read. A
+-- session is task effort XOR a routine session. Pure accrual — no behaviour change.
+create table if not exists work_sessions (
+  id          uuid primary key default gen_random_uuid(),
+  user_id     uuid not null references auth.users(id) on delete cascade,
+  task_id     uuid references tasks(id) on delete cascade,
+  activity_id uuid references recurring_activities(id) on delete cascade,
+  logged_for  date not null,
+  time_window text not null check (time_window in    -- "window" is a reserved word
+                ('early','morning','afternoon','evening','night')),
+  weekday     integer not null check (weekday between 0 and 6),
+  minutes     integer not null default 0 check (minutes >= 0),
+  kind        text not null check (kind in ('progress','complete')),
+  created_at  timestamptz not null default now(),
+  constraint work_sessions_one_source check ((task_id is not null) <> (activity_id is not null))
+);
+create index if not exists work_sessions_user_logged_idx
+  on work_sessions (user_id, logged_for);
+
+alter table work_sessions enable row level security;
+drop policy if exists work_sessions_owner on work_sessions;
+create policy work_sessions_owner on work_sessions
+  for all using (user_id = auth.uid()) with check (user_id = auth.uid());

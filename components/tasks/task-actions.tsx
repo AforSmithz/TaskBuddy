@@ -16,6 +16,7 @@ import {
   unblockTaskAction,
   logActualTimeAction,
 } from "@/lib/actions";
+import { localSessionStamp } from "@/lib/work-session";
 
 /**
  * The task detail page's action rail. Every control maps to an existing server
@@ -38,7 +39,12 @@ export function TaskActions({ task }: { task: Task }) {
           disabled={pending}
           onChange={(e) =>
             run(() =>
-              updateTaskStatusAction(task.id, e.target.value as TaskStatus),
+              updateTaskStatusAction(
+                task.id,
+                e.target.value as TaskStatus,
+                undefined,
+                localSessionStamp(),
+              ),
             )
           }
           className="mt-1 h-8 w-full rounded-sm border border-[var(--color-border-strong)] bg-[var(--color-surface)] px-2 text-[13px] font-medium text-[var(--color-fg)] focus:border-[var(--color-accent)] focus:outline-none"
@@ -90,7 +96,11 @@ export function TaskActions({ task }: { task: Task }) {
             variant="secondary"
             size="sm"
             disabled={pending}
-            onClick={() => run(() => updateTaskStatusAction(task.id, "done"))}
+            onClick={() =>
+              run(() =>
+                updateTaskStatusAction(task.id, "done", undefined, localSessionStamp()),
+              )
+            }
           >
             <Check className="size-3.5" />
             Mark done

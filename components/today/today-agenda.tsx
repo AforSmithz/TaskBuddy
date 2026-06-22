@@ -31,6 +31,7 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { isOverdue, isToday } from "@/lib/format";
 import { cn } from "@/lib/cn";
 import { updateTaskStatusAction, updateTaskAreaAction } from "@/lib/actions";
+import { localSessionStamp } from "@/lib/work-session";
 import { TaskRow, RecurringAgendaRow } from "@/components/today/task-row";
 
 const byPriority = (a: Task, b: Task) =>
@@ -73,7 +74,9 @@ export function TodayAgenda({
     if (status === from) return;
     startTransition(async () => {
       applyOptimistic({ taskId, status });
-      await updateTaskStatusAction(taskId, status);
+      // Pass the local stamp so a drag-to-done accrues a work session (S2 slice B);
+      // ignored by the action for any non-completion transition.
+      await updateTaskStatusAction(taskId, status, undefined, localSessionStamp());
     });
   }
 

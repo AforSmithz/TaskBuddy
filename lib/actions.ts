@@ -23,6 +23,7 @@ import {
   getCachedStrategy,
   getEntry,
   logActivityCompletion,
+  logWorkSession,
   logCommitment,
   setAutoStrategy,
   setAvailability,
@@ -66,6 +67,7 @@ import type {
   Task,
   TaskModification,
   TaskStatus,
+  WorkSessionLocal,
 } from "./types";
 
 // Server Actions — the single mutation layer for TaskBuddy.
@@ -187,6 +189,7 @@ export async function updateTaskStatusAction(
   taskId: string,
   status: TaskStatus,
   confidence: CompletionConfidence = "self_assessed",
+  local?: WorkSessionLocal,
 ): Promise<void> {
   await requireUser();
   const patch: Partial<Task> =
@@ -194,6 +197,14 @@ export async function updateTaskStatusAction(
       ? { status, completion_confidence: confidence, completed_at: new Date().toISOString() }
       : { status, completion_confidence: null, completed_at: null };
   await updateTask(taskId, patch);
+  // S2 slice B: accrue the local when-signal for a genuine user completion. Inferred
+  // (strategist) completions are excluded — there is no client clock to honestly
+  // stamp a local window. minutes=0: the task's real length lives on
+  // `tasks.actual_minutes` (slice C joins it); this row adds the local window/weekday
+  // the UTC `completed_at` instant can't give.
+  if (status === "done" && confidence !== "inferred" && local) {
+    await logWorkSession({ taskId, minutes: 0, kind: "complete", local });
+  }
   revalidateAll();
 }
 
@@ -627,9 +638,15 @@ export async function archiveActivityAction(id: string): Promise<void> {
 export async function logActivityCompletionAction(
   activityId: string,
   minutes?: number,
+  local?: WorkSessionLocal,
 ): Promise<void> {
   await requireUser();
   await logActivityCompletion(activityId, undefined, minutes);
+  // S2 slice B: a routine session is a real, discrete work session — accrue it with
+  // its local window/weekday + length (the when-signal slice C's energy reads need).
+  if (local) {
+    await logWorkSession({ activityId, minutes: minutes ?? 0, kind: "complete", local });
+  }
   revalidateAll();
 }
 

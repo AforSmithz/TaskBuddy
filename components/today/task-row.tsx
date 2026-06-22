@@ -29,6 +29,7 @@ import {
   skipActivityAction,
   unskipActivityAction,
 } from "@/lib/actions";
+import { localSessionStamp } from "@/lib/work-session";
 
 const NEW_AREA = "__new_area__";
 
@@ -219,7 +220,11 @@ export function RecurringAgendaRow({ state }: { state: RecurringState }) {
     if (doneToday || pending) return;
     setLocalDone(true);
     startTransition(() =>
-      logActivityCompletionAction(activity.id, activity.estimated_minutes),
+      logActivityCompletionAction(
+        activity.id,
+        activity.estimated_minutes,
+        localSessionStamp(),
+      ),
     );
   }
   function skip() {
