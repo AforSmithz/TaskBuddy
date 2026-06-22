@@ -1,4 +1,4 @@
-import type { Conflict, EffectiveOrderEntry, TaskStatus } from "./types";
+import type { Conflict, EffectiveOrderEntry, SegmentModel, TaskStatus } from "./types";
 import {
   dayCapacities,
   flowFinishOffsets,
@@ -75,6 +75,14 @@ export interface AllocTask {
    * as neutral (1), so they keep their existing weight.
    */
   importance?: number;
+  /**
+   * Per-task velocity model (OVERHAUL S2): this task's domain-shrunk `(meanLog,
+   * sigma)`, attached in `buildAllocTasks` from `Task.area`. Carried verbatim into
+   * the order entry so the joint forecast samples each task by its own velocity;
+   * synthetic/skill lanes omit it and fall back to the global scalar. Affects only
+   * the sampler — never the ordering (cost-of-delay / WSJF ignore it).
+   */
+  model?: SegmentModel;
 }
 
 export interface GlobalPlanInput {
@@ -273,6 +281,8 @@ export function effectiveOrder(
       projectId: next.projectId,
       projectName: next.projectName,
       estimatedMinutes: next.estimatedMinutes,
+      // Carry the per-task velocity model (S2) into the order the forecast samples.
+      model: next.model,
       rank: order.length,
       pulledAhead: Boolean(leapfrogged),
       reason: leapfrogged

@@ -50,6 +50,12 @@ import type {
 import { ON_TRACK_PROBABILITY, isOnTrack } from "./types";
 import { extractEntry } from "./extraction";
 import { estimationModel } from "./generate";
+import {
+  fitVelocityModel,
+  taskResidualSamples,
+  toSegmentModel,
+  type VelocityModel,
+} from "./velocity";
 import { goalCompletion } from "./goal";
 import { diagnoseCause, goalCutCost, type CauseBaseline } from "./grounding";
 import { isBufferLow } from "./buffer";
@@ -2232,6 +2238,13 @@ interface ForecastGather {
   projectNameById: Map<string, string>;
   /** The user's estimation bias, fit from all completed tasks — calibrates the forecast. */
   model: EstimationModel;
+  /**
+   * The per-domain velocity model (OVERHAUL S2): `model` shrunk per `Task.area`,
+   * with `model` as its global prior. `buildAllocTasks` reads `forSegment(area)`
+   * to bias each task by its own domain velocity; a domain with no/sparse history
+   * resolves to the global prior, so the forecast starts at today's number.
+   */
+  velocityModel: VelocityModel;
   availability: Availability[];
   overrides: AvailabilityOverride[];
   /** All commitments INCLUDING the recurring drain (the base the forecast uses). */
@@ -2370,6 +2383,16 @@ async function gatherForecast(): Promise<ForecastGather> {
     list.push(c);
     criteriaByProject.set(c.goal_id, list);
   }
+  // Fit the global estimation bias once over every completed task (the bias is the
+  // user's, not a project's), then shrink it per life-area (S2) using that same
+  // fit as the prior — so a domain with one/sparse history stays at the global
+  // number and only a clearly-divergent domain shifts its own tasks' odds.
+  const model = estimationModel(tasks);
+  const velocityModel = fitVelocityModel(
+    taskResidualSamples(tasks),
+    (s) => s.domain,
+    model,
+  );
   return {
     projects: projects.filter((p) => p.deadline),
     tasksByProject,
@@ -2381,8 +2404,8 @@ async function gatherForecast(): Promise<ForecastGather> {
     projectOfEntry,
     deadlineByProject,
     projectNameById,
-    // Fit once over every completed task — the bias is the user's, not a project's.
-    model: estimationModel(tasks),
+    model,
+    velocityModel,
     availability: budget.availability,
     overrides: budget.overrides,
     commitments: budget.commitments,
@@ -2415,6 +2438,9 @@ function buildAllocTasks(g: ForecastGather): AllocTask[] {
         risk: t.risk_score ?? 3,
         // Value Model: scale this task's cost-of-delay by its life-area's importance.
         importance: areaWeight(g.valueModel, t.area),
+        // S2: bias this task's forecast by its life-area's own velocity (shrunk
+        // toward the global bias; a sparse/new area resolves back to it).
+        model: toSegmentModel(g.velocityModel.forSegment(t.area)),
       });
     }
   }

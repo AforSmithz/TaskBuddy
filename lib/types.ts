@@ -480,6 +480,19 @@ export interface EstimationModel {
   sampleSize: number;
 }
 
+/**
+ * The forecast-facing slice of an estimation model — just the log-space bias +
+ * spread the Monte Carlo samples with (a full `EstimationModel` is structurally
+ * assignable to it). The per-task velocity model (OVERHAUL S2) rides on this
+ * shape so a single task can carry its own segment-shrunk bias into the sampler
+ * instead of the one global scalar. See `lib/velocity.ts` and
+ * `design/s2-context-tags-and-shrinkage.md`.
+ */
+export interface SegmentModel {
+  meanLog: number;
+  sigma: number;
+}
+
 /** Below this many samples we don't trust a fitted model — fall back to defaults. */
 export const MIN_ESTIMATION_SAMPLES = 5;
 
@@ -877,6 +890,12 @@ export interface EffectiveOrderEntry {
   pulledAhead: boolean;
   /** Human-readable reason for the placement (e.g. "pulled ahead — Goal X due in 2 days"). */
   reason: string;
+  /**
+   * Per-task velocity model (OVERHAUL S2): this task's segment-shrunk `(meanLog,
+   * sigma)`, carried from its `AllocTask` so the joint sampler biases each task by
+   * its own domain velocity. Absent ⇒ the global scalar in the forecast options.
+   */
+  model?: SegmentModel;
 }
 
 /**

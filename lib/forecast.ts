@@ -4,6 +4,7 @@ import type {
   Commitment,
   ForecastResult,
   RecoveryMove,
+  SegmentModel,
 } from "./types";
 import { flowFinishOffsets, type DayCapacity } from "./schedule";
 
@@ -224,6 +225,15 @@ export interface GlobalForecastTask {
   taskId: string;
   estimatedMinutes: number;
   projectId: string;
+  /**
+   * Per-task velocity model (OVERHAUL S2): this task's own segment-shrunk
+   * `(meanLog, sigma)`. When present the sampler biases THIS task by its own
+   * domain velocity instead of the one global scalar; absent ⇒ the scalar
+   * `options.meanLog`/`sigma` (identical to before S2). Riding the bias on the
+   * task — not a forecast-wide option — is what lets domains differentiate within
+   * one joint run. See `lib/velocity.ts`.
+   */
+  model?: SegmentModel;
 }
 
 /**
@@ -316,8 +326,15 @@ export function globalForecastJoint(
   for (let i = 0; i < iterations; i++) {
     for (let k = 0; k < order.length; k++) {
       const est = estimates[k];
-      // Sample only real work; keep the RNG stream identical to `forecast()`.
-      durations[k] = est > 0 ? est * Math.exp(meanLog + sigma * nextNormal(rng)) : 0;
+      // Each task biased by its OWN velocity model when it carries one (OVERHAUL
+      // S2), else the global scalar. The per-task bias is applied in-loop, not in
+      // the seed, so determinism + the RNG stream stay identical to `forecast()`.
+      const m = order[k].model;
+      durations[k] =
+        est > 0
+          ? est *
+            Math.exp((m?.meanLog ?? meanLog) + (m?.sigma ?? sigma) * nextNormal(rng))
+          : 0;
     }
     const offsets = flowFinishOffsets(durations, capacities);
     // Whether EVERY scored project landed on time in THIS sampled future — the
