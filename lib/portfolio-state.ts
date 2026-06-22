@@ -151,6 +151,12 @@ export function syntheticAllocTask(
  *                         instances, freeing its drain from capacity (matches the
  *                         apply, which persists exactly those skips).
  *  - hold               → no-op.
+ *
+ * This is the FORECAST-domain twin of each kind's `persist` in the server-only
+ * `MOVE_SPECS` registry (lib/store.ts): the previewed odds come from here, the real
+ * mutation from there, and the two MUST encode the same effect (§0). They live in
+ * separate modules only because this one runs CLIENT-SIDE during live re-solve; both
+ * are exhaustive over `StrategyMoveKind`, so a new kind needs an arm in both.
  */
 export function applyMoveToAlloc(
   g: MovePatchContext,

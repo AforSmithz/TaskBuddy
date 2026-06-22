@@ -38,6 +38,7 @@ import type {
   RowSnapshot,
   StrategyMove,
   StrategyMoveKind,
+  StrategyMovePayload,
   SuggestedTask,
   Task,
   TaskDependency,
@@ -1235,8 +1236,9 @@ export async function setCachedStrategy(
 // moves, the odds the user accepted, and a `restore` (prior row values + inserted
 // row ids). One snapshot per bundle ⇒ undo reverts the whole strategy at once.
 // `commitStrategyBundle` is the single server-side authority for *applying* a move
-// — the card routes every "Apply" through it, so the previewed odds and the
-// committed change share one persist mapping (`applyMoveEffect`).
+// — the card routes every "Apply" through it, and each kind's snapshot + persist
+// live together in one `MOVE_SPECS` entry (S1 step 4), so the previewed odds and the
+// committed change can't drift.
 
 /** Soft cap on retained versions per user; oldest pruned beyond this (decision #3). */
 const PLAN_VERSION_CAP = 50;
@@ -1274,44 +1276,115 @@ async function getTasksByIds(ids: string[]): Promise<Task[]> {
   return memDB().tasks.filter((t) => set.has(t.id));
 }
 
-/**
- * The PRIOR row values a single move would mutate — read BEFORE any apply, so the
- * snapshot is the true pre-image. Only the fields the move's apply touches are
- * captured (so restore writes back exactly those). Inserted synthetic rows are
- * captured at apply time (`applyMoveEffect`), not here.
- */
-async function snapshotMoveRows(
-  move: StrategyMove,
-): Promise<{ tasks: (Partial<Task> & { id: string })[]; goals: (Partial<Goal> & { id: string })[] }> {
-  const p = move.payload;
-  switch (p.kind) {
-    case "defer":
-      return { tasks: await snapshotTaskFields([p.taskId], ["deferred"]), goals: [] };
-    case "triage":
-      return { tasks: await snapshotTaskFields(p.taskIds, ["deferred"]), goals: [] };
-    case "reschedule_task":
-      return { tasks: await snapshotTaskFields([p.taskId], ["due_date"]), goals: [] };
-    case "unblock":
-      return {
-        tasks: await snapshotTaskFields([p.taskId], ["status", "blocked_by"]),
-        goals: [],
-      };
-    case "mark_done":
-      return {
-        tasks: await snapshotTaskFields(
-          [p.taskId],
-          ["status", "completion_confidence", "completed_at"],
-        ),
-        goals: [],
-      };
-    case "reschedule_deadline": {
+// --- Move spec registry (S1 step 4) ----------------------------------------
+//
+// One `MoveSpec` per `StrategyMoveKind` co-locates that kind's two server-side DB
+// behaviors — the undo pre-image `snapshot` and the real `persist` — in a single
+// entry, so they can't silently drift apart as kinds evolve (before this they were
+// two separate switches ~60 lines apart, and `snapshot` has to capture exactly the
+// fields `persist` mutates or undo is wrong). Bundle apply-order is a cross-kind
+// policy, not a per-kind behavior, so it stays in `strategyApplyOrder`, not here.
+//
+// The forecast-domain twin of `persist` is the matching arm of `applyMoveToAlloc`
+// (lib/portfolio-state.ts) — it stays THERE because the live re-solve runs it
+// CLIENT-SIDE, so it can't share this `server-only` module (the deliberate step-1
+// split overrides the design's original single-object `MoveSpec`). The two halves
+// are bound only by the shared `StrategyMoveKind`: both this registry and
+// `applyMoveToAlloc` are exhaustive over it, so a new kind can't compile until it
+// has BOTH a forecast arm and a spec here. `persist` MUST encode the same effect its
+// forecast arm previews, or the odds the user accepts would be a lie (§0).
+
+/** Prior values of the rows one move mutates — its undo pre-image (id + only the
+ *  fields that move's `persist` changes; restore writes exactly those back). */
+type MoveRowSnapshot = {
+  tasks: (Partial<Task> & { id: string })[];
+  goals: (Partial<Goal> & { id: string })[];
+};
+
+/** The synthetic-row ids one move's `persist` inserted, so undo can delete them. */
+type MovePersistResult = Partial<
+  Pick<RowSnapshot, "insertedTaskIds" | "insertedEntryIds" | "activityCompletionIds">
+>;
+
+interface MoveSpec<K extends StrategyMoveKind> {
+  /** Prior values of the rows `persist` will mutate — read BEFORE any apply so it is
+   *  the true pre-image, capturing only the fields `persist` touches. Inserted
+   *  synthetic rows are captured at apply time by `persist`, not here. */
+  snapshot(
+    payload: Extract<StrategyMovePayload, { kind: K }>,
+    move: StrategyMove,
+  ): Promise<MoveRowSnapshot>;
+  /** The real DB mutation; returns the synthetic-row ids it inserted (for undo).
+   *  `mark_done` stamps `inferred` — the strategist inferred the completion. */
+  persist(
+    payload: Extract<StrategyMovePayload, { kind: K }>,
+    move: StrategyMove,
+  ): Promise<MovePersistResult>;
+}
+
+const MOVE_SPECS: { [K in StrategyMoveKind]: MoveSpec<K> } = {
+  defer: {
+    snapshot: async (p) => ({ tasks: await snapshotTaskFields([p.taskId], ["deferred"]), goals: [] }),
+    persist: async (p) => {
+      await updateTask(p.taskId, { deferred: true });
+      return {};
+    },
+  },
+  triage: {
+    snapshot: async (p) => ({ tasks: await snapshotTaskFields(p.taskIds, ["deferred"]), goals: [] }),
+    persist: async (p) => {
+      await Promise.all(p.taskIds.map((id) => updateTask(id, { deferred: true })));
+      return {};
+    },
+  },
+  reschedule_task: {
+    snapshot: async (p) => ({ tasks: await snapshotTaskFields([p.taskId], ["due_date"]), goals: [] }),
+    persist: async (p) => {
+      await updateTask(p.taskId, { due_date: p.dueDate });
+      return {};
+    },
+  },
+  unblock: {
+    snapshot: async (p) => ({
+      tasks: await snapshotTaskFields([p.taskId], ["status", "blocked_by"]),
+      goals: [],
+    }),
+    persist: async (p) => {
+      await updateTask(p.taskId, { status: "todo", blocked_by: null });
+      return {};
+    },
+  },
+  mark_done: {
+    snapshot: async (p) => ({
+      tasks: await snapshotTaskFields(
+        [p.taskId],
+        ["status", "completion_confidence", "completed_at"],
+      ),
+      goals: [],
+    }),
+    persist: async (p) => {
+      await updateTask(p.taskId, {
+        status: "done",
+        completion_confidence: "inferred",
+        completed_at: new Date().toISOString(),
+      });
+      return {};
+    },
+  },
+  reschedule_deadline: {
+    snapshot: async (_payload, move) => {
       const goal = await getGoal(move.projectId);
       return { tasks: [], goals: goal ? [{ id: goal.id, deadline: goal.deadline }] : [] };
-    }
-    case "reshape": {
-      // scope_down rewrites a task in place; split defers the monolith. Snapshot
-      // the touched task's pre-image per mod (the inserted steps/debt are captured
-      // at apply time).
+    },
+    persist: async (p, move) => {
+      await setProjectDeadline(move.projectId, p.deadline);
+      return {};
+    },
+  },
+  reshape: {
+    snapshot: async (p) => {
+      // scope_down rewrites a task in place; split defers the monolith. Snapshot the
+      // touched task's pre-image per mod (inserted steps/debt are captured at apply).
       const tasks: (Partial<Task> & { id: string })[] = [];
       for (const m of p.mods) {
         const fields: (keyof Task)[] =
@@ -1321,73 +1394,46 @@ async function snapshotMoveRows(
         tasks.push(...(await snapshotTaskFields([m.taskId], fields)));
       }
       return { tasks, goals: [] };
-    }
-    case "reroute":
-      return { tasks: await snapshotTaskFields(p.replacedTaskIds, ["deferred"]), goals: [] };
-    case "add_tasks":
-    case "skip_activity":
-    case "hold":
-      return { tasks: [], goals: [] };
-  }
-}
+    },
+    // `RecoveryInserts` already IS the inserted-id shape, so return it directly.
+    persist: async (p, move) => applyTaskModifications(move.projectId, p.mods),
+  },
+  reroute: {
+    snapshot: async (p) => ({
+      tasks: await snapshotTaskFields(p.replacedTaskIds, ["deferred"]),
+      goals: [],
+    }),
+    persist: async (p, move) => applyReroute(move.projectId, p.replacedTaskIds, p.tasks),
+  },
+  add_tasks: {
+    snapshot: async () => ({ tasks: [], goals: [] }),
+    persist: async (p, move) => addCorrectiveTasks(move.projectId, p.tasks),
+  },
+  skip_activity: {
+    snapshot: async () => ({ tasks: [], goals: [] }),
+    persist: async (p) => ({ activityCompletionIds: await skipActivityForWeek(p.activityId) }),
+  },
+  hold: {
+    snapshot: async () => ({ tasks: [], goals: [] }),
+    persist: async () => ({}),
+  },
+};
 
 /**
- * Apply a single move's real effect and return the synthetic-row ids it inserted.
- * The SINGLE server-side persist mapping (the card's old per-kind switch is gone) —
- * so the previewed odds and the committed change can't drift. `mark_done` stamps
- * `inferred` (the strategist inferred it), matching the old action.
+ * Look up a move's spec. TypeScript can't correlate the registry key with the
+ * payload union (the known correlated-union limitation), so the looked-up spec is
+ * widened to accept the full payload union at this single seam — sound because we
+ * index `MOVE_SPECS` by the very `payload.kind` whose payload we then pass.
  */
-async function applyMoveEffect(
-  move: StrategyMove,
-): Promise<Partial<Pick<RowSnapshot, "insertedTaskIds" | "insertedEntryIds" | "activityCompletionIds">>> {
-  const p = move.payload;
-  switch (p.kind) {
-    case "defer":
-      await updateTask(p.taskId, { deferred: true });
-      return {};
-    case "reschedule_deadline":
-      await setProjectDeadline(move.projectId, p.deadline);
-      return {};
-    case "reschedule_task":
-      await updateTask(p.taskId, { due_date: p.dueDate });
-      return {};
-    case "unblock":
-      await updateTask(p.taskId, { status: "todo", blocked_by: null });
-      return {};
-    case "mark_done":
-      await updateTask(p.taskId, {
-        status: "done",
-        completion_confidence: "inferred",
-        completed_at: new Date().toISOString(),
-      });
-      return {};
-    case "triage":
-      await Promise.all(p.taskIds.map((id) => updateTask(id, { deferred: true })));
-      return {};
-    case "add_tasks": {
-      const r = await addCorrectiveTasks(move.projectId, p.tasks);
-      return { insertedTaskIds: r.insertedTaskIds, insertedEntryIds: r.insertedEntryIds };
-    }
-    case "reshape": {
-      const r = await applyTaskModifications(move.projectId, p.mods);
-      return { insertedTaskIds: r.insertedTaskIds, insertedEntryIds: r.insertedEntryIds };
-    }
-    case "reroute": {
-      const r = await applyReroute(move.projectId, p.replacedTaskIds, p.tasks);
-      return { insertedTaskIds: r.insertedTaskIds, insertedEntryIds: r.insertedEntryIds };
-    }
-    case "skip_activity":
-      return { activityCompletionIds: await skipActivityForWeek(p.activityId) };
-    case "hold":
-      return {};
-  }
+function specFor(kind: StrategyMoveKind): MoveSpec<StrategyMoveKind> {
+  return MOVE_SPECS[kind] as MoveSpec<StrategyMoveKind>;
 }
 
-/** Deadline-moving reschedules go last so deferrals free their hours first — the
- *  single apply-order authority (was duplicated in the card). */
+/** Bundle apply order — deadline reschedules go last so deferrals free their hours
+ *  first (`move.kind` mirrors `payload.kind` at construction, so either keys it). */
 function strategyApplyOrder(a: StrategyMove, b: StrategyMove): number {
-  const last = (k: StrategyMoveKind) => (k === "reschedule_deadline" ? 1 : 0);
-  return last(a.kind) - last(b.kind);
+  const rank = (k: StrategyMoveKind) => (k === "reschedule_deadline" ? 1 : 0);
+  return rank(a.payload.kind) - rank(b.payload.kind);
 }
 
 /**
@@ -1409,7 +1455,7 @@ export async function commitStrategyBundle(
   const taskSnap = new Map<string, Partial<Task> & { id: string }>();
   const goalSnap = new Map<string, Partial<Goal> & { id: string }>();
   for (const move of ordered) {
-    const { tasks, goals } = await snapshotMoveRows(move);
+    const { tasks, goals } = await specFor(move.payload.kind).snapshot(move.payload, move);
     for (const t of tasks) if (!taskSnap.has(t.id)) taskSnap.set(t.id, t);
     for (const goal of goals) if (!goalSnap.has(goal.id)) goalSnap.set(goal.id, goal);
   }
@@ -1419,7 +1465,7 @@ export async function commitStrategyBundle(
   const insertedEntryIds: string[] = [];
   const activityCompletionIds: string[] = [];
   for (const move of ordered) {
-    const eff = await applyMoveEffect(move);
+    const eff = await specFor(move.payload.kind).persist(move.payload, move);
     if (eff.insertedTaskIds) insertedTaskIds.push(...eff.insertedTaskIds);
     if (eff.insertedEntryIds) insertedEntryIds.push(...eff.insertedEntryIds);
     if (eff.activityCompletionIds) activityCompletionIds.push(...eff.activityCompletionIds);
