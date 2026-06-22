@@ -600,6 +600,7 @@ export interface DivergenceReason {
 export type DivergenceCause =
   | "one_off_slip" // a single task blew up; the underlying pace is fine
   | "chronic_velocity" // estimates are systematically low — a pattern, not an event
+  | "timing_placement" // the overrun is the low-energy WINDOWS worked in, not the estimates (S2)
   | "constraint_change" // the world moved since the plan was made
   | "scope_structural"; // simply too much committed work for the time
 

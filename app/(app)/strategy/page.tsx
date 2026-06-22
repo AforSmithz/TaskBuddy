@@ -5,11 +5,13 @@ import {
   getCachedStrategy,
   listAllTasks,
   listPlanVersions,
+  listWorkSessions,
 } from "@/lib/store";
 import {
   assessStaleness,
   deterministicStrategyFrom,
 } from "@/lib/portfolio-strategist";
+import { energyWindows, workSessionResidualSamples } from "@/lib/velocity";
 import { isLLMConfigured } from "@/lib/extraction";
 import { PageHeader } from "@/components/ui/page-header";
 import { Card, CardHeader } from "@/components/ui/card";
@@ -17,19 +19,30 @@ import { Reveal } from "@/components/motion/reveal";
 import { StrategyCard } from "@/components/strategy/strategy-card";
 import { PlanHistory } from "@/components/strategy/plan-history";
 import { ProjectDisclosure } from "@/components/strategy/project-disclosure";
+import { ReliableHours } from "@/components/strategy/reliable-hours";
 import { PitWallCallout } from "@/components/forecast/pit-wall-callout";
 
 export default async function StrategyPage() {
-  const [dashboard, autoStrategy, cached, tasks, planVersions] =
+  const [dashboard, autoStrategy, cached, tasks, planVersions, workSessions] =
     await Promise.all([
       forecastDashboard(),
       getAutoStrategy(),
       getCachedStrategy(),
       listAllTasks(),
       listPlanVersions(),
+      listWorkSessions(),
     ]);
   const { forecasts, recoveries, pitWall, globalPlan } = dashboard;
   const tasksById = new Map(tasks.map((t) => [t.id, t]));
+
+  // "Your reliable hours" (S2 slice C) — per-window velocity over real sessions,
+  // calibrated to the same estimation bias the forecast uses. Empty until sessions
+  // accrue, so only surface the card once there's at least one to read.
+  const energy = energyWindows(
+    workSessionResidualSamples(workSessions, tasksById),
+    dashboard.model,
+  );
+  const totalSessions = energy.reduce((n, w) => n + w.sampleSize, 0);
   // taskId → project name (every open task is in the global order) so the card can
   // tag deferred tasks with their project — needed for cross-project triage.
   const projectNames = Object.fromEntries(
@@ -104,10 +117,19 @@ export default async function StrategyPage() {
         </Card>
       </Reveal>
 
+      {/* Your reliable hours (S2 §5a) — per-window velocity from real sessions.
+          Surfaced beside the strategist that uses the same read to temper its
+          cause diagnosis; shown only once there's at least one session. */}
+      {totalSessions > 0 && (
+        <Reveal delay={0.2} className="mt-7">
+          <ReliableHours windows={energy} />
+        </Reveal>
+      )}
+
       {/* Plan history — every applied bundle, newest first, with whole-bundle
           undo (vision §1.3). Shown only once there's something to record. */}
       {planVersions.length > 0 && (
-        <Reveal delay={0.2} className="mt-7">
+        <Reveal delay={0.25} className="mt-7">
           <Card>
             <CardHeader title="Plan history" icon={<History className="size-4" />} />
             <PlanHistory versions={planVersions} />

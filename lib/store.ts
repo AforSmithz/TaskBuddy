@@ -56,6 +56,8 @@ import {
   fitVelocityModel,
   taskResidualSamples,
   toSegmentModel,
+  workSessionResidualSamples,
+  type ResidualSample,
   type VelocityModel,
 } from "./velocity";
 import { goalCompletion } from "./goal";
@@ -2313,6 +2315,15 @@ interface ForecastGather {
    * resolves to the global prior, so the forecast starts at today's number.
    */
   velocityModel: VelocityModel;
+  /**
+   * The GLOBAL per-window velocity (OVERHAUL S2 slice C) — `model` shrunk per
+   * time-of-day window over every goal's session-tagged residuals. The energy-
+   * window read renders from it, and `diagnoseCause`'s placement tempering uses it
+   * as the prior. Empty session history ⇒ resolves to the global prior (no-regret).
+   */
+  windowVelocity: VelocityModel;
+  /** projectId → its tasks' window-tagged residuals — the per-goal placement sample. */
+  windowedResidualsByProject: Map<string, ResidualSample[]>;
   availability: Availability[];
   overrides: AvailabilityOverride[];
   /** All commitments INCLUDING the recurring drain (the base the forecast uses). */
@@ -2378,7 +2389,7 @@ function skillAllocWork(
 
 /** Collect deadlined projects, their open tasks, and the time budget. */
 async function gatherForecast(): Promise<ForecastGather> {
-  const [projects, entries, tasks, deps, rawBudget, activities, completions, valueModel, allSkillNodes, allGoalCriteria] =
+  const [projects, entries, tasks, deps, rawBudget, activities, completions, valueModel, allSkillNodes, allGoalCriteria, workSessions] =
     await Promise.all([
       listGoals(),
       listEntries(),
@@ -2390,6 +2401,7 @@ async function gatherForecast(): Promise<ForecastGather> {
       getValueModel(),
       listAllSkillNodes(),
       listAllGoalCriteria(),
+      listWorkSessions(),
     ]);
   const today = todayISO();
   // Fold the recurring drain into the commitment set the forecast reasons over.
@@ -2461,6 +2473,29 @@ async function gatherForecast(): Promise<ForecastGather> {
     (s) => s.domain,
     model,
   );
+  // S2 slice C — the WHEN axis. Join each goal's work sessions (local window) to
+  // its tasks for window-tagged residuals: the global window velocity (the energy
+  // windows the strategy surface renders + the placement-tempering prior) and the
+  // per-goal sample the tempering asks "is this goal's overrun just its windows?"
+  // over. Empty until session capture accrues ⇒ both resolve to the global prior.
+  const tasksById = new Map(tasks.map((t) => [t.id, t]));
+  const sessionsByProject = new Map<string, WorkSession[]>();
+  for (const ws of workSessions) {
+    const gid = ws.task_id ? tasksById.get(ws.task_id)?.goal_id : null;
+    if (!gid) continue;
+    const list = sessionsByProject.get(gid) ?? [];
+    list.push(ws);
+    sessionsByProject.set(gid, list);
+  }
+  const windowedResidualsByProject = new Map<string, ResidualSample[]>();
+  for (const [gid, sess] of sessionsByProject) {
+    windowedResidualsByProject.set(gid, workSessionResidualSamples(sess, tasksById));
+  }
+  const windowVelocity = fitVelocityModel(
+    [...windowedResidualsByProject.values()].flat(),
+    (s) => s.window,
+    model,
+  );
   return {
     projects: projects.filter((p) => p.deadline),
     tasksByProject,
@@ -2474,6 +2509,8 @@ async function gatherForecast(): Promise<ForecastGather> {
     projectNameById,
     model,
     velocityModel,
+    windowVelocity,
+    windowedResidualsByProject,
     availability: budget.availability,
     overrides: budget.overrides,
     commitments: budget.commitments,
@@ -3346,6 +3383,8 @@ function buildRecoveryPlan(
         reasons,
         currentProbability: fc.probability,
         baseline,
+        windowVelocity: g.windowVelocity,
+        windowedResiduals: g.windowedResidualsByProject.get(projectId),
       })
     : null;
 
@@ -3464,6 +3503,8 @@ export async function getRecoveryContext(
         reasons,
         currentProbability: fc.probability,
         baseline,
+        windowVelocity: g.windowVelocity,
+        windowedResiduals: g.windowedResidualsByProject.get(projectId),
       })
     : null;
 

@@ -25,7 +25,13 @@
 // With a single segment, x̄_s IS the global mean, so every μ_s = μ₀ ⇒ bit-
 // identical to today. It can only sharpen, never start worse than the prior.
 
-import type { EstimationModel, SegmentModel, Task, TimeWindow } from "./types";
+import type {
+  EstimationModel,
+  SegmentModel,
+  Task,
+  TimeWindow,
+  WorkSession,
+} from "./types";
 import { MIN_ESTIMATION_SAMPLES } from "./types";
 
 // `TimeWindow` lives in types.ts (the `WorkSession` row uses it too); re-exported
@@ -164,4 +170,92 @@ export function windowOf(localHour: number): TimeWindow {
   if (localHour >= 12 && localHour < 17) return "afternoon";
   if (localHour >= 17 && localHour < 22) return "evening";
   return "night"; // 22:00–04:59
+}
+
+/** Every window, in clock order — so a read covers them all even when unobserved. */
+export const ALL_WINDOWS: readonly TimeWindow[] = [
+  "early",
+  "morning",
+  "afternoon",
+  "evening",
+  "night",
+] as const;
+
+/** Human labels for the windows — shared by the UI surface + diagnosis messages. */
+export const WINDOW_LABELS: Record<TimeWindow, string> = {
+  early: "early-morning",
+  morning: "morning",
+  afternoon: "afternoon",
+  evening: "evening",
+  night: "late-night",
+};
+
+/** Clock ranges for the windows — the UI shows these under each label. */
+export const WINDOW_HOURS: Record<TimeWindow, string> = {
+  early: "05–09",
+  morning: "09–12",
+  afternoon: "12–17",
+  evening: "17–22",
+  night: "22–05",
+};
+
+/**
+ * One time-of-day window's learned velocity (OVERHAUL S2 slice C). The READ the
+ * "your reliable hours" surface renders and the S3b arrangement layer will consume
+ * to place hard work in good hours.
+ */
+export interface EnergyWindow {
+  window: TimeWindow;
+  /** `exp(meanLog)` — work runs this × your estimate here. >1 = slower, <1 = faster. */
+  multiplier: number;
+  /** This window's OWN session count — 0 when unobserved (then `multiplier` is the global baseline). */
+  sampleSize: number;
+}
+
+/**
+ * The per-window velocity multipliers — the same shrinkage core (`fitVelocityModel`)
+ * keyed by `window`, exposed as a stable, all-windows read. A window with no
+ * sessions reports `sampleSize: 0` and the global multiplier (`exp(μ₀)`), so a
+ * consumer can de-emphasize it; a thin window is already shrunk toward the global
+ * prior, so its multiplier never over-states sparse evidence. Pure — no DB.
+ */
+export function energyWindows(
+  samples: ResidualSample[],
+  prior: EstimationModel,
+): EnergyWindow[] {
+  const vm = fitVelocityModel(samples, (s) => s.window, prior);
+  const counts = new Map<TimeWindow, number>();
+  for (const s of samples) counts.set(s.window, (counts.get(s.window) ?? 0) + 1);
+  return ALL_WINDOWS.map((w) => ({
+    window: w,
+    multiplier: Math.exp(vm.forSegment(w).meanLog),
+    sampleSize: counts.get(w) ?? 0,
+  }));
+}
+
+/**
+ * Join `work_sessions` (the local when-signal, slice B) to their tasks to produce
+ * window/weekday-tagged residuals — the slice-C source for `energyWindows` and the
+ * `diagnoseCause` placement tempering. Only TASK sessions yield a residual (a
+ * routine session has no estimate); the same gate as `taskResidualSamples`
+ * (estimate > 0, actual > 0) so the residual means the same thing across axes.
+ * `tasksById` is the caller's task lookup (it already holds the rows).
+ */
+export function workSessionResidualSamples(
+  sessions: WorkSession[],
+  tasksById: Map<string, Task>,
+): ResidualSample[] {
+  const out: ResidualSample[] = [];
+  for (const s of sessions) {
+    if (!s.task_id) continue;
+    const t = tasksById.get(s.task_id);
+    if (!t || t.estimated_minutes <= 0 || t.actual_minutes <= 0) continue;
+    out.push({
+      residualLog: Math.log(t.actual_minutes / t.estimated_minutes),
+      domain: t.area,
+      weekday: s.weekday,
+      window: s.time_window,
+    });
+  }
+  return out;
 }

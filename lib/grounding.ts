@@ -9,8 +9,10 @@ import type {
   SkillNode,
   StrategyMoveKind,
   Task,
+  TimeWindow,
 } from "./types";
 import { MIN_ESTIMATION_SAMPLES } from "./types";
+import { WINDOW_LABELS, type ResidualSample, type VelocityModel } from "./velocity";
 import { goalCompletion } from "./goal";
 import { skillProgress } from "./skill";
 
@@ -64,6 +66,19 @@ export interface CauseInput {
   currentProbability: number;
   /** The temporal/odds baseline, or null when no strategy is cached yet. */
   baseline: CauseBaseline | null;
+  /**
+   * The GLOBAL per-window velocity (OVERHAUL S2 slice C) — how much each time-of-day
+   * window runs over/under your estimates, across all goals. Absent until session
+   * capture accrues; when absent the placement tempering can't fire and the
+   * diagnosis is bit-identical to before S2 (the no-regret anchor).
+   */
+  windowVelocity?: VelocityModel;
+  /**
+   * This goal's window-tagged residuals (its completed tasks joined to their work
+   * sessions). The placement check asks whether this goal's overrun is just the
+   * low-energy windows it worked in. Absent/sparse ⇒ no tempering.
+   */
+  windowedResiduals?: ResidualSample[];
 }
 
 /** log(actual/estimated) for each genuinely-timed done task — the residual sample. */
@@ -89,6 +104,45 @@ function mean(xs: number[]): number {
 }
 
 /**
+ * S2 placement tempering: is this goal's chronic-looking overrun explained by the
+ * low-energy WINDOWS it was worked in, rather than bad estimates? Net of each
+ * window's global slowdown (`μ_window − μ₀`), does the goal's mean residual fall
+ * back below the chronic threshold? If so, returns the window most responsible (+
+ * how much slower it runs than your norm) for the message; else null.
+ *
+ * Inert until the loop has learned the windows: needs real `windowVelocity` and a
+ * non-sparse window-tagged sample, so before S2 capture accrues it returns null and
+ * the diagnosis is bit-identical to before (the no-regret anchor). It can only ever
+ * DEMOTE a chronic_velocity reading — the conservative direction (§0; deterministic).
+ */
+function placementExplains(
+  samples: ResidualSample[],
+  windowVelocity: VelocityModel | undefined,
+): { window: TimeWindow; slowerPct: number } | null {
+  if (!windowVelocity || samples.length < MIN_ESTIMATION_SAMPLES) return null;
+  const mu0 = windowVelocity.global.meanLog;
+  let raw = 0;
+  let adjusted = 0;
+  let worst: TimeWindow | null = null;
+  let worstEffect = 0;
+  for (const s of samples) {
+    const effect = windowVelocity.forSegment(s.window).meanLog - mu0;
+    raw += s.residualLog;
+    adjusted += s.residualLog - effect;
+    if (effect > worstEffect) {
+      worstEffect = effect;
+      worst = s.window;
+    }
+  }
+  const n = samples.length;
+  // Chronic raw, but not once the windows are accounted for ⇒ it's placement.
+  if (raw / n < LN_CHRONIC_OVERRUN || adjusted / n >= LN_CHRONIC_OVERRUN) return null;
+  // adjusted < raw guarantees some positive window effect, so `worst` is set.
+  if (worst === null) return null;
+  return { window: worst, slowerPct: Math.round((Math.exp(worstEffect) - 1) * 100) };
+}
+
+/**
  * Classify *why* a goal diverged. Deterministic-first (§0). The checks run in a
  * fixed precedence so each cause means what it says:
  *
@@ -98,7 +152,9 @@ function mean(xs: number[]): number {
  *      rather than over-react to an expected missed Friday.
  *   2. chronic_velocity — estimates systematically run over, globally or for this
  *      goal once it has its own sample. The estimates are the problem, not the
- *      arrangement.
+ *      arrangement. (2a) timing_placement intercepts the goal's own chronic read
+ *      when the overrun is explained by the low-energy windows it was worked in —
+ *      a placement problem, not an estimation one (S2; inert until windows learned).
  *   3. constraint_change — neither slip nor pattern explains it, but the world
  *      moved since the plan was made (new work landed, or the odds fell).
  *   4. scope_structural — the default: more committed work than the time allows.
@@ -134,6 +190,23 @@ export function diagnoseCause(input: CauseInput): CauseDiagnosis {
     model.sampleSize >= MIN_ESTIMATION_SAMPLES &&
     model.meanLog >= LN_CHRONIC_OVERRUN;
   if (goalChronic || globalChronic) {
+    // 2a) timing_placement (S2) — before blaming the estimates, check whether THIS
+    //     goal's overrun is just the low-energy windows it was worked in. If net of
+    //     the windows the pace is fine, it's a placement problem (reschedule into
+    //     better hours), not an estimation one. Only demotes the goal's own chronic
+    //     read — a purely global bias is genuinely chronic_velocity.
+    if (goalChronic) {
+      const placement = placementExplains(
+        input.windowedResiduals ?? [],
+        input.windowVelocity,
+      );
+      if (placement) {
+        return {
+          cause: "timing_placement",
+          detail: `The overruns here line up with your ${WINDOW_LABELS[placement.window]} sessions (~${placement.slowerPct}% slower than your norm), not your estimates — move this work into stronger hours rather than re-estimating or cutting scope.`,
+        };
+      }
+    }
     const logBias = goalChronic ? (goalMean as number) : model.meanLog;
     const pct = Math.round((Math.exp(logBias) - 1) * 100);
     return {
@@ -190,6 +263,8 @@ export function diagnoseCause(input: CauseInput): CauseDiagnosis {
 //   one_off_slip      → smallest defer / reschedule (don't cut scope)
 //   chronic_velocity  → re-estimate (reshape) / move the deadline (the estimates,
 //                       not the arrangement, are wrong)
+//   timing_placement  → smallest reschedule into stronger hours (S2; the windows,
+//                       not the estimates, are wrong — don't reshape or cut scope)
 //   constraint_change → reroute / reschedule / triage (re-plan around the change)
 //   scope_structural  → triage / reroute (shed genuine over-commitment)
 //
@@ -220,6 +295,17 @@ export const CAUSE_MOVE_PREFERENCES: Record<
     reshape: 1,
     reschedule_deadline: 0.5,
     reroute: -0.25,
+  },
+  // Not the estimates — the work keeps landing in low-energy windows. Move it to
+  // stronger hours (smallest reschedule); don't re-estimate or cut scope for it.
+  // Mirrors one_off_slip's "don't over-react" shape (the placement is fixable).
+  timing_placement: {
+    reschedule_task: 0.5,
+    defer: 0.5,
+    reschedule_deadline: 0.25,
+    reshape: -0.5,
+    reroute: -0.25,
+    triage: -1,
   },
   // The world moved — re-plan around the new constraint rather than blaming pace.
   constraint_change: {
