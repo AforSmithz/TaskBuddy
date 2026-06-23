@@ -50,6 +50,19 @@ function daysBetween(a: string, b: string): number {
   return Math.round((db - da) / 86_400_000);
 }
 
+/**
+ * A task's cognitive-load weight in `[0,1]` from its 1-5 `effort` factor — the
+ * "hard work" axis the S3b comfort cap meters (OVERHAUL §5a Phase 3). Productivity
+ * research caps *sustainable focused work* at ~3-4 h/day; `effort` is the dedicated
+ * difficulty factor, so a task's **hard minutes** = `difficulty × estimatedMinutes`.
+ * effort 1 ⇒ 0 (trivial, doesn't tax a deep-work day), effort 5 ⇒ 1 (fully
+ * demanding); a missing score reads as the neutral middle (3 ⇒ 0.5). Pure.
+ */
+export function effortToDifficulty(effortScore: number | null | undefined): number {
+  const e = effortScore ?? 3;
+  return Math.min(1, Math.max(0, (e - 1) / 4));
+}
+
 // --- Task input -------------------------------------------------------------
 
 /**
@@ -83,6 +96,13 @@ export interface AllocTask {
    * the sampler — never the ordering (cost-of-delay / WSJF ignore it).
    */
   model?: SegmentModel;
+  /**
+   * Cognitive-load weight in `[0,1]` (OVERHAUL S3b Phase 3 — the comfort cap's "hard
+   * work" axis; see `effortToDifficulty`). Carried verbatim onto the order entry so the
+   * comfort-capped flow can meter hard minutes per day. Optional — absent ⇒ unmetered
+   * (0), so a plan with no difficulty signal degrades to today (no comfort capping).
+   */
+  difficulty?: number;
 }
 
 export interface GlobalPlanInput {
@@ -283,6 +303,8 @@ export function effectiveOrder(
       estimatedMinutes: next.estimatedMinutes,
       // Carry the per-task velocity model (S2) into the order the forecast samples.
       model: next.model,
+      // Carry the cognitive-load weight (S3b) so the comfort-capped flow meters it.
+      difficulty: next.difficulty,
       rank: order.length,
       pulledAhead: Boolean(leapfrogged),
       reason: leapfrogged
@@ -328,12 +350,15 @@ function reasonFor(
 /**
  * Pack the global order across the real shared days, tagging every block with
  * its project. Generalises `generateSchedule` (already wall-clock-free): same
- * greedy day-packing, one budget shared by all projects.
+ * greedy day-packing, one budget shared by all projects. With `comfortCapMinutes`
+ * (OVERHAUL S3b Phase 3) the display mirrors the comfort-capped flow — hard work is
+ * spread across days so the shown plan matches its comfort-priced odds; null ⇒ today's pack.
  */
 export function packGlobal(
   order: EffectiveOrderEntry[],
   budget: ScheduleBudget,
   today: string,
+  comfortCapMinutes?: number | null,
 ): ScheduleDay[] {
   const capacities = dayCapacities(budget, today);
   const items: PackItem[] = order.map((e) => ({
@@ -344,11 +369,15 @@ export function packGlobal(
     projectId: e.projectId,
     projectName: e.projectName,
   }));
+  const comfort =
+    comfortCapMinutes != null
+      ? { difficulty: order.map((e) => e.difficulty ?? 0), comfortCap: comfortCapMinutes }
+      : undefined;
   return packBlocks(
     items,
     capacities,
     (it) => Math.max(15, it.estimatedMinutes || 30),
-    { reviewBuffer: true },
+    { reviewBuffer: true, comfort },
   ).days;
 }
 

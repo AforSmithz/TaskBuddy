@@ -25,7 +25,7 @@ import type {
 import { computePriority } from "./priority";
 import { dayCapacities, type DayCapacity, type DependencyEdge } from "./schedule";
 import { globalForecastJoint, type ForecastOptions } from "./forecast";
-import { buildGlobalPlan, effectiveOrder, type AllocTask } from "./allocate";
+import { buildGlobalPlan, effectiveOrder, effortToDifficulty, type AllocTask } from "./allocate";
 import { activityDrainCommitments, currentWeekOwedDates } from "./recurring";
 import { windowCapacities, type WindowProfile } from "./arrange";
 
@@ -135,6 +135,8 @@ export function syntheticAllocTask(
     urgency: f.urgency,
     impact: f.impact,
     risk: f.risk,
+    // S3b: cognitive-load weight, so injected work is metered by the comfort cap too.
+    difficulty: effortToDifficulty(f.effort),
   };
 }
 

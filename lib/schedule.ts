@@ -304,6 +304,49 @@ export function packOffsets(
 }
 
 /**
+ * The comfort-capped variant of `packOffsets` (OVERHAUL S3b Phase 3): the same greedy
+ * single-day assignment, but ALSO meter each day's HARD-work minutes (`hardMinutes[k]` =
+ * a task's difficulty-weighted minutes) against a soft daily `comfortCap`. A hard task
+ * rolls to the next open day when the current day already holds hard work and this task
+ * would push it past the cap — so deep work spreads across days instead of cramming one.
+ * The total per-day capacity still bounds placement. With `comfortCap === Infinity` (or
+ * all `hardMinutes === 0`) it never rolls for the cap ⇒ byte-identical to `packOffsets`.
+ */
+export function packOffsetsComfort(
+  durations: number[],
+  capacities: DayCapacity[],
+  hardMinutes: number[],
+  comfortCap: number,
+): number[] {
+  const offsets = new Array<number>(durations.length).fill(0);
+  if (capacities.length === 0) return offsets;
+
+  let dayIdx = firstOpenDay(capacities, 0);
+  if (dayIdx >= capacities.length) return offsets.fill(capacities.length - 1);
+
+  let used = 0;
+  let hardUsed = 0;
+  for (let k = 0; k < durations.length; k++) {
+    const hard = hardMinutes[k];
+    const rollTotal = used > 0 && used + durations[k] > capacities[dayIdx].capacityMinutes;
+    const rollHard = hard > 0 && hardUsed > 0 && hardUsed + hard > comfortCap;
+    if (rollTotal || rollHard) {
+      const next = firstOpenDay(capacities, dayIdx + 1);
+      if (next < capacities.length) {
+        dayIdx = next;
+        used = 0;
+        hardUsed = 0;
+      }
+      // else: past the horizon — stay on the current day and overrun it.
+    }
+    offsets[k] = dayIdx;
+    used += durations[k];
+    hardUsed += hard;
+  }
+  return offsets;
+}
+
+/**
  * Time-accurate finish offsets: walk `durations` (in order) and flow each task's
  * minutes across day capacities as a continuous resource — a task longer than a
  * day's remaining time spills into the following days, finishing on the day its
@@ -338,6 +381,71 @@ export function flowFinishOffsets(
       remaining = capacities[dayIdx].capacityMinutes;
     }
     remaining -= need;
+    offsets[k] = dayIdx;
+  }
+  return offsets;
+}
+
+/**
+ * The comfort-capped generalisation of `flowFinishOffsets` (OVERHAUL S3b Phase 3): flow
+ * `durations` across day capacities exactly as `flowFinishOffsets` does (a task longer
+ * than a day spills into following days), but ALSO meter each day's HARD-work minutes
+ * (`hardMinutes[k]` = a task's difficulty-weighted minutes) against a soft daily
+ * `comfortCap`. Before a hard task starts, if the current day already holds hard work and
+ * adding it would exceed the cap, it rolls to the next open day first — spreading deep
+ * work across days. Hard load is booked on the day the task lands; a single task bigger
+ * than the cap can't be split, so it overruns the cap on its own day (the cap is soft).
+ *
+ * No-regret: with `comfortCap === Infinity` (or every `hardMinutes === 0`) it NEVER rolls
+ * for the cap, so it is byte-identical to `flowFinishOffsets` — the regression the harness
+ * pins. The deadline check stays day-granular (returns finish-day offsets), so the gate is
+ * apples-to-apples against the canonical (uncapped) forecast.
+ */
+export function flowFinishOffsetsComfort(
+  durations: number[],
+  capacities: DayCapacity[],
+  hardMinutes: number[],
+  comfortCap: number,
+): number[] {
+  const offsets = new Array<number>(durations.length).fill(0);
+  if (capacities.length === 0) return offsets;
+
+  let dayIdx = firstOpenDay(capacities, 0);
+  if (dayIdx >= capacities.length) return offsets.fill(capacities.length - 1);
+
+  let remaining = capacities[dayIdx].capacityMinutes;
+  let hardUsed = 0;
+  for (let k = 0; k < durations.length; k++) {
+    const hard = hardMinutes[k];
+    // Comfort roll: a deep-work block that won't fit the day's hard budget (and the day
+    // already holds hard work) waits for the next open day.
+    if (hard > 0 && hardUsed > 0 && hardUsed + hard > comfortCap) {
+      const next = firstOpenDay(capacities, dayIdx + 1);
+      if (next >= capacities.length) {
+        for (let j = k; j < durations.length; j++) offsets[j] = capacities.length - 1;
+        return offsets;
+      }
+      dayIdx = next;
+      remaining = capacities[dayIdx].capacityMinutes;
+      hardUsed = 0;
+    }
+    let need = durations[k];
+    let spilled = false;
+    while (need > remaining) {
+      const next = firstOpenDay(capacities, dayIdx + 1);
+      if (next >= capacities.length) {
+        for (let j = k; j < durations.length; j++) offsets[j] = capacities.length - 1;
+        return offsets;
+      }
+      need -= remaining;
+      dayIdx = next;
+      remaining = capacities[dayIdx].capacityMinutes;
+      spilled = true;
+    }
+    remaining -= need;
+    // Hard load counts on the day the task lands; a spilled task resets the day's hard
+    // tally to its own load (it's the only work on that landing day so far).
+    hardUsed = spilled ? hard : hardUsed + hard;
     offsets[k] = dayIdx;
   }
   return offsets;
@@ -438,13 +546,19 @@ export interface PackResult {
  * Pack `items` into real days using `packOffsets`, building the rich
  * `ScheduleDay[]` view. `durationOf` supplies each item's minutes — a point
  * estimate for a deterministic schedule, a sampled duration inside a simulation.
- * With `reviewBuffer`, a closing buffer caps the last day with work.
+ * With `reviewBuffer`, a closing buffer caps the last day with work. With `comfort`,
+ * the display mirrors the comfort-capped flow (OVERHAUL S3b Phase 3): each item's hard
+ * minutes (`difficulty × its packed duration`) are metered per day against `comfortCap`,
+ * so the shown plan matches its comfort-priced odds. Absent ⇒ today's greedy pack.
  */
 export function packBlocks(
   items: PackItem[],
   capacities: DayCapacity[],
   durationOf: (item: PackItem) => number,
-  opts: { reviewBuffer?: boolean } = {},
+  opts: {
+    reviewBuffer?: boolean;
+    comfort?: { difficulty: number[]; comfortCap: number };
+  } = {},
 ): PackResult {
   // No deployable time anywhere in the horizon — no schedule to show.
   if (items.length === 0 || firstOpenDay(capacities, 0) >= capacities.length) {
@@ -452,7 +566,14 @@ export function packBlocks(
   }
 
   const durations = items.map(durationOf);
-  const offsets = packOffsets(durations, capacities);
+  const offsets = opts.comfort
+    ? packOffsetsComfort(
+        durations,
+        capacities,
+        durations.map((d, i) => (opts.comfort!.difficulty[i] ?? 0) * d),
+        opts.comfort.comfortCap,
+      )
+    : packOffsets(durations, capacities);
 
   const days: ScheduleDay[] = [];
   const dayByOffset = new Map<number, ScheduleDay>();

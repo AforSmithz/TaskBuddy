@@ -8,6 +8,7 @@ import type {
 } from "./types";
 import {
   flowFinishOffsets,
+  flowFinishOffsetsComfort,
   flowFinishOffsetsLanes,
   type DayCapacity,
   type FlowLane,
@@ -151,6 +152,16 @@ export interface ForecastOptions {
    * still taken from `capacities`, so determinism is unchanged.
    */
   windowCapacities?: WindowCapacity[];
+  /**
+   * OVERHAUL S3b Phase 3 — comfort-capped load smoothing. When set, `globalForecastJoint`
+   * flows the sampled durations through `flowFinishOffsetsComfort`: each day's HARD minutes
+   * (`task.difficulty × sampled duration`) are metered against this soft daily ceiling, so
+   * deep work spreads across days (finishing later — the honestly-priced cost of a humaner
+   * pace). Absent is byte-identical to today; takes precedence over `windowCapacities` this
+   * phase (comfort + window composition is a later refinement). The deadline check stays
+   * day-granular, so the result is comparable to the canonical (uncapped) forecast.
+   */
+  comfortCapMinutes?: number;
 }
 
 /**
@@ -251,6 +262,12 @@ export interface GlobalForecastTask {
    * one joint run. See `lib/velocity.ts`.
    */
   model?: SegmentModel;
+  /**
+   * Cognitive-load weight in `[0,1]` (OVERHAUL S3b Phase 3). When `options.comfortCap‑
+   * Minutes` is set, the joint flow meters each day's hard minutes (`difficulty × sampled
+   * duration`) against the cap, spreading deep work across days. Absent ⇒ unmetered (0).
+   */
+  difficulty?: number;
 }
 
 /**
@@ -349,6 +366,15 @@ export function globalForecastJoint(
       }))
     : null;
 
+  // OVERHAUL S3b Phase 3 — comfort-capped smoothing: meter each day's HARD minutes
+  // (a task's difficulty × its sampled duration) against a soft ceiling, spreading deep
+  // work across days. The difficulty weights are static (read once); the hard vector is
+  // refilled per iteration from the sampled durations. Takes precedence over windows this
+  // phase (composition deferred); absent ⇒ the exact day-granular / windowed path.
+  const comfortCap = options.comfortCapMinutes;
+  const difficulties = comfortCap != null ? order.map((t) => t.difficulty ?? 0) : null;
+  const hard = comfortCap != null ? new Array<number>(order.length).fill(0) : null;
+
   const durations = new Array<number>(order.length).fill(0);
   const hits = new Map<string, number>();
   for (const pid of indicesByProject.keys()) hits.set(pid, 0);
@@ -367,9 +393,15 @@ export function globalForecastJoint(
             Math.exp((m?.meanLog ?? meanLog) + (m?.sigma ?? sigma) * nextNormal(rng))
           : 0;
     }
-    const offsets = windowLanes
-      ? flowFinishOffsetsLanes(durations, windowLanes)
-      : flowFinishOffsets(durations, capacities);
+    let offsets: number[];
+    if (comfortCap != null) {
+      for (let k = 0; k < order.length; k++) hard![k] = difficulties![k] * durations[k];
+      offsets = flowFinishOffsetsComfort(durations, capacities, hard!, comfortCap);
+    } else if (windowLanes) {
+      offsets = flowFinishOffsetsLanes(durations, windowLanes);
+    } else {
+      offsets = flowFinishOffsets(durations, capacities);
+    }
     // Whether EVERY scored project landed on time in THIS sampled future — the
     // joint conjunction counter (decision: P(all deadlined projects meet date)).
     let allHit = true;

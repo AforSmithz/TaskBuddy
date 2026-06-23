@@ -945,6 +945,12 @@ export interface EffectiveOrderEntry {
    * its own domain velocity. Absent ⇒ the global scalar in the forecast options.
    */
   model?: SegmentModel;
+  /**
+   * Cognitive-load weight in `[0,1]` (OVERHAUL S3b Phase 3): the comfort-capped flow
+   * meters each day's **hard minutes** (`difficulty × sampled duration`) against the
+   * daily comfort cap. Absent ⇒ unmetered (0). See `allocate.ts effortToDifficulty`.
+   */
+  difficulty?: number;
 }
 
 /**

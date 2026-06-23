@@ -1,11 +1,15 @@
-import type {
-  DayCapacity,
-  DependencyEdge,
-  ScheduleDay,
-  ScheduledBlock,
-  WindowCapacity,
+import {
+  flowFinishOffsets,
+  flowFinishOffsetsComfort,
+  packOffsets,
+  type DayCapacity,
+  type DependencyEdge,
+  type ScheduleDay,
+  type ScheduledBlock,
+  type WindowCapacity,
 } from "./schedule";
-import type { EstimationModel } from "./types";
+import type { EffectiveOrderEntry, EstimationModel } from "./types";
+import { globalForecastJoint, type ForecastOptions } from "./forecast";
 import { ALL_WINDOWS, type EnergyWindow, type TimeWindow } from "./velocity";
 
 // Local arrangement optimizer (OVERHAUL §5a substrate S3b) — the *arrangement*
@@ -29,7 +33,7 @@ import { ALL_WINDOWS, type EnergyWindow, type TimeWindow } from "./velocity";
 
 /** Per-objective weights for the soft score `J` (lower is better). All knobs. */
 export interface ArrangeWeights {
-  /** Penalty per project change across a day's within-day sequence. */
+  /** Penalty per project change across a day's within-day sequence (Phase 1). */
   switch: number;
 }
 
@@ -295,4 +299,165 @@ function splitMinutes(total: number, share: Record<TimeWindow, number>): number[
     remainder--;
   }
   return parts;
+}
+
+// --- Pillar 3 (Phase 3, slice 1): comfort-capped load smoothing ---
+//
+// Phases 1-2 arranged WITHIN a day (context-switch grouping, odds-neutral) and PRICED the
+// canonical order's window placement. This is the first arrangement that changes the odds:
+// it spreads HARD (cognitively-demanding) work across days so no day piles on more than a
+// sustainable amount — productivity research caps focused work at ~3-4 h/day (Ericsson;
+// "deep work"), and resource SMOOTHING relaxes a plan within its slack rather than levelling
+// it to the deadline (which Parkinson's Law would just refill). Spreading work later costs
+// completion odds, so the move is odds-GATED, never odds-authoring: a comfort-capped plan is
+// admissible only while its `allOnTime ≥ canonical − ε`. `forecast()` stays the sole owner
+// of odds (§0); the smoother only chooses among layouts the Monte Carlo prices.
+//
+// The order is UNCHANGED — only the per-day hard-work cap shifts WHEN work happens (no
+// reorder, so dependencies/grouping are preserved for free, and the client reproduces the
+// plan from a single shipped scalar in slice 2). Two-stage pricing: a deterministic
+// point-estimate scan finds the most-comfortable cap that keeps every deadline; the full MC
+// then gates it. No RNG ⇒ identical inputs, identical plan.
+
+/** Target soft daily ceiling on HARD work (minutes) — what the smoother relaxes toward.
+ *  ~4 h is the generous end of the sustainable focused-work window. A knob, calibrated later. */
+export const COMFORT_CAP_MINUTES = 240;
+/** Gate slack: a comfort-capped plan is admissible only if its `allOnTime` stays within this
+ *  of the canonical (uncapped) plan's — it may spend a sliver of slack to relax the pace. */
+export const ARRANGE_ODDS_EPSILON = 0.02;
+
+export interface ComfortSmoothOptions {
+  /** Estimation-bias options for the MC (sigma/meanLog; iterations optional). */
+  forecast: ForecastOptions;
+  /** Window profile for the canonical baseline's windowed pricing (the comfort flow itself
+   *  is day-granular this phase, so the gate stays conservative when windows are favourable;
+   *  comfort + window composition is a later refinement). */
+  windowProfile?: WindowProfile | null;
+  /** Hard-work ceiling to relax toward (default COMFORT_CAP_MINUTES). */
+  comfortCapMinutes?: number;
+  /** Gate slack on `allOnTime` (default ARRANGE_ODDS_EPSILON). */
+  oddsEpsilon?: number;
+}
+
+export interface ComfortSmoothResult {
+  /** The applied hard-work cap (minutes) when smoothing fired, else null (canonical). The
+   *  single scalar slice 2 ships to the client to reproduce the plan. */
+  comfortCapMinutes: number | null;
+  /** The MC odds of the RETURNED plan (comfort-capped when applied, else canonical) — the
+   *  headline is always the plan you follow. */
+  joint: { byProject: Map<string, number>; allOnTime: number };
+  /** Whether comfort smoothing was applied (false ⇒ canonical / no affordable relaxation). */
+  changed: boolean;
+}
+
+/** Each deadlined project's point-estimate lateness (`max(0, finishOffset − deadline)`) for
+ *  the given finish offsets — the cheap, monotone feasibility proxy the cap scan screens on. */
+function perProjectOverBy(
+  offsets: number[],
+  order: EffectiveOrderEntry[],
+  deadlineOffset: Map<string, number>,
+): Map<string, number> {
+  const lastByProject = new Map<string, number>();
+  for (let k = 0; k < order.length; k++) {
+    const pid = order[k].projectId;
+    if (!deadlineOffset.has(pid)) continue;
+    const cur = lastByProject.get(pid);
+    if (cur === undefined || offsets[k] > cur) lastByProject.set(pid, offsets[k]);
+  }
+  const over = new Map<string, number>();
+  for (const [pid, fin] of lastByProject) {
+    over.set(pid, Math.max(0, fin - deadlineOffset.get(pid)!));
+  }
+  return over;
+}
+
+/**
+ * Spread hard work across days up to the comfort cap, but only when slack allows
+ * (resource smoothing within float). Applies the target hard-work cap iff its
+ * comfort-capped plan keeps every deadline (point-estimate screen) AND holds `allOnTime ≥
+ * canonical − ε` (full MC gate); otherwise canonical stands (no affordable relaxation).
+ * The order is never changed — only the per-day hard budget shifts WHEN work lands. Pure:
+ * same inputs ⇒ same result. (A graduated scan over intermediate caps is a refinement; in
+ * practice the gate is near all-or-nothing — full comfort under a loose deadline, none
+ * under a tight one — so a single target keeps the mechanism honest and simple.)
+ */
+export function comfortSmooth(
+  order: EffectiveOrderEntry[],
+  capacities: DayCapacity[],
+  deadlineByProject: Map<string, string | null>,
+  today: string,
+  opts: ComfortSmoothOptions,
+): ComfortSmoothResult {
+  const target = opts.comfortCapMinutes ?? COMFORT_CAP_MINUTES;
+  const epsilon = opts.oddsEpsilon ?? ARRANGE_ODDS_EPSILON;
+
+  // Canonical (uncapped) baseline — windowed when a profile is present, so a no-smooth
+  // result matches the dashboard's existing headline exactly.
+  const windowCaps = opts.windowProfile
+    ? windowCapacities(capacities, opts.windowProfile)
+    : undefined;
+  const canonicalOpts: ForecastOptions = windowCaps
+    ? { ...opts.forecast, windowCapacities: windowCaps }
+    : opts.forecast;
+  const canonicalJoint = globalForecastJoint(
+    order,
+    capacities,
+    deadlineByProject,
+    today,
+    canonicalOpts,
+  );
+  const noChange: ComfortSmoothResult = {
+    comfortCapMinutes: null,
+    joint: canonicalJoint,
+    changed: false,
+  };
+  // Nothing to spread: a single task, or no hard-work signal anywhere ⇒ today's plan.
+  if (order.length <= 1 || !order.some((e) => (e.difficulty ?? 0) > 0)) return noChange;
+
+  const deadlineOffset = new Map<string, number>();
+  for (const [pid, dl] of deadlineByProject) {
+    if (dl) deadlineOffset.set(pid, dayOffset(today, dl));
+  }
+
+  const durations = order.map((e) => Math.max(0, e.estimatedMinutes));
+  const hardPoint = order.map((e, i) => (e.difficulty ?? 0) * durations[i]);
+
+  // Nothing exceeds the comfort cap already ⇒ no day to relieve ⇒ today's plan stands.
+  // (A cap ≥ every day's hard load never binds, so the comfort flow == the canonical flow.)
+  const canonPack = packOffsets(durations, capacities);
+  const hardByDay = new Map<number, number>();
+  for (let k = 0; k < order.length; k++) {
+    hardByDay.set(canonPack[k], (hardByDay.get(canonPack[k]) ?? 0) + hardPoint[k]);
+  }
+  let maxHardPerDay = 0;
+  for (const h of hardByDay.values()) if (h > maxHardPerDay) maxHardPerDay = h;
+  if (maxHardPerDay <= target) return noChange;
+
+  // The canonical point-estimate lateness per project — the cap must not worsen it (spread
+  // later, never past a met deadline nor a late project further).
+  const canonicalOver = perProjectOverBy(
+    flowFinishOffsets(durations, capacities),
+    order,
+    deadlineOffset,
+  );
+
+  // Stage 1 — deterministic point-estimate screen: does the comfort cap still hit every
+  // deadline it currently hits (spread later, never past a met deadline nor a late one)?
+  const proxyOver = perProjectOverBy(
+    flowFinishOffsetsComfort(durations, capacities, hardPoint, target),
+    order,
+    deadlineOffset,
+  );
+  for (const [pid, over] of proxyOver) {
+    if (over > (canonicalOver.get(pid) ?? 0)) return noChange;
+  }
+  // Stage 2 — the full MC gate: spread only as far as the odds can afford.
+  const joint = globalForecastJoint(order, capacities, deadlineByProject, today, {
+    ...opts.forecast,
+    comfortCapMinutes: target,
+  });
+  if (joint.allOnTime >= canonicalJoint.allOnTime - epsilon) {
+    return { comfortCapMinutes: target, joint, changed: true };
+  }
+  return noChange;
 }

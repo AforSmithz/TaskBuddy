@@ -87,6 +87,8 @@ import {
 import {
   buildGlobalPlan,
   detectConflicts,
+  effortToDifficulty,
+  packGlobal,
   projectValue,
   triageCandidates,
   type AllocTask,
@@ -94,6 +96,7 @@ import {
 } from "./allocate";
 import {
   arrange,
+  comfortSmooth,
   windowCapacities,
   windowProfileFromEnergy,
   type WindowProfile,
@@ -2567,6 +2570,8 @@ function buildAllocTasks(g: ForecastGather): AllocTask[] {
         // S2: bias this task's forecast by its life-area's own velocity (shrunk
         // toward the global bias; a sparse/new area resolves back to it).
         model: toSegmentModel(g.velocityModel.forSegment(t.area)),
+        // S3b: cognitive-load weight (the comfort cap's "hard work" axis).
+        difficulty: effortToDifficulty(t.effort_score),
       });
     }
   }
@@ -3007,25 +3012,40 @@ export async function forecastDashboard(): Promise<{
     getCachedStrategy(),
   ]);
   const ctx = allocContext(g, g.commitments);
-  const odds = jointOdds(g, ctx);
-  const forecasts = buildForecasts(g, g.commitments, odds);
-  const pitWall = buildPitWall(g, ctx, odds);
-  const recoveries = g.projects
-    .map((p) => buildRecoveryPlan(g, p, odds, pitWall.conflicts, cachedStrategy))
-    .filter((plan): plan is RecoveryPlan => plan !== null);
   // The canonical plan over all current open work (no triage shedding) — the
   // cross-project order + the unified schedule. Recurring is NOT in here, so the
   // schedule/forecast never double-count its already-drained hours.
-  const globalPlan = buildGlobalPlan({
+  const canonical = buildGlobalPlan({
     tasks: ctx.tasks,
     deps: ctx.deps,
     deadlineByProject: g.deadlineByProject,
     budget: ctx.budget,
     today: g.today,
   });
-  // S3b Phase 1: re-sequence each near-horizon day to cut context-switches. This
-  // permutes blocks *within* a day only, so every task keeps its day — the
-  // forecast/odds are untouched (odds-neutral by construction).
+  // S3b Phase 3 (slice 1): spread HARD work across days up to a comfort cap, as far as the
+  // odds gate allows (resource smoothing within slack — productivity research caps focused
+  // work at ~3-4 h/day). The order is UNCHANGED; only WHEN hard work lands shifts. The
+  // returned odds are the comfort plan's, so the headline is always the plan you follow
+  // (no-regret: no hard-work signal or no affordable slack ⇒ canonical, bit-for-bit).
+  // Localized to the dashboard this slice — the strategy optimizer + S1 client re-solve
+  // still read the canonical (uncapped) plan (a ≤ε divergence, closed in slice 2).
+  const smoothed = comfortSmooth(canonical.order, ctx.capacities, g.deadlineByProject, g.today, {
+    forecast: forecastOptions(g.model),
+    windowProfile: g.windowProfile,
+  });
+  const odds = smoothed.joint.byProject;
+  const forecasts = buildForecasts(g, g.commitments, odds);
+  const pitWall = buildPitWall(g, ctx, odds);
+  const recoveries = g.projects
+    .map((p) => buildRecoveryPlan(g, p, odds, pitWall.conflicts, cachedStrategy))
+    .filter((plan): plan is RecoveryPlan => plan !== null);
+  // The displayed plan packs the SAME order, comfort-capped when smoothing fired (so the
+  // shown days match the comfort odds), then groups within-day to cut context switches
+  // (Phase 1 — a within-day permute that keeps every task on its day; odds-neutral).
+  const globalPlan: GlobalPlan = {
+    order: canonical.order,
+    days: packGlobal(canonical.order, ctx.budget, g.today, smoothed.comfortCapMinutes),
+  };
   globalPlan.days = arrange(globalPlan.days, ctx.deps, g.today).days;
   // The agenda order: same plan plus today's due recurring instances, ranked as
   // if due today (ordering-only) so a due routine/goal surfaces near the top.
