@@ -2713,7 +2713,11 @@ function skipDrainHoursByActivity(
  *  the review screen re-solves move subsets against (OVERHAUL S1 / vision §8.2).
  *  `baseSlackHours` is the SIGNED slack (its floor is `ctx.capacities`) so multi-skip
  *  re-solves compose exactly; see `skipDrainHoursByActivity`. */
-function buildResolveInput(g: ForecastGather, ctx: AllocContext): ResolveInput {
+function buildResolveInput(
+  g: ForecastGather,
+  ctx: AllocContext,
+  comfortCapMinutes: number | null,
+): ResolveInput {
   return {
     tasks: ctx.tasks,
     deps: ctx.deps,
@@ -2726,6 +2730,10 @@ function buildResolveInput(g: ForecastGather, ctx: AllocContext): ResolveInput {
     // S3b Phase 2 — ship the static window profile so the client rebuilds identical
     // window segments from its own (skip-adjusted) capacities (parity rides for free).
     windowProfile: g.windowProfile,
+    // S3b Phase 3 slice 2 — ship the one comfort cap the scorer decided so the client's
+    // subset re-solve meters by the same scalar (it takes precedence over the window
+    // profile, matching `resolveSubsetOdds`).
+    comfortCapMinutes,
   };
 }
 
@@ -2741,7 +2749,31 @@ export async function createJointScorer(): Promise<JointScorer> {
     getCachedStrategy(),
   ]);
   const ctx = allocContext(g, g.commitments);
-  const base = jointOddsWithMoves(g, ctx, []);
+  // S3b Phase 3 slice 2 — decide the comfort cap ONCE on the base canonical order (the
+  // same decision `forecastDashboard` makes), then meter EVERY joint re-solve by that one
+  // scalar: the base, the optimizer's move probes, the cumulative display, AND the client
+  // subset re-solve. This closes the slice-1 divergence — the strategy page, the dashboard
+  // headline, and the live "before" now all quote the comfort-capped plan you follow.
+  // No-regret: comfortCapMinutes === null (no hard-work signal / no afforded slack) ⇒ the
+  // exact pre-slice-2 (windowed) path, bit-for-bit.
+  const canonical = buildGlobalPlan({
+    tasks: ctx.tasks,
+    deps: ctx.deps,
+    deadlineByProject: g.deadlineByProject,
+    budget: ctx.budget,
+    today: g.today,
+  });
+  const comfortCapMinutes = comfortSmooth(
+    canonical.order,
+    ctx.capacities,
+    g.deadlineByProject,
+    g.today,
+    { forecast: forecastOptions(g.model), windowProfile: g.windowProfile },
+  ).comfortCapMinutes;
+  // The joint re-solve context carries the cap (mirrors how `windowProfile` rides on `g`);
+  // every `jointOddsWithMoves` / `cumulativeJointOdds` below reads it off `jg`.
+  const jg = { ...g, comfortCapMinutes };
+  const base = jointOddsWithMoves(jg, ctx, []);
   const baseByProject = base.byProject;
 
   const forecasts = buildForecasts(g, g.commitments, baseByProject);
@@ -2758,9 +2790,9 @@ export async function createJointScorer(): Promise<JointScorer> {
     valueModel: g.valueModel,
     baseByProject,
     baseAllOnTime: base.allOnTime,
-    score: (moves) => jointOddsWithMoves(g, ctx, moves, JOINT_PROBE_ITERATIONS),
-    cumulative: (ordered) => cumulativeJointOdds(g, ctx, ordered),
-    resolveInput: buildResolveInput(g, ctx),
+    score: (moves) => jointOddsWithMoves(jg, ctx, moves, JOINT_PROBE_ITERATIONS),
+    cumulative: (ordered) => cumulativeJointOdds(jg, ctx, ordered),
+    resolveInput: buildResolveInput(g, ctx, comfortCapMinutes),
   };
 }
 
