@@ -90,6 +90,7 @@ import {
   type AllocTask,
   type GlobalPlan,
 } from "./allocate";
+import { arrange } from "./arrange";
 import {
   SAMPLE_ACTIVITIES,
   SAMPLE_ENTRIES,
@@ -2992,6 +2993,10 @@ export async function forecastDashboard(): Promise<{
     budget: ctx.budget,
     today: g.today,
   });
+  // S3b Phase 1: re-sequence each near-horizon day to cut context-switches. This
+  // permutes blocks *within* a day only, so every task keeps its day — the
+  // forecast/odds are untouched (odds-neutral by construction).
+  globalPlan.days = arrange(globalPlan.days, ctx.deps, g.today).days;
   // The agenda order: same plan plus today's due recurring instances, ranked as
   // if due today (ordering-only) so a due routine/goal surfaces near the top.
   const recurringTasks = recurringAllocTasksForToday(activities, completions, g.today);
