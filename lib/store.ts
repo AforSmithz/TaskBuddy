@@ -53,6 +53,7 @@ import { ON_TRACK_PROBABILITY, isOnTrack } from "./types";
 import { extractEntry } from "./extraction";
 import { estimationModel } from "./generate";
 import {
+  energyWindows,
   fitVelocityModel,
   taskResidualSamples,
   toSegmentModel,
@@ -81,6 +82,7 @@ import {
   globalForecast,
   recoveryMoves,
   type CandidateTask,
+  type ForecastOptions,
 } from "./forecast";
 import {
   buildGlobalPlan,
@@ -90,7 +92,12 @@ import {
   type AllocTask,
   type GlobalPlan,
 } from "./allocate";
-import { arrange } from "./arrange";
+import {
+  arrange,
+  windowCapacities,
+  windowProfileFromEnergy,
+  type WindowProfile,
+} from "./arrange";
 import {
   SAMPLE_ACTIVITIES,
   SAMPLE_ENTRIES,
@@ -2325,6 +2332,13 @@ interface ForecastGather {
   windowVelocity: VelocityModel;
   /** projectId → its tasks' window-tagged residuals — the per-goal placement sample. */
   windowedResidualsByProject: Map<string, ResidualSample[]>;
+  /**
+   * OVERHAUL S3b Phase 2 — the global per-window velocity profile (share +
+   * net-of-global multiplier) the windowed forecast flows over. Null until any
+   * window has session history, so the forecast stays the exact day-granular path
+   * (no-regret). Derived from `windowVelocity` + the session window counts.
+   */
+  windowProfile: WindowProfile | null;
   availability: Availability[];
   overrides: AvailabilityOverride[];
   /** All commitments INCLUDING the recurring drain (the base the forecast uses). */
@@ -2492,9 +2506,14 @@ async function gatherForecast(): Promise<ForecastGather> {
   for (const [gid, sess] of sessionsByProject) {
     windowedResidualsByProject.set(gid, workSessionResidualSamples(sess, tasksById));
   }
-  const windowVelocity = fitVelocityModel(
-    [...windowedResidualsByProject.values()].flat(),
-    (s) => s.window,
+  const allWindowSamples = [...windowedResidualsByProject.values()].flat();
+  const windowVelocity = fitVelocityModel(allWindowSamples, (s) => s.window, model);
+  // S3b Phase 2 — the windowed-forecast profile: per-window net multiplier (from the
+  // same shrunk window velocity the "reliable hours" card renders) + a shrunk session
+  // share that bounds how much work claims each window. Null until a session is logged,
+  // so the headline stays today's day-granular number until the loop has WHEN-data.
+  const windowProfile = windowProfileFromEnergy(
+    energyWindows(allWindowSamples, model),
     model,
   );
   return {
@@ -2512,6 +2531,7 @@ async function gatherForecast(): Promise<ForecastGather> {
     velocityModel,
     windowVelocity,
     windowedResidualsByProject,
+    windowProfile,
     availability: budget.availability,
     overrides: budget.overrides,
     commitments: budget.commitments,
@@ -2597,10 +2617,17 @@ function jointOdds(
     budget: ctx.budget,
     today: g.today,
   });
-  return globalForecast(plan.order, ctx.capacities, g.deadlineByProject, g.today, {
+  const opts: ForecastOptions = {
     ...forecastOptions(g.model),
     ...(iterations !== undefined ? { iterations } : {}),
-  });
+  };
+  // S3b Phase 2 — price time-of-day velocity: split the day capacities into window
+  // segments (net multipliers from the learned window velocity). Null profile ⇒ the
+  // exact day-granular path, so the number is unchanged until the loop learns windows.
+  if (g.windowProfile) {
+    opts.windowCapacities = windowCapacities(ctx.capacities, g.windowProfile);
+  }
+  return globalForecast(plan.order, ctx.capacities, g.deadlineByProject, g.today, opts);
 }
 
 /**
@@ -2691,6 +2718,9 @@ function buildResolveInput(g: ForecastGather, ctx: AllocContext): ResolveInput {
     model: { meanLog: g.model.meanLog, sigma: g.model.sigma },
     baseSlackHours: daySlackHours(ctx.budget, g.today).map((s) => s.slackHours),
     skipDrainHoursByActivity: skipDrainHoursByActivity(g, ctx),
+    // S3b Phase 2 — ship the static window profile so the client rebuilds identical
+    // window segments from its own (skip-adjusted) capacities (parity rides for free).
+    windowProfile: g.windowProfile,
   };
 }
 

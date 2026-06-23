@@ -3,6 +3,7 @@ import type {
   AvailabilityOverride,
   Commitment,
   TaskStatus,
+  TimeWindow,
 } from "./types";
 
 // Deterministic schedule generator.
@@ -180,6 +181,20 @@ export interface DayCapacity {
   capacityMinutes: number;
 }
 
+/** One time-of-day SEGMENT of a day's capacity (OVERHAUL S3b Pillar 2): the slice
+ *  of the day's minutes that falls in one of the five S2 windows, plus that window's
+ *  net velocity multiplier. A windowed forecast flows across these instead of whole
+ *  days — but the deadline check stays day-granular (every segment carries its `iso`).
+ *  Built by `arrange.ts windowCapacities`; a flat/unlearned split sums per day to the
+ *  whole-day capacity with `netMultiplier === 1`, so it degrades to today bit-for-bit. */
+export interface WindowCapacity {
+  iso: string;
+  window: TimeWindow;
+  capacityMinutes: number;
+  /** `exp(μ_window − μ₀)`: <1 faster, >1 slower, =1 unlearned. Applied to work that STARTS here. */
+  netMultiplier: number;
+}
+
 /**
  * Deployable minutes for each day from `anchorDate` forward across `horizonDays`:
  * (override ?? weekday template) − commitments, floored at 0. Zero-capacity days
@@ -324,6 +339,80 @@ export function flowFinishOffsets(
     }
     remaining -= need;
     offsets[k] = dayIdx;
+  }
+  return offsets;
+}
+
+/** One lane of the windowed flow (OVERHAUL S3b Pillar 2): a contiguous capacity
+ *  bucket the sampled work fills, the net velocity multiplier applied to work that
+ *  STARTS in it, and the day offset it reports as a finish (so the deadline check
+ *  stays day-granular even when lanes are sub-day window segments). The day-granular
+ *  flow is the special case: one lane per day, `netMultiplier === 1`, `dayOffset` =
+ *  the day's index. */
+export interface FlowLane {
+  capacityMinutes: number;
+  netMultiplier: number;
+  dayOffset: number;
+}
+
+/** Index of the first lane at or after `from` with any capacity. */
+function firstOpenLane(lanes: FlowLane[], from: number): number {
+  let i = from;
+  while (i < lanes.length && lanes[i].capacityMinutes <= 0) i++;
+  return i;
+}
+
+/**
+ * The windowed generalisation of `flowFinishOffsets`: flow `durations` (in order)
+ * across capacity LANES, scaling each task by the net velocity multiplier of the
+ * lane it STARTS in, and returning the `dayOffset` of the lane its last minute
+ * lands on. With one lane per day and `netMultiplier === 1` it is byte-identical to
+ * `flowFinishOffsets` — the no-regret anchor the harness proves. The windowed series
+ * is a safe superset: lanes summing to a day's capacity, filled in clock order,
+ * consume exactly that capacity before crossing to the next day, so a flat, unlearned
+ * split returns the same finish DAY for every task. The start-lane multiplier is read
+ * only AFTER rolling past any exhausted lane (and only for real work, so a zero-minute
+ * task never advances the cursor — that keeps the daily path bit-identical), so a task
+ * that genuinely begins in a learned-fast window shrinks.
+ */
+export function flowFinishOffsetsLanes(
+  durations: number[],
+  lanes: FlowLane[],
+): number[] {
+  const offsets = new Array<number>(durations.length).fill(0);
+  if (lanes.length === 0) return offsets;
+  const lastOffset = lanes[lanes.length - 1].dayOffset;
+
+  let i = firstOpenLane(lanes, 0);
+  if (i >= lanes.length) return offsets.fill(lastOffset);
+  let remaining = lanes[i].capacityMinutes;
+
+  for (let k = 0; k < durations.length; k++) {
+    // Roll to the lane this task's first minute actually lands in BEFORE reading
+    // its start-window multiplier; guarded on real work so a zero-minute task stays
+    // put (the daily path's exact behaviour).
+    if (durations[k] > 0 && remaining <= 0) {
+      const next = firstOpenLane(lanes, i + 1);
+      if (next >= lanes.length) {
+        for (let j = k; j < durations.length; j++) offsets[j] = lastOffset;
+        return offsets;
+      }
+      i = next;
+      remaining = lanes[i].capacityMinutes;
+    }
+    let need = durations[k] * lanes[i].netMultiplier;
+    while (need > remaining) {
+      const next = firstOpenLane(lanes, i + 1);
+      if (next >= lanes.length) {
+        for (let j = k; j < durations.length; j++) offsets[j] = lastOffset;
+        return offsets;
+      }
+      need -= remaining;
+      i = next;
+      remaining = lanes[i].capacityMinutes;
+    }
+    remaining -= need;
+    offsets[k] = lanes[i].dayOffset;
   }
   return offsets;
 }

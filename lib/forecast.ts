@@ -6,7 +6,13 @@ import type {
   RecoveryMove,
   SegmentModel,
 } from "./types";
-import { flowFinishOffsets, type DayCapacity } from "./schedule";
+import {
+  flowFinishOffsets,
+  flowFinishOffsetsLanes,
+  type DayCapacity,
+  type FlowLane,
+  type WindowCapacity,
+} from "./schedule";
 
 // The forecast engine — TaskBuddy's "will I make it, and how sure?" number.
 //
@@ -134,6 +140,17 @@ export interface ForecastOptions {
    * value shifts the whole distribution up: the user typically runs over.
    */
   meanLog?: number;
+  /**
+   * OVERHAUL S3b Pillar 2 — per-window capacity segments for the JOINT flow. When
+   * present, `globalForecastJoint` flows the sampled durations across these instead
+   * of whole-day capacities, scaling each task by the net velocity multiplier of the
+   * window it STARTS in (so work in a learned-fast window genuinely shrinks). The
+   * deadline check stays day-granular (each segment carries its day). Absent — or a
+   * flat/unlearned split (all `netMultiplier === 1`) — is byte-identical to the
+   * day-granular forecast. Built by `arrange.ts windowCapacities`; the seed/total are
+   * still taken from `capacities`, so determinism is unchanged.
+   */
+  windowCapacities?: WindowCapacity[];
 }
 
 /**
@@ -318,6 +335,20 @@ export function globalForecastJoint(
   const meanLog = options.meanLog ?? -(sigma * sigma) / 2;
   const rng = mulberry32(seedFrom(estimates, deployableSum));
 
+  // OVERHAUL S3b Pillar 2: when window segments are supplied, flow across them
+  // (each task scaled by the multiplier of the window it starts in) instead of
+  // whole days. Built ONCE — the lanes are static across iterations; only the
+  // sampled durations change. A flat/unlearned split returns the same finish DAY,
+  // so this is byte-identical to the day-granular flow until window velocity is
+  // earned. `deployableSum`/the seed stay from `capacities`, so determinism holds.
+  const windowLanes: FlowLane[] | null = options.windowCapacities
+    ? options.windowCapacities.map((w) => ({
+        capacityMinutes: w.capacityMinutes,
+        netMultiplier: w.netMultiplier,
+        dayOffset: daysBetweenISO(today, w.iso),
+      }))
+    : null;
+
   const durations = new Array<number>(order.length).fill(0);
   const hits = new Map<string, number>();
   for (const pid of indicesByProject.keys()) hits.set(pid, 0);
@@ -336,7 +367,9 @@ export function globalForecastJoint(
             Math.exp((m?.meanLog ?? meanLog) + (m?.sigma ?? sigma) * nextNormal(rng))
           : 0;
     }
-    const offsets = flowFinishOffsets(durations, capacities);
+    const offsets = windowLanes
+      ? flowFinishOffsetsLanes(durations, windowLanes)
+      : flowFinishOffsets(durations, capacities);
     // Whether EVERY scored project landed on time in THIS sampled future — the
     // joint conjunction counter (decision: P(all deadlined projects meet date)).
     let allHit = true;

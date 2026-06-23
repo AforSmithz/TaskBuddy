@@ -24,9 +24,10 @@ import type {
 } from "./types";
 import { computePriority } from "./priority";
 import { dayCapacities, type DayCapacity, type DependencyEdge } from "./schedule";
-import { globalForecastJoint } from "./forecast";
+import { globalForecastJoint, type ForecastOptions } from "./forecast";
 import { buildGlobalPlan, effectiveOrder, type AllocTask } from "./allocate";
 import { activityDrainCommitments, currentWeekOwedDates } from "./recurring";
+import { windowCapacities, type WindowProfile } from "./arrange";
 
 /** The slice of the server gather a move's pure forecast-patch reads. Only the
  *  skip-move arm touches the gather (to find the activity's owed dates); every
@@ -48,6 +49,11 @@ export interface JointForecastContext extends MovePatchContext {
   overrides: AvailabilityOverride[];
   realCommitments: Commitment[];
   model: EstimationModel;
+  /** OVERHAUL S3b Phase 2 — the per-window velocity profile (null when unlearned).
+   *  When present, the joint re-solve flows over window segments derived from THIS
+   *  pass's capacities, so a move preview prices time-of-day velocity exactly as the
+   *  dashboard headline does. `ForecastGather` structurally satisfies it. */
+  windowProfile?: WindowProfile | null;
 }
 
 /** The forecast's per-iteration estimation-bias options, drawn from the user's
@@ -323,10 +329,16 @@ export function jointOddsWithMoves(
         g.today,
       )
     : ctx.capacities;
-  return globalForecastJoint(plan.order, capacities, state.deadlineByProject, g.today, {
+  const opts: ForecastOptions = {
     ...forecastOptions(g.model),
     ...(iterations !== undefined ? { iterations } : {}),
-  });
+  };
+  // Window segments are derived from THIS pass's capacities (skip-adjusted when a
+  // skip-move freed hours), so the preview prices windows exactly as the headline.
+  if (g.windowProfile) {
+    opts.windowCapacities = windowCapacities(capacities, g.windowProfile);
+  }
+  return globalForecastJoint(plan.order, capacities, state.deadlineByProject, g.today, opts);
 }
 
 /**
@@ -392,6 +404,11 @@ export interface ResolveInput {
    *  `baseSlackHours` (then floored once) for any selected skip subset. Present for
    *  every active activity (a zero series when nothing is owed this week). */
   skipDrainHoursByActivity: Record<string, number[]>;
+  /** OVERHAUL S3b Phase 2 — the per-window velocity profile (null/absent when unlearned).
+   *  The client rebuilds window segments from its OWN (skip-adjusted) capacities + this
+   *  static profile, so the windowed re-solve stays bit-identical to the server's for the
+   *  same subset (the 14/14 parity rides on the existing capacity parity). */
+  windowProfile?: WindowProfile | null;
 }
 
 /** Element-wise sum of two per-day hour series (aligned by index — both span the same
@@ -454,12 +471,22 @@ export function resolveSubsetOdds(
         ),
       }))
     : input.capacities;
+  const opts: ForecastOptions = {
+    sigma: input.model.sigma,
+    meanLog: input.model.meanLog,
+  };
+  // Rebuild window segments from the client's own capacities (skip-adjusted to
+  // match the server's recompute) + the shipped profile — bit-identical to the
+  // server's `jointOddsWithMoves` for the same subset.
+  if (input.windowProfile) {
+    opts.windowCapacities = windowCapacities(capacities, input.windowProfile);
+  }
   return globalForecastJoint(
     order,
     capacities,
     state.deadlineByProject,
     input.today,
-    { sigma: input.model.sigma, meanLog: input.model.meanLog },
+    opts,
   );
 }
 
