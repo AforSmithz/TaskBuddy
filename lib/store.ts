@@ -63,7 +63,7 @@ import {
 } from "./velocity";
 import { goalCompletion } from "./goal";
 import { diagnoseCause, goalCutCost, type CauseBaseline } from "./grounding";
-import { isBufferLow } from "./buffer";
+import { bufferUrgency, isBufferLow } from "./buffer";
 import { formatMinutes } from "./format";
 import { computePriority } from "./priority";
 import {
@@ -2718,7 +2718,7 @@ function buildResolveInput(
   ctx: AllocContext,
   comfortCapMinutes: number | null,
   arrangeReorder: boolean,
-  thinBuffer: ReadonlySet<string>,
+  thinBuffer: ReadonlyMap<string, number>,
 ): ResolveInput {
   return {
     tasks: ctx.tasks,
@@ -2740,11 +2740,11 @@ function buildResolveInput(
     // client replays the SAME deterministic `arrangeOrder` on its re-derived order (the
     // reorder reads only inputs already in `ResolveInput`, so parity rides for free).
     arrangeReorder,
-    // S3b Phase 3 `w_buffer` follow-on — ship the at-risk (thin-buffer) project set the
-    // scorer flagged on the base, as a JSON-safe array. The client rebuilds the Set and
-    // feeds the SAME `arrangeOrder`, so the buffer-biased order stays bit-identical (the
-    // set can't be recomputed client-side — it needs the per-project forecast distribution).
-    thinBufferProjects: [...thinBuffer],
+    // S3b Phase 3 `w_buffer` follow-on (graded in Phase 4) — ship the at-risk projects'
+    // thin-buffer URGENCY the scorer flagged on the base, as a JSON-safe record. The client
+    // rebuilds the Map and feeds the SAME `arrangeOrder`, so the buffer-biased order stays
+    // bit-identical (it can't be recomputed client-side — needs the per-project forecast dist).
+    thinBufferUrgency: Object.fromEntries(thinBuffer),
   };
 }
 
@@ -2782,11 +2782,11 @@ export async function createJointScorer(): Promise<JointScorer> {
     { forecast: forecastOptions(g.model), windowProfile: g.windowProfile },
   );
   const comfortCapMinutes = smoothed.comfortCapMinutes;
-  // S3b Phase 3 `w_buffer` lever — the at-risk (thin critical-chain buffer) project set,
-  // read off the comfort baseline's odds. The reorder gives these projects' work first
-  // claim on the day's fast windows; decided once on the base (like the cap) and replayed
-  // by every joint re-solve + the client. Empty ⇒ no buffer bias (the no-regret default).
-  const thinBuffer = thinBufferSet(g, g.commitments, smoothed.joint.byProject);
+  // S3b Phase 3 `w_buffer` lever (graded in Phase 4) — the at-risk projects' thin-buffer
+  // URGENCY, read off the comfort baseline's odds. The reorder gives these projects' work
+  // first claim on the day's fast windows in proportion to how thin; decided once on the base
+  // (like the cap) and replayed by every joint re-solve + the client. Empty ⇒ no buffer bias.
+  const thinBuffer = thinBufferUrgencyMap(g, g.commitments, smoothed.joint.byProject);
   // S3b Phase 3 slice 3 — decide the within-day reorder ONCE on the base canonical order
   // (the same decision `forecastDashboard` makes), gated against the comfort baseline.
   // `arrangeReorder` is the single boolean every joint re-solve replays: the base, the
@@ -2804,13 +2804,13 @@ export async function createJointScorer(): Promise<JointScorer> {
       forecast: forecastOptions(g.model),
       windowProfile: g.windowProfile,
       comfortCapMinutes,
-      thinBufferProjects: thinBuffer,
+      thinBufferUrgency: thinBuffer,
     },
   ).changed;
   // The joint re-solve context carries the cap + the reorder flag + the thin-buffer set
   // (mirrors how `windowProfile` rides on `g`); every `jointOddsWithMoves` /
   // `cumulativeJointOdds` below reads them off `jg`.
-  const jg = { ...g, comfortCapMinutes, arrangeReorder, thinBufferProjects: thinBuffer };
+  const jg = { ...g, comfortCapMinutes, arrangeReorder, thinBufferUrgency: thinBuffer };
   const base = jointOddsWithMoves(jg, ctx, []);
   const baseByProject = base.byProject;
 
@@ -3057,26 +3057,29 @@ function buildForecasts(
 }
 
 /**
- * The canonical thin-buffer set (OVERHAUL S3b `w_buffer` lever): the deadlined projects
- * whose critical-chain buffer is "thin" — on-track but below comfortable (`isBufferLow`,
- * `lib/buffer.ts`) — under the BASE plan's odds. The within-day reorder biases their work
- * into the day's fast windows, so the thinnest deadline gets first claim on the hours it
- * is most likely to finish in (widening its buffer). Decided ONCE on the base — like the
- * comfort cap + reorder flag — then replayed for every move subset and shipped to the
- * client (which lacks the per-project forecast distribution the buffer math needs). Reads
- * each project's solo forecast (p50/p90/deployable) with the joint `baselineOdds` as its
- * probability — exactly the `ProjectForecast` `buildForecasts` already returns.
+ * The canonical thin-buffer URGENCY map (OVERHAUL S3b `w_buffer` lever, graded in Phase 4):
+ * projectId → urgency `(0,1]` for each deadlined project whose critical-chain buffer is "thin"
+ * — on-track but below comfortable — under the BASE plan's odds, graded by HOW thin
+ * (`bufferUrgency`, `lib/buffer.ts`: rising as the odds approach the on-track line). The
+ * within-day reorder biases their work into the day's fast windows in proportion to urgency,
+ * so the THINNEST deadline gets the strongest claim on the hours it is most likely to finish
+ * in (widening its buffer). Decided ONCE on the base — like the comfort cap + reorder flag —
+ * then replayed for every move subset and shipped to the client (which lacks the per-project
+ * forecast distribution the buffer math needs). Reads each project's solo forecast
+ * (p50/p90/deployable) with the joint `baselineOdds` as its probability — exactly the
+ * `ProjectForecast` `buildForecasts` already returns. Non-thin projects are omitted.
  */
-function thinBufferSet(
+function thinBufferUrgencyMap(
   g: ForecastGather,
   commitments: Pick<Commitment, "date" | "hours">[],
   baselineOdds: Map<string, number>,
-): Set<string> {
-  const set = new Set<string>();
+): Map<string, number> {
+  const urgency = new Map<string, number>();
   for (const fc of buildForecasts(g, commitments, baselineOdds)) {
-    if (isBufferLow(fc)) set.add(fc.projectId);
+    const u = bufferUrgency(fc);
+    if (u > 0) urgency.set(fc.projectId, u);
   }
-  return set;
+  return urgency;
 }
 
 /**
@@ -3126,10 +3129,11 @@ export async function forecastDashboard(): Promise<{
     forecast: forecastOptions(g.model),
     windowProfile: g.windowProfile,
   });
-  // S3b Phase 3 `w_buffer` lever — the at-risk (thin-buffer) projects under the comfort
-  // baseline; the reorder gives their work first claim on the day's fast windows. Read off
-  // the same baseline the reorder gates against, mirroring `createJointScorer`.
-  const thinBuffer = thinBufferSet(g, g.commitments, smoothed.joint.byProject);
+  // S3b Phase 3 `w_buffer` lever (graded in Phase 4) — the at-risk projects' thin-buffer
+  // urgency under the comfort baseline; the reorder gives their work first claim on the day's
+  // fast windows in proportion to how thin. Read off the same baseline the reorder gates
+  // against, mirroring `createJointScorer`.
+  const thinBuffer = thinBufferUrgencyMap(g, g.commitments, smoothed.joint.byProject);
   // S3b Phase 3 (slice 3): re-sequence WITHIN each near-horizon day to cut context
   // switches and slot hard work into learned-fast windows (at-risk work first via the
   // buffer lever), gated so the arranged order never drops `allOnTime` below the comfort
@@ -3147,7 +3151,7 @@ export async function forecastDashboard(): Promise<{
       forecast: forecastOptions(g.model),
       windowProfile: g.windowProfile,
       comfortCapMinutes: smoothed.comfortCapMinutes,
-      thinBufferProjects: thinBuffer,
+      thinBufferUrgency: thinBuffer,
     },
   );
   const odds = reorder.joint.byProject;

@@ -1,5 +1,5 @@
 import type { ForecastResult } from "./types";
-import { isOnTrack } from "./types";
+import { isOnTrack, ON_TRACK_PROBABILITY } from "./types";
 
 // Critical-chain buffering (§4 / OVERHAUL §5a substrate S3a) — a forecast-honesty
 // read, no new data.
@@ -74,4 +74,22 @@ export function criticalChainBuffer(fc: ForecastResult): BufferStatus | null {
  */
 export function isBufferLow(fc: ForecastResult): boolean {
   return criticalChainBuffer(fc)?.tone === "thin";
+}
+
+/**
+ * How thin the buffer is, as a graded urgency in `[0, 1]` (OVERHAUL S3b Phase 4): `0`
+ * when the buffer is not thin (secure, breached, or none), rising to `1` as a thin
+ * project's odds approach the on-track line. Linear in the odds across the thin band
+ * `[ON_TRACK_PROBABILITY, BUFFER_COMFORTABLE_PROBABILITY)`: a project just below
+ * comfortable is barely urgent (~0), one about to fall off the on-track line is fully
+ * urgent (~1). The arrangement's `w_buffer` lever scales by this, so the THINNEST
+ * deadline gets the strongest claim on the day's fast windows — a graded refinement of
+ * the binary `isBufferLow` membership the term used before. Pure; same forecast ⇒ same
+ * urgency, so the server decides it once on the base and the S1 client replays it.
+ */
+export function bufferUrgency(fc: ForecastResult): number {
+  if (criticalChainBuffer(fc)?.tone !== "thin") return 0;
+  const span = BUFFER_COMFORTABLE_PROBABILITY - ON_TRACK_PROBABILITY;
+  if (span <= 0) return 1;
+  return clamp01((BUFFER_COMFORTABLE_PROBABILITY - fc.probability) / span);
 }

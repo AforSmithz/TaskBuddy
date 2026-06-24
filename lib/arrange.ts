@@ -49,32 +49,52 @@ import { ALL_WINDOWS, type EnergyWindow, type TimeWindow } from "./velocity";
 export interface ArrangeWeights {
   /** Penalty per project change across a day's within-day sequence (context-switch cost). */
   switch: number;
-  /** Weight on the energy term `difficulty·(netMult−1)` — negative (reward) for placing
-   *  cognitively-HARD work in a fast window, positive (penalty) for hard work in a slow
-   *  one. `difficulty` is the `effort`-derived cognitive load (S2): "do hard work when
-   *  you're sharp". When effort correlates with duration this also shrinks effective work
-   *  and *raises* the odds (the design's odds-improving placement); when it doesn't, the
-   *  reorder is odds-neutral and the gate keeps it honest. Inert (0) when no window
-   *  profile is learned. (Duration/importance-weighted placement is a Phase-4 "richer
-   *  difficulty" refinement.) */
+  /** Weight on the energy term `difficulty·impactBoost·(netMult−1)` — negative (reward) for
+   *  placing cognitively-HARD work in a fast window, positive (penalty) for hard work in a
+   *  slow one. `difficulty` is the `effort`-derived cognitive load (S2): "do hard work when
+   *  you're sharp". `impactBoost` (S3b Phase 4) modulates it ±`IMPACT_ENERGY_WEIGHT` by the
+   *  task's impact so a fast window goes to work that is hard AND valuable — a secondary
+   *  factor (effort stays dominant); see `impactEnergyBoost`. When effort correlates with
+   *  duration this also shrinks effective work and *raises* the odds (the design's
+   *  odds-improving placement); when it doesn't, the reorder is odds-neutral and the gate
+   *  keeps it honest. Inert (0) when no window profile is learned. (Duration-weighting was
+   *  reasoned out in Phase 3 — a long task would hog the fast lane.) */
   energy: number;
-  /** Weight on the buffer term `(netMult−1)` for a THIN-buffer (at-risk) project's work —
-   *  the same window coupling as energy but difficulty-INDEPENDENT. The S3a critical-chain
-   *  lever (`tone==="thin"`, `lib/buffer.ts`): give the work whose safety margin is thinnest
+  /** Weight on the buffer term `urgency·(netMult−1)` for a THIN-buffer (at-risk) project's
+   *  work — the same window coupling as energy but cognitive-difficulty-INDEPENDENT. The S3a
+   *  critical-chain lever (`lib/buffer.ts`): give the work whose safety margin is thinnest
    *  first claim on the day's FAST windows — the hours it is most likely to finish in —
-   *  widening its buffer, even when that remaining work is light. Combines additively with
-   *  energy, so an at-risk task competes for a fast window as if it carried `buffer` extra
-   *  units of difficulty. Inert (0) without a window profile (`netMult≡1`) or when no project
-   *  is thin. The thin-buffer SET is decided once on the base plan's odds (it can't be
-   *  recomputed from the client's data) and shipped for the S1 re-solve to replay. */
+   *  widening its buffer, even when that remaining work is light. `urgency ∈ (0,1]` grades by
+   *  HOW thin the buffer is (`bufferUrgency`, S3b Phase 4 — rising as the odds approach the
+   *  on-track line), so the thinnest deadline gets the strongest pull (was a binary 1 for any
+   *  thin project). Combines additively with energy. Inert (0) without a window profile
+   *  (`netMult≡1`) or when no project is thin. The thin-buffer URGENCY map is decided once on
+   *  the base plan's odds (it can't be recomputed from the client's data) and shipped for the
+   *  S1 re-solve to replay. */
   buffer: number;
 }
 
 /** Default weights — `1.0` as knobs, calibrated later by S2's loop. */
 export const ARRANGE_WEIGHTS: ArrangeWeights = { switch: 1, energy: 1, buffer: 1 };
 
-/** Shared empty thin-buffer set — the no-buffer-bias default (avoids per-call allocation). */
-const NO_THIN_BUFFER: ReadonlySet<string> = new Set();
+/** How strongly a task's impact modulates the ENERGY term (S3b Phase 4): the boost spans
+ *  `[1−IMPACT_ENERGY_WEIGHT, 1+IMPACT_ENERGY_WEIGHT]` across impact 1→5 (neutral at 3). A
+ *  knob (calibrated later); set to 0 to make energy purely effort-driven again. Effort is
+ *  the dominant signal — this only breaks near-ties between a harder-but-trivial task and a
+ *  slightly-easier-but-valuable one in favour of the valuable one. (Within-day window
+ *  placement is orthogonal to the WSJF cross-day ordering, so this is not double-counting;
+ *  the canonical-rank tiebreak only fired on EXACT energy ties, which differing difficulty
+ *  usually breaks first.) */
+export const IMPACT_ENERGY_WEIGHT = 0.5;
+
+/** Impact 1-5 → an energy-term multiplier in `[1−IMPACT_ENERGY_WEIGHT, 1+IMPACT_ENERGY_WEIGHT]`
+ *  (neutral 1 at impact 3 or absent). Pure. */
+function impactEnergyBoost(impact: number | undefined): number {
+  return 1 + (IMPACT_ENERGY_WEIGHT * ((impact ?? 3) - 3)) / 2;
+}
+
+/** Shared empty thin-buffer urgency map — the no-buffer-bias default (avoids per-call allocation). */
+const NO_THIN_BUFFER: ReadonlyMap<string, number> = new Map();
 
 /** How far out we re-arrange: the committed near-horizon. Beyond it the plan is
  *  re-derived as time advances, so re-sequencing it now is wasted (and out of
@@ -87,10 +107,11 @@ export interface ArrangeOrderOptions {
   /** Comfort cap (hard min/day) — when set, the day-bucketing mirrors the comfort-capped
    *  pack so the reorder permutes inside the same days the comfort flow lands work on. */
   comfortCapMinutes?: number | null;
-  /** Projects whose critical-chain buffer is "thin" (at-risk) under the base plan — the S3a
-   *  `w_buffer` lever. Their work is biased into the day's fast windows (the buffer term).
-   *  Decided once on the base + shipped for parity; absent/empty ⇒ no buffer bias. */
-  thinBufferProjects?: ReadonlySet<string> | null;
+  /** projectId → thin-buffer URGENCY `(0,1]` under the base plan — the S3a `w_buffer` lever,
+   *  graded by how thin (S3b Phase 4). Their work is biased into the day's fast windows in
+   *  proportion to urgency. Decided once on the base + shipped for parity; absent/empty ⇒ no
+   *  buffer bias. */
+  thinBufferUrgency?: ReadonlyMap<string, number> | null;
   /** Moves confined to this many days from `today` (default ARRANGE_HORIZON_DAYS). */
   horizonDays?: number;
   /** `J` term weights (default ARRANGE_WEIGHTS). */
@@ -175,7 +196,7 @@ function sequenceDay(
   prereqs: Map<string, Set<string>>,
   segs: { caps: number[]; mult: number[] },
   weights: ArrangeWeights,
-  thinBuffer: ReadonlySet<string>,
+  thinBuffer: ReadonlyMap<string, number>,
 ): EffectiveOrderEntry[] {
   const rank = new Map<string, number>();
   entries.forEach((e, i) => rank.set(e.taskId, i)); // canonical index = deterministic tiebreak
@@ -197,13 +218,14 @@ function sequenceDay(
     for (const e of pool) {
       const sw = current !== undefined && (e.projectId ?? null) !== current ? weights.switch : 0;
       // Energy: reward cognitively-hard work (`difficulty`) in a fast window (`netMult<1`),
-      // penalise it in a slow one. The gate prices the resulting (reseeded) order's odds.
-      const en = weights.energy * (e.difficulty ?? 0) * (mult - 1);
+      // penalise it in a slow one — modulated by impact (S3b Phase 4) so a fast window
+      // prefers work that is hard AND valuable. The gate prices the resulting (reseeded) order.
+      const en = weights.energy * (e.difficulty ?? 0) * impactEnergyBoost(e.impact) * (mult - 1);
       // Buffer (S3a lever): a thin-buffer (at-risk) project's work gets the SAME fast-window
-      // pull as energy but difficulty-INDEPENDENT — protect the thinnest deadline by giving
-      // its work the hours it is most likely to finish in, even when that work is light.
-      // Vanishes with no profile (`mult−1=0`) or when the project is not thin.
-      const bf = thinBuffer.has(e.projectId) ? weights.buffer * (mult - 1) : 0;
+      // pull as energy but cognitive-difficulty-INDEPENDENT — protect the thinnest deadline by
+      // giving its work the hours it is most likely to finish in, even when that work is light,
+      // scaled by how thin (`urgency`). Vanishes with no profile (`mult−1=0`) or when not thin.
+      const bf = weights.buffer * (thinBuffer.get(e.projectId) ?? 0) * (mult - 1);
       const cost = sw + en + bf;
       if (
         cost < bestCost - COST_EPSILON ||
@@ -242,7 +264,7 @@ export function arrangeOrder(
   const weights = opts.weights ?? ARRANGE_WEIGHTS;
   const profile = opts.windowProfile ?? null;
   const cap = opts.comfortCapMinutes ?? null;
-  const thinBuffer = opts.thinBufferProjects ?? NO_THIN_BUFFER;
+  const thinBuffer = opts.thinBufferUrgency ?? NO_THIN_BUFFER;
 
   // Bucket the order into the days the greedy pack lands it on (comfort-capped when a
   // cap is in force, so the buckets match the days the comfort flow actually uses) —
@@ -609,9 +631,10 @@ export interface GatedReorderOptions {
   windowProfile?: WindowProfile | null;
   /** The comfort cap already decided for this plan (comfort takes pricing precedence). */
   comfortCapMinutes?: number | null;
-  /** The at-risk (thin-buffer) project set decided on the base plan — the S3a `w_buffer`
-   *  lever, biasing those projects' work into fast windows. Absent ⇒ no buffer bias. */
-  thinBufferProjects?: ReadonlySet<string> | null;
+  /** projectId → thin-buffer urgency `(0,1]` decided on the base plan — the S3a `w_buffer`
+   *  lever (graded, S3b Phase 4), biasing those projects' work into fast windows in
+   *  proportion to how thin. Absent ⇒ no buffer bias. */
+  thinBufferUrgency?: ReadonlyMap<string, number> | null;
   /** Gate slack on `allOnTime` (default ARRANGE_ODDS_EPSILON). */
   oddsEpsilon?: number;
   /** `J` term weights (default ARRANGE_WEIGHTS). */
@@ -648,7 +671,7 @@ export function gatedReorder(
   const arranged = arrangeOrder(order, capacities, deps, today, {
     windowProfile: profile,
     comfortCapMinutes: cap,
-    thinBufferProjects: opts.thinBufferProjects,
+    thinBufferUrgency: opts.thinBufferUrgency,
     weights: opts.weights,
   });
   // Nothing moved ⇒ canonical everywhere (arrangeOrder returns the same reference).

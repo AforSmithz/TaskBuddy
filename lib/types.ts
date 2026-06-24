@@ -951,6 +951,13 @@ export interface EffectiveOrderEntry {
    * daily comfort cap. Absent ⇒ unmetered (0). See `allocate.ts effortToDifficulty`.
    */
   difficulty?: number;
+  /**
+   * Impact factor 1-5 (OVERHAUL S3b Phase 4): modulates ONLY the energy-placement term
+   * in `arrange.ts` (high-value hard work gets first claim on fast windows), never the
+   * comfort cap (that's cognitive load = `difficulty` alone). Carried from `AllocTask`.
+   * Absent ⇒ neutral. Does not affect ordering or odds without a learned window profile.
+   */
+  impact?: number;
 }
 
 /**

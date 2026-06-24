@@ -305,6 +305,9 @@ export function effectiveOrder(
       model: next.model,
       // Carry the cognitive-load weight (S3b) so the comfort-capped flow meters it.
       difficulty: next.difficulty,
+      // Carry the impact factor (S3b Phase 4) so the energy term can prefer fast windows
+      // for high-value hard work; never touches the comfort cap or the odds.
+      impact: next.impact,
       rank: order.length,
       pulledAhead: Boolean(leapfrogged),
       reason: leapfrogged
