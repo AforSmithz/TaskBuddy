@@ -2,10 +2,9 @@ import {
   flowFinishOffsets,
   flowFinishOffsetsComfort,
   packOffsets,
+  packOffsetsComfort,
   type DayCapacity,
   type DependencyEdge,
-  type ScheduleDay,
-  type ScheduledBlock,
   type WindowCapacity,
 } from "./schedule";
 import type { EffectiveOrderEntry, EstimationModel } from "./types";
@@ -20,41 +19,63 @@ import { ALL_WINDOWS, type EnergyWindow, type TimeWindow } from "./velocity";
 // is a pure, deterministic, dispose-side transform over the already-built plan: no
 // LLM, no new probability authored anywhere.
 //
-// PHASE 1 (this commit) ships the substrate + the first, always-safe objective:
-// context-switch grouping *within* each near-horizon day. It is **odds-neutral by
-// construction** — reordering blocks within a fixed day never moves a task to a
-// different day, so the day-granular forecast (`flowFinishOffsets` returns day
-// offsets) sees an identical carry ⇒ identical `byProject` + `allOnTime`. No gate
-// is needed at this phase; the regression harness asserts the neutrality.
+// The chooser is one **deterministic within-day reorder over the canonical order**
+// (`arrangeOrder`): it buckets the order into the days the greedy pack lands it on,
+// then re-sequences each near-horizon day to group projects (cut context-switches)
+// and slot hard work into learned-fast windows (energy placement). The reorder is
+// **odds-*gated*, never odds-authoring**: `gatedReorder` re-prices the arranged order
+// with the same Monte Carlo the headline uses and adopts it only while `allOnTime ≥
+// canonical − ε`. Because the reorder is deterministic (no RNG) and reads only inputs
+// the client already mirrors (order, capacities, deps, window profile, comfort cap),
+// the gate decision compresses to ONE boolean the client replays — so the S1 14/14
+// client==server parity rides for free (the same discipline comfort-smoothing used).
 //
-// Phase 2 (energy-window placement) and Phase 3 (cross-day load smoothing) are
-// odds-*coupled* and arrive with the windowed forecast + the odds gate
-// (`allOnTime ≥ canonical − ε`). See `design/s3b-arrangement-optimizer.md`.
+// No-regret: reordering the order array changes the forecast's seed, so an
+// odds-*neutral* reorder is not byte-identical. The gate's boolean is therefore set
+// true ONLY when there is an odds-relevant signal (windows learned OR comfort active)
+// AND the gate passes; with no signal the grouping is display-only and the forecast
+// flows the canonical order (byte-identical — the honest no-regret anchor, since the
+// day-granular flow is order-invariant within a day so the grouping genuinely costs
+// nothing). See `design/s3b-arrangement-optimizer.md`.
 
-/** Per-objective weights for the soft score `J` (lower is better). All knobs. */
+/** Per-objective weights for the soft score `J` (lower is better). Knobs defaulting
+ *  to `1.0`, calibrated later by S2's loop (step-5 precedent). At these defaults the
+ *  switch term (a unit penalty per project change) dominates the energy term (bounded
+ *  by `|netMult−1|·difficulty`, typically <0.5), so energy placement operates *within*
+ *  a project's cluster (group first, then sequence each cluster by energy); raising
+ *  `energy` is the lever that lets it break a cluster for a strong window gain. */
 export interface ArrangeWeights {
-  /** Penalty per project change across a day's within-day sequence (Phase 1). */
+  /** Penalty per project change across a day's within-day sequence (context-switch cost). */
   switch: number;
+  /** Weight on the energy term `difficulty·(netMult−1)` — negative (reward) for placing
+   *  cognitively-HARD work in a fast window, positive (penalty) for hard work in a slow
+   *  one. `difficulty` is the `effort`-derived cognitive load (S2): "do hard work when
+   *  you're sharp". When effort correlates with duration this also shrinks effective work
+   *  and *raises* the odds (the design's odds-improving placement); when it doesn't, the
+   *  reorder is odds-neutral and the gate keeps it honest. Inert (0) when no window
+   *  profile is learned. (Duration/importance-weighted placement is a Phase-4 "richer
+   *  difficulty" refinement.) */
+  energy: number;
 }
 
-/** Phase 1 default weights — `1.0` as a knob, calibrated later by S2's loop. */
-export const ARRANGE_WEIGHTS: ArrangeWeights = { switch: 1 };
+/** Default weights — `1.0` as knobs, calibrated later by S2's loop. */
+export const ARRANGE_WEIGHTS: ArrangeWeights = { switch: 1, energy: 1 };
 
 /** How far out we re-arrange: the committed near-horizon. Beyond it the plan is
  *  re-derived as time advances, so re-sequencing it now is wasted (and out of
  *  scope — §4 "committed horizon"). Out-of-horizon days are returned untouched. */
 export const ARRANGE_HORIZON_DAYS = 14;
 
-export interface ArrangeOptions {
+export interface ArrangeOrderOptions {
+  /** Per-window velocity profile — activates the energy term (null/absent ⇒ switch-only). */
+  windowProfile?: WindowProfile | null;
+  /** Comfort cap (hard min/day) — when set, the day-bucketing mirrors the comfort-capped
+   *  pack so the reorder permutes inside the same days the comfort flow lands work on. */
+  comfortCapMinutes?: number | null;
   /** Moves confined to this many days from `today` (default ARRANGE_HORIZON_DAYS). */
   horizonDays?: number;
   /** `J` term weights (default ARRANGE_WEIGHTS). */
   weights?: ArrangeWeights;
-}
-
-export interface ArrangeResult {
-  /** The plan with each near-horizon day's blocks re-sequenced (others untouched). */
-  days: ScheduleDay[];
 }
 
 // --- Date helper (UTC-stable, mirroring schedule.ts/forecast.ts) ------------
@@ -67,103 +88,178 @@ function dayOffset(today: string, iso: string): number {
   return Math.round((b - a) / 86_400_000);
 }
 
-// --- Context-switch grouping ------------------------------------------------
+// --- Within-day reorder: context-switch grouping + energy-window placement ---
+//
+// `arrangeOrder` re-sequences the canonical order WITHIN each near-horizon day. It
+// buckets the order by the greedy pack offsets (so a bucket = a day's tasks), then
+// runs a deterministic, dependency-safe greedy over each bucket that minimises the
+// per-pick marginal `J = w_switch·(project changed) + w_energy·difficulty·(netMult−1)`.
+// Picking a task advances the day's cumulative minutes, which selects the next task's
+// start window (hence its `netMult`) — so within a project's cluster the greedy slots
+// cognitively-HARD work into the day's FASTEST windows while continuing that cluster.
+// With no window profile the energy term is 0 and it reduces EXACTLY to context-switch
+// clustering (continue current project among ready blocks, else lowest-canonical-rank);
+// with a single task per day it is the identity. Pure + RNG-free ⇒ the client replays it.
 
-/** A block is real work iff it owns a task; the review buffer (`task_id===null`)
- *  is a per-day fixture that always pins last and is not part of the objective. */
-function isWork(block: ScheduledBlock): boolean {
-  return block.task_id !== null;
+/** True when every same-bucket prerequisite of `taskId` has been emitted. */
+function depsReady(
+  taskId: string,
+  prereqs: Map<string, Set<string>>,
+  emitted: Set<string>,
+): boolean {
+  const reqs = prereqs.get(taskId);
+  if (!reqs) return true;
+  for (const r of reqs) if (!emitted.has(r)) return false;
+  return true;
 }
 
-/** Number of project changes across a sequence of work blocks (the switch cost).
- *  Blocks without a project never count as a boundary. */
-export function countSwitches(blocks: ScheduledBlock[]): number {
-  let switches = 0;
-  let prev: string | null | undefined;
-  for (const b of blocks) {
-    if (!isWork(b)) continue;
-    const pid = b.projectId ?? null;
-    if (prev !== undefined && pid !== prev) switches++;
-    prev = pid;
+/** The window index (0..4, clock order) a task STARTING at `cumMinutes` into the day
+ *  falls in, given the day's per-window capacities. Skips exhausted/empty windows and
+ *  clamps an over-capacity cursor to the last window — mirroring the lane walk the
+ *  windowed forecast does, so the reorder's window estimate matches what it'll be
+ *  priced at. */
+function windowIndexAt(cumMinutes: number, caps: number[]): number {
+  let acc = 0;
+  for (let i = 0; i < caps.length; i++) {
+    acc += caps[i];
+    if (cumMinutes < acc) return i;
   }
-  return switches;
+  return caps.length - 1;
 }
+
+/** A day's per-window capacities + net multipliers (clock order). With no profile the
+ *  caps are all 0 and the multipliers all 1, so the energy term vanishes (switch-only). */
+function daySegments(
+  dayCapacityMinutes: number,
+  profile: WindowProfile | null,
+): { caps: number[]; mult: number[] } {
+  if (!profile) return { caps: ALL_WINDOWS.map(() => 0), mult: ALL_WINDOWS.map(() => 1) };
+  return {
+    caps: splitMinutes(dayCapacityMinutes, profile.share),
+    mult: ALL_WINDOWS.map((w) => profile.netMultiplier[w] ?? 1),
+  };
+}
+
+/** Float-comparison slack for the marginal-`J` tiebreak (the canonical rank breaks
+ *  near-equal costs, so identical inputs ⇒ identical sequence). */
+const COST_EPSILON = 1e-9;
 
 /**
- * Re-sequence one day's work blocks to minimise project context-switches while
- * staying dependency-valid. A greedy, deterministic constrained clustering:
- * among the blocks whose same-day prerequisites are already emitted ("ready"),
- * prefer to continue the current project's cluster; otherwise open the next
- * cluster with the lowest-canonical-rank ready block. Because we only ever emit
- * ready blocks, every same-day dependency is honoured; because ties break on the
- * original (canonical) index, the result is reproducible.
- *
- * Same-day clustering is the whole win: a day that ping-ponged A→B→A→B becomes
- * A→A→B→B. The buffer block (if any) is appended last, unchanged.
+ * Re-sequence one day's tasks to descend `J` (switches + energy misfit), staying
+ * dependency-valid. Greedy, deterministic: among the ready tasks (same-day prereqs
+ * emitted), take the one with the lowest marginal cost for the current cursor —
+ * continuing the project (no switch) and, in a fast window, preferring hard work
+ * (the energy reward). Ties break on canonical rank, so the result is reproducible.
  */
-export function clusterDay(blocks: ScheduledBlock[], deps: DependencyEdge[]): ScheduledBlock[] {
-  const work = blocks.filter(isWork);
-  const buffer = blocks.filter((b) => !isWork(b));
-  if (work.length <= 1) return blocks; // nothing to group
-
-  const inDay = new Set(work.map((b) => b.task_id as string));
-  // Same-day prerequisites only — cross-day prereqs are already honoured by the
-  // greedy flow that placed the days, and are outside this within-day permute.
-  const prereqs = new Map<string, Set<string>>();
-  for (const edge of deps) {
-    if (!inDay.has(edge.task_id) || !inDay.has(edge.depends_on_task_id)) continue;
-    if (!prereqs.has(edge.task_id)) prereqs.set(edge.task_id, new Set());
-    prereqs.get(edge.task_id)!.add(edge.depends_on_task_id);
-  }
-
-  const rank = new Map<string, number>(); // canonical index, the deterministic tiebreak
-  work.forEach((b, i) => rank.set(b.task_id as string, i));
+function sequenceDay(
+  entries: EffectiveOrderEntry[],
+  prereqs: Map<string, Set<string>>,
+  segs: { caps: number[]; mult: number[] },
+  weights: ArrangeWeights,
+): EffectiveOrderEntry[] {
+  const rank = new Map<string, number>();
+  entries.forEach((e, i) => rank.set(e.taskId, i)); // canonical index = deterministic tiebreak
 
   const emitted = new Set<string>();
-  const out: ScheduledBlock[] = [];
-  let current: string | null | undefined; // current cluster's projectId
+  const out: EffectiveOrderEntry[] = [];
+  let cum = 0;
+  let current: string | null | undefined; // last placed task's project
 
-  const isReady = (b: ScheduledBlock): boolean => {
-    const reqs = prereqs.get(b.task_id as string);
-    if (!reqs) return true;
-    for (const r of reqs) if (!emitted.has(r)) return false;
-    return true;
-  };
-
-  while (out.length < work.length) {
-    const ready = work.filter((b) => !emitted.has(b.task_id as string) && isReady(b));
-    // Prefer continuing the current project; else open the lowest-rank cluster.
-    const sameProject = ready.filter((b) => (b.projectId ?? null) === current);
-    const pool = sameProject.length > 0 ? sameProject : ready;
-    pool.sort((a, c) => rank.get(a.task_id as string)! - rank.get(c.task_id as string)!);
-    const next = pool[0];
-    out.push(next);
-    emitted.add(next.task_id as string);
-    current = next.projectId ?? null;
+  while (out.length < entries.length) {
+    const ready = entries.filter((e) => !emitted.has(e.taskId) && depsReady(e.taskId, prereqs, emitted));
+    // A dependency cycle would leave nothing ready (can't happen for a canonical-ordered
+    // bucket, which is already a valid topological order) — fall back to all unemitted so
+    // we always make progress, mirroring `effectiveOrder`'s cycle guard.
+    const pool = ready.length > 0 ? ready : entries.filter((e) => !emitted.has(e.taskId));
+    const mult = segs.mult[windowIndexAt(cum, segs.caps)];
+    let best = pool[0];
+    let bestCost = Infinity;
+    for (const e of pool) {
+      const sw = current !== undefined && (e.projectId ?? null) !== current ? weights.switch : 0;
+      // Energy: reward cognitively-hard work (`difficulty`) in a fast window (`netMult<1`),
+      // penalise it in a slow one. The gate prices the resulting (reseeded) order's odds.
+      const en = weights.energy * (e.difficulty ?? 0) * (mult - 1);
+      const cost = sw + en;
+      if (
+        cost < bestCost - COST_EPSILON ||
+        (cost <= bestCost + COST_EPSILON && rank.get(e.taskId)! < rank.get(best.taskId)!)
+      ) {
+        best = e;
+        bestCost = cost;
+      }
+    }
+    out.push(best);
+    emitted.add(best.taskId);
+    cum += Math.max(0, best.estimatedMinutes);
+    current = best.projectId ?? null;
   }
-
-  return [...out, ...buffer];
+  return out;
 }
 
 /**
- * Arrange the global plan: re-sequence each near-horizon day to reduce context
- * switches. Pure and odds-neutral — only the order of blocks *within* a day
- * changes, so every task keeps its day and the forecast is unmoved.
+ * Re-sequence the canonical order WITHIN each near-horizon day to descend `J`
+ * (context-switches + energy-window misfit), dependency-safe. Pure + deterministic
+ * (no RNG): identical inputs ⇒ identical order, so the S1 client replays it exactly.
+ * Out-of-horizon buckets and single-task buckets are returned unchanged. The result
+ * is a dependency-valid permutation of `order` (cross-day order is preserved — only
+ * tasks the greedy pack lands on the same day are permuted, and same-day prereqs are
+ * honoured by the per-bucket constrained greedy).
  */
-export function arrange(
-  days: ScheduleDay[],
+export function arrangeOrder(
+  order: EffectiveOrderEntry[],
+  capacities: DayCapacity[],
   deps: DependencyEdge[],
   today: string,
-  opts: ArrangeOptions = {},
-): ArrangeResult {
+  opts: ArrangeOrderOptions = {},
+): EffectiveOrderEntry[] {
+  if (order.length <= 1) return order;
   const horizon = opts.horizonDays ?? ARRANGE_HORIZON_DAYS;
-  const arranged = days.map((day) => {
-    if (dayOffset(today, day.date) >= horizon) return day; // untouched beyond the horizon
-    const blocks = clusterDay(day.blocks, deps);
-    if (blocks === day.blocks) return day; // ≤1 work block — no change
-    return { ...day, blocks };
-  });
-  return { days: arranged };
+  const weights = opts.weights ?? ARRANGE_WEIGHTS;
+  const profile = opts.windowProfile ?? null;
+  const cap = opts.comfortCapMinutes ?? null;
+
+  // Bucket the order into the days the greedy pack lands it on (comfort-capped when a
+  // cap is in force, so the buckets match the days the comfort flow actually uses) —
+  // the neighbour structure the within-day reorder permutes inside. Offsets are
+  // non-decreasing, so a bucket is a contiguous run of equal offsets.
+  const durations = order.map((e) => Math.max(0, e.estimatedMinutes));
+  const offsets =
+    cap != null
+      ? packOffsetsComfort(
+          durations,
+          capacities,
+          order.map((e, i) => (e.difficulty ?? 0) * durations[i]),
+          cap,
+        )
+      : packOffsets(durations, capacities);
+
+  const out: EffectiveOrderEntry[] = [];
+  let i = 0;
+  let changed = false;
+  while (i < order.length) {
+    let j = i;
+    while (j < order.length && offsets[j] === offsets[i]) j++;
+    const bucket = order.slice(i, j);
+    const off = offsets[i];
+    if (off < horizon && bucket.length > 1) {
+      // Same-day prerequisites only — cross-day prereqs are honoured by the bucket
+      // ordering itself (an earlier bucket fully precedes a later one).
+      const inBucket = new Set(bucket.map((e) => e.taskId));
+      const prereqs = new Map<string, Set<string>>();
+      for (const edge of deps) {
+        if (!inBucket.has(edge.task_id) || !inBucket.has(edge.depends_on_task_id)) continue;
+        if (!prereqs.has(edge.task_id)) prereqs.set(edge.task_id, new Set());
+        prereqs.get(edge.task_id)!.add(edge.depends_on_task_id);
+      }
+      const seq = sequenceDay(bucket, prereqs, daySegments(capacities[off]?.capacityMinutes ?? 0, profile), weights);
+      for (let k = 0; k < seq.length; k++) if (seq[k].taskId !== bucket[k].taskId) changed = true;
+      out.push(...seq);
+    } else {
+      out.push(...bucket);
+    }
+    i = j;
+  }
+  return changed ? out : order; // same reference when nothing moved (cheap no-op signal)
 }
 
 // --- Pillar 1: the window-capacity model (OVERHAUL S3b Phase 2) --------------
@@ -460,4 +556,85 @@ export function comfortSmooth(
     return { comfortCapMinutes: target, joint, changed: true };
   }
   return noChange;
+}
+
+// --- Pillar 3 (Phase 3, slice 3): the odds-gated within-day reorder ----------
+//
+// `arrangeOrder` is the deterministic chooser; `gatedReorder` is its odds gate. It
+// re-prices the arranged order with the SAME Monte Carlo (and the same comfort/window
+// precedence) the headline uses and decides ONE boolean — "should the forecast flow
+// the arranged order?" — that the strategy optimizer + the S1 client replay. The
+// reorder is adopted only while `allOnTime ≥ canonical − ε` (§Decisions #3: arrangement
+// is odds-gated, never odds-authoring). Because reordering the order array reseeds the
+// MC, an odds-*neutral* reorder is not byte-identical — so when there is no odds-relevant
+// signal (no windows AND no comfort) the grouping is returned for DISPLAY only and the
+// forecast stays on the canonical order (the byte-identical no-regret anchor: a
+// day-granular flow is order-invariant within a day, so the grouping is genuinely free).
+
+export interface GatedReorderOptions {
+  /** Estimation-bias options for the MC gate (sigma/meanLog; iterations optional). */
+  forecast: ForecastOptions;
+  /** Per-window velocity profile (activates the energy term + windowed pricing). */
+  windowProfile?: WindowProfile | null;
+  /** The comfort cap already decided for this plan (comfort takes pricing precedence). */
+  comfortCapMinutes?: number | null;
+  /** Gate slack on `allOnTime` (default ARRANGE_ODDS_EPSILON). */
+  oddsEpsilon?: number;
+  /** `J` term weights (default ARRANGE_WEIGHTS). */
+  weights?: ArrangeWeights;
+}
+
+export interface GatedReorderResult {
+  /** Whether the FORECAST should flow the arranged order — the single boolean the
+   *  strategy base + the S1 client replay. True only when the reorder is odds-relevant
+   *  (windows learned OR comfort active) AND the gate passed. */
+  changed: boolean;
+  /** The order to DISPLAY (arranged when grouping is admissible, else canonical). */
+  order: EffectiveOrderEntry[];
+  /** The odds to show — the arranged order's when flowed, else the canonical baseline. */
+  joint: { byProject: Map<string, number>; allOnTime: number };
+}
+
+/**
+ * Decide whether to adopt the within-day reorder, gating its odds against the canonical
+ * baseline. Returns the boolean the client replays, the order to display, and the odds
+ * to show. Pure given its inputs (the MC seed is fixed). See the section comment.
+ */
+export function gatedReorder(
+  order: EffectiveOrderEntry[],
+  capacities: DayCapacity[],
+  deadlineByProject: Map<string, string | null>,
+  today: string,
+  deps: DependencyEdge[],
+  canonicalJoint: { byProject: Map<string, number>; allOnTime: number },
+  opts: GatedReorderOptions,
+): GatedReorderResult {
+  const profile = opts.windowProfile ?? null;
+  const cap = opts.comfortCapMinutes ?? null;
+  const arranged = arrangeOrder(order, capacities, deps, today, {
+    windowProfile: profile,
+    comfortCapMinutes: cap,
+    weights: opts.weights,
+  });
+  // Nothing moved ⇒ canonical everywhere (arrangeOrder returns the same reference).
+  if (arranged === order) return { changed: false, order, joint: canonicalJoint };
+
+  // No odds-relevant signal ⇒ the grouping is free: DISPLAY it, but keep the forecast on
+  // the canonical order (byte-identical odds). `changed=false` ⇒ the client never flows it.
+  if (cap == null && profile == null) {
+    return { changed: false, order: arranged, joint: canonicalJoint };
+  }
+
+  // Odds-relevant ⇒ gate: re-price the arranged order with the headline's precedence
+  // (comfort XOR window), adopt it only while `allOnTime ≥ canonical − ε`.
+  const opts2: ForecastOptions = { ...opts.forecast };
+  if (cap != null) opts2.comfortCapMinutes = cap;
+  else if (profile) opts2.windowCapacities = windowCapacities(capacities, profile);
+  const arrangedJoint = globalForecastJoint(arranged, capacities, deadlineByProject, today, opts2);
+  const epsilon = opts.oddsEpsilon ?? ARRANGE_ODDS_EPSILON;
+  if (arrangedJoint.allOnTime >= canonicalJoint.allOnTime - epsilon) {
+    return { changed: true, order: arranged, joint: arrangedJoint };
+  }
+  // Gate failed: don't show (or price) a grouping that costs odds — canonical stands.
+  return { changed: false, order, joint: canonicalJoint };
 }
