@@ -379,11 +379,14 @@ export function observedWindowShare(
  *  prior. `netMultiplier = multiplier / exp(μ₀) = exp(μ_w − μ₀)` — exactly 1 for an
  *  unlearned window (its multiplier IS `exp(μ₀)`), so the profile is flat until windows
  *  are earned. Returns null when no window has any session (the no-signal gate: the
- *  caller then keeps the day-granular forecast, the exact pre-S3b path). */
+ *  caller then keeps the day-granular forecast, the exact pre-S3b path). `shareOverride`
+ *  (S3b Phase 4) replaces the derived session share when the user pinned an explicit
+ *  per-window availability — it must already sum to 1; the null-gate is unchanged, so a
+ *  pin has no forecast effect until window velocity is learned. */
 export function windowProfileFromEnergy(
   energy: EnergyWindow[],
   prior: EstimationModel,
-  opts: { strength?: number } = {},
+  opts: { strength?: number; shareOverride?: Record<TimeWindow, number> | null } = {},
 ): WindowProfile | null {
   if (!energy.some((e) => e.sampleSize > 0)) return null;
   const counts = {} as Record<TimeWindow, number>;
@@ -397,7 +400,7 @@ export function windowProfileFromEnergy(
     counts[e.window] = e.sampleSize;
     netMultiplier[e.window] = e.multiplier / globalMult;
   }
-  return { share: observedWindowShare(counts, opts), netMultiplier };
+  return { share: opts.shareOverride ?? observedWindowShare(counts, opts), netMultiplier };
 }
 
 /** Split each day's deployable minutes into the five window segments by `profile.share`,

@@ -121,6 +121,12 @@ import {
   type ValueModel,
 } from "./value-model";
 import {
+  normalizeWindowAvailability,
+  windowShareOverride,
+  EMPTY_WINDOW_AVAILABILITY,
+  type WindowAvailability,
+} from "./window-availability";
+import {
   forecastOptions,
   drainAsCommitments,
   syntheticAllocTask,
@@ -181,6 +187,8 @@ interface MemDB {
   autoStrategy: boolean;
   /** The user's value model (importance weights + recovery style), or null => default. */
   valueModel: ValueModel | null;
+  /** Explicit per-window availability override (S3b Phase 4), or null => derived share. */
+  windowAvailability: WindowAvailability | null;
   /** The cached portfolio strategy (Phase 4), or null until first generated. */
   portfolioStrategy: PortfolioStrategy | null;
   /** Applied strategy bundles, newest-first — the plan version history (§1.3). */
@@ -212,6 +220,7 @@ function memDB(): MemDB {
       recurringActivities: [],
       activityCompletions: [],
       workSessions: [],
+      windowAvailability: null,
       autoStrategy: false,
       valueModel: null,
       portfolioStrategy: null,
@@ -1204,6 +1213,44 @@ export async function setValueModel(model: ValueModel): Promise<void> {
   }
   await ensureSeeded();
   memDB().valueModel = clean;
+}
+
+/** The user's explicit per-window availability (S3b Phase 4), or the unset default
+ *  (all-zero weights ⇒ the derived share is used). */
+export async function getWindowAvailability(): Promise<WindowAvailability> {
+  if (isSupabaseConfigured()) {
+    const supabase = await getRequestClient();
+    const { data } = await supabase
+      .from("window_availability")
+      .select("weights")
+      .maybeSingle();
+    const raw = (data as { weights?: unknown } | null)?.weights;
+    return raw === undefined || raw === null
+      ? EMPTY_WINDOW_AVAILABILITY
+      : normalizeWindowAvailability(raw);
+  }
+  await ensureSeeded();
+  return memDB().windowAvailability ?? EMPTY_WINDOW_AVAILABILITY;
+}
+
+/** Persist the per-window availability (one row per user, upserted). Re-normalized. */
+export async function setWindowAvailability(avail: WindowAvailability): Promise<void> {
+  const clean = normalizeWindowAvailability(avail);
+  if (isSupabaseConfigured()) {
+    const supabase = await getRequestClient();
+    const user_id = await currentUserId(supabase);
+    const { error } = await supabase
+      .from("window_availability")
+      .upsert(
+        { user_id, weights: clean.weights, updated_at: new Date().toISOString() },
+        { onConflict: "user_id" },
+      );
+    if (error)
+      throw new Error(`Supabase window_availability upsert failed: ${error.message}`);
+    return;
+  }
+  await ensureSeeded();
+  memDB().windowAvailability = clean;
 }
 
 // --- Portfolio strategy cache (Phase 4) -------------------------------------
@@ -2407,7 +2454,7 @@ function skillAllocWork(
 
 /** Collect deadlined projects, their open tasks, and the time budget. */
 async function gatherForecast(): Promise<ForecastGather> {
-  const [projects, entries, tasks, deps, rawBudget, activities, completions, valueModel, allSkillNodes, allGoalCriteria, workSessions] =
+  const [projects, entries, tasks, deps, rawBudget, activities, completions, valueModel, allSkillNodes, allGoalCriteria, workSessions, windowAvailability] =
     await Promise.all([
       listGoals(),
       listEntries(),
@@ -2420,6 +2467,7 @@ async function gatherForecast(): Promise<ForecastGather> {
       listAllSkillNodes(),
       listAllGoalCriteria(),
       listWorkSessions(),
+      getWindowAvailability(),
     ]);
   const today = todayISO();
   // Fold the recurring drain into the commitment set the forecast reasons over.
@@ -2515,9 +2563,13 @@ async function gatherForecast(): Promise<ForecastGather> {
   // same shrunk window velocity the "reliable hours" card renders) + a shrunk session
   // share that bounds how much work claims each window. Null until a session is logged,
   // so the headline stays today's day-granular number until the loop has WHEN-data.
+  // S3b Phase 4 — an explicit per-window availability (when the user pinned one) OVERRIDES
+  // the derived share; the velocity multipliers still come from learned data, and the
+  // null-gate is unchanged, so a pin has no effect until window velocity is earned.
   const windowProfile = windowProfileFromEnergy(
     energyWindows(allWindowSamples, model),
     model,
+    { shareOverride: windowShareOverride(windowAvailability) },
   );
   return {
     projects: projects.filter((p) => p.deadline),

@@ -31,6 +31,7 @@ import {
   setOverride,
   setProjectDeadline,
   setValueModel,
+  setWindowAvailability,
   skipActivity,
   skipActivityForWeek,
   undoPlanVersion,
@@ -49,6 +50,7 @@ import {
 import { generatePortfolioStrategy } from "./portfolio-strategist";
 import { requireUser } from "./auth";
 import type { ValueModel } from "./value-model";
+import type { WindowAvailability } from "./window-availability";
 import type {
   CompletionConfidence,
   DegradedCriterion,
@@ -403,6 +405,19 @@ export async function setAutoStrategyAction(value: boolean): Promise<void> {
 export async function updateValueModelAction(model: ValueModel): Promise<void> {
   await requireUser();
   await setValueModel(model);
+  revalidateAll();
+}
+
+/**
+ * Save the explicit per-window availability (S3b Phase 4). It overrides the derived
+ * window share the windowed forecast uses, so revalidate everywhere odds/order surface.
+ * The payload is re-normalized server-side; all-zero weights ⇒ unset (use the derived share).
+ */
+export async function updateWindowAvailabilityAction(
+  avail: WindowAvailability,
+): Promise<void> {
+  await requireUser();
+  await setWindowAvailability(avail);
   revalidateAll();
 }
 

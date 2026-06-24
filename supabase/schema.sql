@@ -432,3 +432,18 @@ alter table work_sessions enable row level security;
 drop policy if exists work_sessions_owner on work_sessions;
 create policy work_sessions_owner on work_sessions
   for all using (user_id = auth.uid()) with check (user_id = auth.uid());
+
+-- ===========================================================================
+-- S3b Phase 4 — explicit per-window availability (an optional override of the
+-- work_sessions-derived window share; OVERHAUL §5a). One row per user.
+-- ===========================================================================
+create table if not exists window_availability (
+  user_id    uuid primary key references auth.users(id) on delete cascade,
+  weights    jsonb not null default '{}'::jsonb,
+  updated_at timestamptz not null default now()
+);
+
+alter table window_availability enable row level security;
+drop policy if exists window_availability_owner on window_availability;
+create policy window_availability_owner on window_availability
+  for all using (user_id = auth.uid()) with check (user_id = auth.uid());
