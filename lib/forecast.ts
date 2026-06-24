@@ -9,6 +9,7 @@ import type {
 import {
   flowFinishOffsets,
   flowFinishOffsetsComfort,
+  flowFinishOffsetsComfortLanes,
   flowFinishOffsetsLanes,
   type DayCapacity,
   type FlowLane,
@@ -369,8 +370,10 @@ export function globalForecastJoint(
   // OVERHAUL S3b Phase 3 — comfort-capped smoothing: meter each day's HARD minutes
   // (a task's difficulty × its sampled duration) against a soft ceiling, spreading deep
   // work across days. The difficulty weights are static (read once); the hard vector is
-  // refilled per iteration from the sampled durations. Takes precedence over windows this
-  // phase (composition deferred); absent ⇒ the exact day-granular / windowed path.
+  // refilled per iteration from the sampled durations. When window lanes are ALSO present
+  // the two COMPOSE (Phase 4): work flows across windows priced by velocity while hard work
+  // still spreads across days (`flowFinishOffsetsComfortLanes`). Absent ⇒ the exact
+  // day-granular / windowed path.
   const comfortCap = options.comfortCapMinutes;
   const difficulties = comfortCap != null ? order.map((t) => t.difficulty ?? 0) : null;
   const hard = comfortCap != null ? new Array<number>(order.length).fill(0) : null;
@@ -396,7 +399,9 @@ export function globalForecastJoint(
     let offsets: number[];
     if (comfortCap != null) {
       for (let k = 0; k < order.length; k++) hard![k] = difficulties![k] * durations[k];
-      offsets = flowFinishOffsetsComfort(durations, capacities, hard!, comfortCap);
+      offsets = windowLanes
+        ? flowFinishOffsetsComfortLanes(durations, windowLanes, hard!, comfortCap)
+        : flowFinishOffsetsComfort(durations, capacities, hard!, comfortCap);
     } else if (windowLanes) {
       offsets = flowFinishOffsetsLanes(durations, windowLanes);
     } else {

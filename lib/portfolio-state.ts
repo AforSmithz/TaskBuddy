@@ -57,9 +57,10 @@ export interface JointForecastContext extends MovePatchContext {
   /** OVERHAUL S3b Phase 3 slice 2 — the one comfort cap (hard minutes/day) the scorer
    *  decided on the base order, or null when no humaner pace was afforded. When set it
    *  meters every joint re-solve (base + move probes) so the strategy page quotes the same
-   *  comfort-capped plan the dashboard headline shows; takes precedence over `windowProfile`
-   *  (mirrors the forecast's in-loop precedence). The scorer threads it on an augmented
-   *  context — it is a post-gather decision, not a `ForecastGather` field. */
+   *  comfort-capped plan the dashboard headline shows; COMPOSES with `windowProfile` (Phase 4
+   *  — both applied when both are in force, mirroring the forecast's in-loop composition). The
+   *  scorer threads it on an augmented context — a post-gather decision, not a `ForecastGather`
+   *  field. */
   comfortCapMinutes?: number | null;
   /** OVERHAUL S3b Phase 3 slice 3 — when set, replay the within-day reorder the scorer
    *  decided on the base order: after building this subset's order, re-sequence it with
@@ -354,16 +355,13 @@ export function jointOddsWithMoves(
     ...forecastOptions(g.model),
     ...(iterations !== undefined ? { iterations } : {}),
   };
-  // Comfort cap takes precedence over windowed pricing (mirrors the forecast's in-loop
-  // precedence + `comfortSmooth`'s gated call): when the base plan afforded a humaner
-  // pace, every move-set is metered by that one cap; otherwise price the order's windows.
-  // Either is derived from THIS pass's capacities (skip-adjusted when a skip-move freed
+  // Comfort cap and windowed pricing COMPOSE (Phase 4, mirrors the forecast's in-loop
+  // composition + `comfortSmooth`'s gated call): when the base plan afforded a humaner pace
+  // every move-set is metered by that cap, AND the order's windows are priced when a profile
+  // is learned. Both derive from THIS pass's capacities (skip-adjusted when a skip-move freed
   // hours), so a preview prices exactly as the dashboard headline does.
-  if (g.comfortCapMinutes != null) {
-    opts.comfortCapMinutes = g.comfortCapMinutes;
-  } else if (g.windowProfile) {
-    opts.windowCapacities = windowCapacities(capacities, g.windowProfile);
-  }
+  if (g.comfortCapMinutes != null) opts.comfortCapMinutes = g.comfortCapMinutes;
+  if (g.windowProfile) opts.windowCapacities = windowCapacities(capacities, g.windowProfile);
   // S3b Phase 3 slice 3 — replay the within-day reorder decided on the base, when set:
   // re-sequence this subset's order (group projects + slot hard work into fast windows)
   // before pricing. Deterministic over inputs the client mirrors (order, the same
@@ -449,8 +447,9 @@ export interface ResolveInput {
   /** OVERHAUL S3b Phase 3 slice 2 — the single comfort cap (hard minutes/day) the server
    *  decided on the base order, or null when none was afforded. The client meters every
    *  subset re-solve by it (the comfort flow is deterministic and the per-task `difficulty`
-   *  already rides on `tasks`, so the re-solve stays bit-identical); takes precedence over
-   *  `windowProfile`, matching the server's `jointOddsWithMoves`. */
+   *  already rides on `tasks`, so the re-solve stays bit-identical); COMPOSES with
+   *  `windowProfile` (Phase 4 — both applied when both are present), matching the server's
+   *  `jointOddsWithMoves`. */
   comfortCapMinutes?: number | null;
   /** OVERHAUL S3b Phase 3 slice 3 — the within-day reorder flag the scorer decided on the
    *  base order. When set, the client replays the SAME deterministic `arrangeOrder` on its
@@ -542,16 +541,13 @@ export function resolveSubsetOdds(
     sigma: input.model.sigma,
     meanLog: input.model.meanLog,
   };
-  // Mirror the server's `jointOddsWithMoves` precedence exactly: the comfort cap (when the
-  // server afforded one) meters this subset by the same scalar — the comfort flow is
-  // deterministic and `difficulty` already rides on `tasks`, so the re-solve stays
-  // bit-identical; otherwise rebuild window segments from the client's own (skip-adjusted)
-  // capacities + the shipped profile.
-  if (input.comfortCapMinutes != null) {
-    opts.comfortCapMinutes = input.comfortCapMinutes;
-  } else if (input.windowProfile) {
-    opts.windowCapacities = windowCapacities(capacities, input.windowProfile);
-  }
+  // Mirror the server's `jointOddsWithMoves` composition exactly (Phase 4): the comfort cap
+  // (when the server afforded one) meters this subset by the same scalar — the comfort flow
+  // is deterministic and `difficulty` already rides on `tasks` — AND window segments are
+  // rebuilt from the client's own (skip-adjusted) capacities + the shipped profile, so a
+  // composed comfort×window re-solve stays bit-identical to the server's.
+  if (input.comfortCapMinutes != null) opts.comfortCapMinutes = input.comfortCapMinutes;
+  if (input.windowProfile) opts.windowCapacities = windowCapacities(capacities, input.windowProfile);
   return globalForecastJoint(
     order,
     capacities,

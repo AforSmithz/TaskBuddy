@@ -451,9 +451,10 @@ export const ARRANGE_ODDS_EPSILON = 0.02;
 export interface ComfortSmoothOptions {
   /** Estimation-bias options for the MC (sigma/meanLog; iterations optional). */
   forecast: ForecastOptions;
-  /** Window profile for the canonical baseline's windowed pricing (the comfort flow itself
-   *  is day-granular this phase, so the gate stays conservative when windows are favourable;
-   *  comfort + window composition is a later refinement). */
+  /** Window profile for windowed pricing — applied to BOTH the canonical baseline AND the
+   *  comfort-capped gate MC (Phase 4 composition), so the gate compares apples-to-apples:
+   *  a windowed-canonical vs a windowed-comfort plan. (Pre-Phase-4 the comfort gate dropped
+   *  windows, making it conservative when windows were favourable; the composition lifts that.) */
   windowProfile?: WindowProfile | null;
   /** Hard-work ceiling to relax toward (default COMFORT_CAP_MINUTES). */
   comfortCapMinutes?: number;
@@ -573,10 +574,14 @@ export function comfortSmooth(
   for (const [pid, over] of proxyOver) {
     if (over > (canonicalOver.get(pid) ?? 0)) return noChange;
   }
-  // Stage 2 — the full MC gate: spread only as far as the odds can afford.
+  // Stage 2 — the full MC gate: spread only as far as the odds can afford. The comfort cap
+  // and the window pricing COMPOSE (Phase 4): the gate prices the comfort-capped plan with
+  // the same window velocity the canonical baseline uses, so a favourable window doesn't make
+  // a comfortable pace look worse than it is.
   const joint = globalForecastJoint(order, capacities, deadlineByProject, today, {
     ...opts.forecast,
     comfortCapMinutes: target,
+    ...(windowCaps ? { windowCapacities: windowCaps } : {}),
   });
   if (joint.allOnTime >= canonicalJoint.allOnTime - epsilon) {
     return { comfortCapMinutes: target, joint, changed: true };
@@ -655,11 +660,12 @@ export function gatedReorder(
     return { changed: false, order: arranged, joint: canonicalJoint };
   }
 
-  // Odds-relevant ⇒ gate: re-price the arranged order with the headline's precedence
-  // (comfort XOR window), adopt it only while `allOnTime ≥ canonical − ε`.
+  // Odds-relevant ⇒ gate: re-price the arranged order the same way the headline does —
+  // the comfort cap and window pricing COMPOSE (Phase 4), both applied when both are in
+  // force — and adopt it only while `allOnTime ≥ canonical − ε`.
   const opts2: ForecastOptions = { ...opts.forecast };
   if (cap != null) opts2.comfortCapMinutes = cap;
-  else if (profile) opts2.windowCapacities = windowCapacities(capacities, profile);
+  if (profile) opts2.windowCapacities = windowCapacities(capacities, profile);
   const arrangedJoint = globalForecastJoint(arranged, capacities, deadlineByProject, today, opts2);
   const epsilon = opts.oddsEpsilon ?? ARRANGE_ODDS_EPSILON;
   if (arrangedJoint.allOnTime >= canonicalJoint.allOnTime - epsilon) {

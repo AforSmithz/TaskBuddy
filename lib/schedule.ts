@@ -525,6 +525,109 @@ export function flowFinishOffsetsLanes(
   return offsets;
 }
 
+/** First lane strictly after the current day with any capacity — the comfort roll's
+ *  target (deep work spreads across DAYS, so a hard-cap roll skips the rest of today's
+ *  windows). Skips same-day-or-earlier lanes and exhausted ones. */
+function firstOpenLaneNextDay(lanes: FlowLane[], from: number, currentDay: number): number {
+  let j = from + 1;
+  while (j < lanes.length && (lanes[j].dayOffset <= currentDay || lanes[j].capacityMinutes <= 0)) {
+    j++;
+  }
+  return j;
+}
+
+/**
+ * The comfort × window COMPOSITION (OVERHAUL S3b Phase 4): flow `durations` across window
+ * LANES (each task scaled by its START lane's net multiplier, exactly as
+ * `flowFinishOffsetsLanes`) AND meter each DAY's HARD-work minutes against a soft
+ * `comfortCap` (exactly as `flowFinishOffsetsComfort`) — so a learned-fast window shrinks
+ * effective work WHILE deep work still spreads across days. The two objectives compose
+ * instead of one taking precedence (the Phase-3 limitation this lifts).
+ *
+ * The comfort roll is per-DAY (a hard task that would bust the current day's cap waits for
+ * the next open day — skipping the rest of today's windows), while the capacity flow is
+ * per-LANE; hard load is booked on the finish day (a task that spills to a later day resets
+ * that day's hard tally to its own load), mirroring `flowFinishOffsetsComfort` exactly.
+ *
+ * Two byte-identical reductions pin the no-regret guarantee (both regressions in the harness):
+ *   • `comfortCap === Infinity` (or every `hardMinutes === 0`) ⇒ the comfort roll never fires
+ *     ⇒ identical to `flowFinishOffsetsLanes`.
+ *   • a flat/unlearned split (one lane per day, or lanes summing per-day to the day cap with
+ *     `netMultiplier === 1`) ⇒ identical to `flowFinishOffsetsComfort`.
+ * So the composition is only ever reached with BOTH a learned window profile AND a comfort
+ * cap in force; with either absent the caller routes to the single-objective flow above.
+ */
+export function flowFinishOffsetsComfortLanes(
+  durations: number[],
+  lanes: FlowLane[],
+  hardMinutes: number[],
+  comfortCap: number,
+): number[] {
+  const offsets = new Array<number>(durations.length).fill(0);
+  if (lanes.length === 0) return offsets;
+  const lastOffset = lanes[lanes.length - 1].dayOffset;
+
+  let i = firstOpenLane(lanes, 0);
+  if (i >= lanes.length) return offsets.fill(lastOffset);
+  let remaining = lanes[i].capacityMinutes;
+  let currentDay = lanes[i].dayOffset;
+  let hardUsed = 0;
+
+  for (let k = 0; k < durations.length; k++) {
+    const hard = hardMinutes[k];
+    // Comfort roll (per DAY): a deep-work block that would bust the current day's hard
+    // budget (and the day already holds hard work) waits for the next open day, skipping
+    // the rest of today's windows.
+    if (hard > 0 && hardUsed > 0 && hardUsed + hard > comfortCap) {
+      const next = firstOpenLaneNextDay(lanes, i, currentDay);
+      if (next >= lanes.length) {
+        for (let j = k; j < durations.length; j++) offsets[j] = lastOffset;
+        return offsets;
+      }
+      i = next;
+      remaining = lanes[i].capacityMinutes;
+      currentDay = lanes[i].dayOffset;
+      hardUsed = 0;
+    }
+    // Skip exhausted lanes for real work, so the start multiplier is the window work
+    // actually begins in (the daily path's exact behaviour); crossing a day by filling up
+    // resets the hard tally.
+    if (durations[k] > 0 && remaining <= 0) {
+      const next = firstOpenLane(lanes, i + 1);
+      if (next >= lanes.length) {
+        for (let j = k; j < durations.length; j++) offsets[j] = lastOffset;
+        return offsets;
+      }
+      i = next;
+      remaining = lanes[i].capacityMinutes;
+      if (lanes[i].dayOffset !== currentDay) {
+        currentDay = lanes[i].dayOffset;
+        hardUsed = 0;
+      }
+    }
+    const startDay = lanes[i].dayOffset;
+    let need = durations[k] * lanes[i].netMultiplier;
+    while (need > remaining) {
+      const next = firstOpenLane(lanes, i + 1);
+      if (next >= lanes.length) {
+        for (let j = k; j < durations.length; j++) offsets[j] = lastOffset;
+        return offsets;
+      }
+      need -= remaining;
+      i = next;
+      remaining = lanes[i].capacityMinutes;
+    }
+    remaining -= need;
+    const finishDay = lanes[i].dayOffset;
+    // Hard load counts on the finish day; a task that spilled to a later day is the first
+    // hard work there (reset), else it adds to the running tally — mirrors the day flow.
+    hardUsed = finishDay !== startDay ? hard : hardUsed + hard;
+    currentDay = finishDay;
+    offsets[k] = finishDay;
+  }
+  return offsets;
+}
+
 /** One item to pack: a task block's display metadata plus its base estimate. */
 export interface PackItem {
   taskId: string;
