@@ -95,8 +95,8 @@ import {
   type GlobalPlan,
 } from "./allocate";
 import {
-  arrange,
   comfortSmooth,
+  gatedReorder,
   windowCapacities,
   windowProfileFromEnergy,
   type WindowProfile,
@@ -2717,6 +2717,7 @@ function buildResolveInput(
   g: ForecastGather,
   ctx: AllocContext,
   comfortCapMinutes: number | null,
+  arrangeReorder: boolean,
 ): ResolveInput {
   return {
     tasks: ctx.tasks,
@@ -2734,6 +2735,10 @@ function buildResolveInput(
     // subset re-solve meters by the same scalar (it takes precedence over the window
     // profile, matching `resolveSubsetOdds`).
     comfortCapMinutes,
+    // S3b Phase 3 slice 3 — ship the within-day reorder flag the scorer decided so the
+    // client replays the SAME deterministic `arrangeOrder` on its re-derived order (the
+    // reorder reads only inputs already in `ResolveInput`, so parity rides for free).
+    arrangeReorder,
   };
 }
 
@@ -2763,16 +2768,33 @@ export async function createJointScorer(): Promise<JointScorer> {
     budget: ctx.budget,
     today: g.today,
   });
-  const comfortCapMinutes = comfortSmooth(
+  const smoothed = comfortSmooth(
     canonical.order,
     ctx.capacities,
     g.deadlineByProject,
     g.today,
     { forecast: forecastOptions(g.model), windowProfile: g.windowProfile },
-  ).comfortCapMinutes;
-  // The joint re-solve context carries the cap (mirrors how `windowProfile` rides on `g`);
-  // every `jointOddsWithMoves` / `cumulativeJointOdds` below reads it off `jg`.
-  const jg = { ...g, comfortCapMinutes };
+  );
+  const comfortCapMinutes = smoothed.comfortCapMinutes;
+  // S3b Phase 3 slice 3 — decide the within-day reorder ONCE on the base canonical order
+  // (the same decision `forecastDashboard` makes), gated against the comfort baseline.
+  // `arrangeReorder` is the single boolean every joint re-solve replays: the base, the
+  // optimizer's move probes, the cumulative display, AND the client subset re-solve all
+  // flow the arranged order iff it is set. No-regret: false (no odds-relevant signal, or
+  // the gate declined) ⇒ the exact pre-slice-3 (comfort/windowed) path, bit-for-bit.
+  const arrangeReorder = gatedReorder(
+    canonical.order,
+    ctx.capacities,
+    g.deadlineByProject,
+    g.today,
+    ctx.deps,
+    smoothed.joint,
+    { forecast: forecastOptions(g.model), windowProfile: g.windowProfile, comfortCapMinutes },
+  ).changed;
+  // The joint re-solve context carries the cap + the reorder flag (mirrors how
+  // `windowProfile` rides on `g`); every `jointOddsWithMoves` / `cumulativeJointOdds`
+  // below reads them off `jg`.
+  const jg = { ...g, comfortCapMinutes, arrangeReorder };
   const base = jointOddsWithMoves(jg, ctx, []);
   const baseByProject = base.byProject;
 
@@ -2792,7 +2814,7 @@ export async function createJointScorer(): Promise<JointScorer> {
     baseAllOnTime: base.allOnTime,
     score: (moves) => jointOddsWithMoves(jg, ctx, moves, JOINT_PROBE_ITERATIONS),
     cumulative: (ordered) => cumulativeJointOdds(jg, ctx, ordered),
-    resolveInput: buildResolveInput(g, ctx, comfortCapMinutes),
+    resolveInput: buildResolveInput(g, ctx, comfortCapMinutes, arrangeReorder),
   };
 }
 
@@ -3065,20 +3087,39 @@ export async function forecastDashboard(): Promise<{
     forecast: forecastOptions(g.model),
     windowProfile: g.windowProfile,
   });
-  const odds = smoothed.joint.byProject;
+  // S3b Phase 3 (slice 3): re-sequence WITHIN each near-horizon day to cut context
+  // switches and slot hard work into learned-fast windows, gated so the arranged order
+  // never drops `allOnTime` below the comfort baseline − ε. The arranged order is what
+  // the display packs and — when the reorder is odds-relevant (windows/comfort) and the
+  // gate passes — what the headline prices; with no such signal the grouping is
+  // display-only over the byte-identical canonical odds (the no-regret anchor).
+  const reorder = gatedReorder(
+    canonical.order,
+    ctx.capacities,
+    g.deadlineByProject,
+    g.today,
+    ctx.deps,
+    smoothed.joint,
+    {
+      forecast: forecastOptions(g.model),
+      windowProfile: g.windowProfile,
+      comfortCapMinutes: smoothed.comfortCapMinutes,
+    },
+  );
+  const odds = reorder.joint.byProject;
   const forecasts = buildForecasts(g, g.commitments, odds);
   const pitWall = buildPitWall(g, ctx, odds);
   const recoveries = g.projects
     .map((p) => buildRecoveryPlan(g, p, odds, pitWall.conflicts, cachedStrategy))
     .filter((plan): plan is RecoveryPlan => plan !== null);
-  // The displayed plan packs the SAME order, comfort-capped when smoothing fired (so the
-  // shown days match the comfort odds), then groups within-day to cut context switches
-  // (Phase 1 — a within-day permute that keeps every task on its day; odds-neutral).
+  // The displayed plan packs the ARRANGED order, comfort-capped when smoothing fired, so
+  // the shown days match the comfort/arranged odds (display == priced). `globalPlan.order`
+  // stays the canonical order — display metadata + stable priority ranks, unaffected by
+  // the within-day arrangement (which lives in `days`).
   const globalPlan: GlobalPlan = {
     order: canonical.order,
-    days: packGlobal(canonical.order, ctx.budget, g.today, smoothed.comfortCapMinutes),
+    days: packGlobal(reorder.order, ctx.budget, g.today, smoothed.comfortCapMinutes),
   };
-  globalPlan.days = arrange(globalPlan.days, ctx.deps, g.today).days;
   // The agenda order: same plan plus today's due recurring instances, ranked as
   // if due today (ordering-only) so a due routine/goal surfaces near the top.
   const recurringTasks = recurringAllocTasksForToday(activities, completions, g.today);
