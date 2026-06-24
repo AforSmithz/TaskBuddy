@@ -67,6 +67,12 @@ export interface JointForecastContext extends MovePatchContext {
    *  before pricing. Decided once on the base (like the comfort cap), not re-gated per
    *  subset; false ⇒ the canonical order, bit-for-bit. */
   arrangeReorder?: boolean;
+  /** OVERHAUL S3b Phase 3 `w_buffer` lever — the projects whose critical-chain buffer is
+   *  "thin" (at-risk) under the base plan. The reorder biases their work into the day's fast
+   *  windows (protect the thinnest deadline). Decided once on the base (like `arrangeReorder`)
+   *  — it can't be recomputed from this context's data — and read by `arrangeOrder`; absent ⇒
+   *  no buffer bias. */
+  thinBufferProjects?: ReadonlySet<string> | null;
 }
 
 /** The forecast's per-iteration estimation-bias options, drawn from the user's
@@ -366,6 +372,7 @@ export function jointOddsWithMoves(
     ? arrangeOrder(plan.order, capacities, state.deps, g.today, {
         windowProfile: g.windowProfile,
         comfortCapMinutes: g.comfortCapMinutes,
+        thinBufferProjects: g.thinBufferProjects,
       })
     : plan.order;
   return globalForecastJoint(order, capacities, state.deadlineByProject, g.today, opts);
@@ -451,6 +458,12 @@ export interface ResolveInput {
    *  `comfortCapMinutes`/`today`, all already shipped, so the re-solve stays bit-identical
    *  to the server's `jointOddsWithMoves`). */
   arrangeReorder?: boolean;
+  /** OVERHAUL S3b Phase 3 `w_buffer` lever — the at-risk (thin critical-chain buffer) project
+   *  ids the server flagged on the base plan, shipped as a JSON-safe array. The client rebuilds
+   *  the Set and feeds it to the SAME deterministic `arrangeOrder`, so the buffer-biased order is
+   *  bit-identical to the server's (the set can't be recomputed here — the buffer math needs the
+   *  per-project forecast distribution the server holds). Absent ⇒ no buffer bias. */
+  thinBufferProjects?: string[];
 }
 
 /** Element-wise sum of two per-day hour series (aligned by index — both span the same
@@ -521,6 +534,8 @@ export function resolveSubsetOdds(
     ? arrangeOrder(baseOrder, capacities, state.deps, input.today, {
         windowProfile: input.windowProfile,
         comfortCapMinutes: input.comfortCapMinutes,
+        // Same set the server flagged on the base — replayed, not recomputed (parity).
+        thinBufferProjects: input.thinBufferProjects ? new Set(input.thinBufferProjects) : null,
       })
     : baseOrder;
   const opts: ForecastOptions = {

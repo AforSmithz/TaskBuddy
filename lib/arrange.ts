@@ -43,7 +43,9 @@ import { ALL_WINDOWS, type EnergyWindow, type TimeWindow } from "./velocity";
  *  switch term (a unit penalty per project change) dominates the energy term (bounded
  *  by `|netMult−1|·difficulty`, typically <0.5), so energy placement operates *within*
  *  a project's cluster (group first, then sequence each cluster by energy); raising
- *  `energy` is the lever that lets it break a cluster for a strong window gain. */
+ *  `energy` is the lever that lets it break a cluster for a strong window gain. The
+ *  energy + buffer terms share the `(netMult−1)` window coupling, so both vanish without
+ *  a learned profile and the score reduces EXACTLY to context-switch clustering. */
 export interface ArrangeWeights {
   /** Penalty per project change across a day's within-day sequence (context-switch cost). */
   switch: number;
@@ -56,10 +58,23 @@ export interface ArrangeWeights {
    *  profile is learned. (Duration/importance-weighted placement is a Phase-4 "richer
    *  difficulty" refinement.) */
   energy: number;
+  /** Weight on the buffer term `(netMult−1)` for a THIN-buffer (at-risk) project's work —
+   *  the same window coupling as energy but difficulty-INDEPENDENT. The S3a critical-chain
+   *  lever (`tone==="thin"`, `lib/buffer.ts`): give the work whose safety margin is thinnest
+   *  first claim on the day's FAST windows — the hours it is most likely to finish in —
+   *  widening its buffer, even when that remaining work is light. Combines additively with
+   *  energy, so an at-risk task competes for a fast window as if it carried `buffer` extra
+   *  units of difficulty. Inert (0) without a window profile (`netMult≡1`) or when no project
+   *  is thin. The thin-buffer SET is decided once on the base plan's odds (it can't be
+   *  recomputed from the client's data) and shipped for the S1 re-solve to replay. */
+  buffer: number;
 }
 
 /** Default weights — `1.0` as knobs, calibrated later by S2's loop. */
-export const ARRANGE_WEIGHTS: ArrangeWeights = { switch: 1, energy: 1 };
+export const ARRANGE_WEIGHTS: ArrangeWeights = { switch: 1, energy: 1, buffer: 1 };
+
+/** Shared empty thin-buffer set — the no-buffer-bias default (avoids per-call allocation). */
+const NO_THIN_BUFFER: ReadonlySet<string> = new Set();
 
 /** How far out we re-arrange: the committed near-horizon. Beyond it the plan is
  *  re-derived as time advances, so re-sequencing it now is wasted (and out of
@@ -72,6 +87,10 @@ export interface ArrangeOrderOptions {
   /** Comfort cap (hard min/day) — when set, the day-bucketing mirrors the comfort-capped
    *  pack so the reorder permutes inside the same days the comfort flow lands work on. */
   comfortCapMinutes?: number | null;
+  /** Projects whose critical-chain buffer is "thin" (at-risk) under the base plan — the S3a
+   *  `w_buffer` lever. Their work is biased into the day's fast windows (the buffer term).
+   *  Decided once on the base + shipped for parity; absent/empty ⇒ no buffer bias. */
+  thinBufferProjects?: ReadonlySet<string> | null;
   /** Moves confined to this many days from `today` (default ARRANGE_HORIZON_DAYS). */
   horizonDays?: number;
   /** `J` term weights (default ARRANGE_WEIGHTS). */
@@ -156,6 +175,7 @@ function sequenceDay(
   prereqs: Map<string, Set<string>>,
   segs: { caps: number[]; mult: number[] },
   weights: ArrangeWeights,
+  thinBuffer: ReadonlySet<string>,
 ): EffectiveOrderEntry[] {
   const rank = new Map<string, number>();
   entries.forEach((e, i) => rank.set(e.taskId, i)); // canonical index = deterministic tiebreak
@@ -179,7 +199,12 @@ function sequenceDay(
       // Energy: reward cognitively-hard work (`difficulty`) in a fast window (`netMult<1`),
       // penalise it in a slow one. The gate prices the resulting (reseeded) order's odds.
       const en = weights.energy * (e.difficulty ?? 0) * (mult - 1);
-      const cost = sw + en;
+      // Buffer (S3a lever): a thin-buffer (at-risk) project's work gets the SAME fast-window
+      // pull as energy but difficulty-INDEPENDENT — protect the thinnest deadline by giving
+      // its work the hours it is most likely to finish in, even when that work is light.
+      // Vanishes with no profile (`mult−1=0`) or when the project is not thin.
+      const bf = thinBuffer.has(e.projectId) ? weights.buffer * (mult - 1) : 0;
+      const cost = sw + en + bf;
       if (
         cost < bestCost - COST_EPSILON ||
         (cost <= bestCost + COST_EPSILON && rank.get(e.taskId)! < rank.get(best.taskId)!)
@@ -217,6 +242,7 @@ export function arrangeOrder(
   const weights = opts.weights ?? ARRANGE_WEIGHTS;
   const profile = opts.windowProfile ?? null;
   const cap = opts.comfortCapMinutes ?? null;
+  const thinBuffer = opts.thinBufferProjects ?? NO_THIN_BUFFER;
 
   // Bucket the order into the days the greedy pack lands it on (comfort-capped when a
   // cap is in force, so the buckets match the days the comfort flow actually uses) —
@@ -251,7 +277,7 @@ export function arrangeOrder(
         if (!prereqs.has(edge.task_id)) prereqs.set(edge.task_id, new Set());
         prereqs.get(edge.task_id)!.add(edge.depends_on_task_id);
       }
-      const seq = sequenceDay(bucket, prereqs, daySegments(capacities[off]?.capacityMinutes ?? 0, profile), weights);
+      const seq = sequenceDay(bucket, prereqs, daySegments(capacities[off]?.capacityMinutes ?? 0, profile), weights, thinBuffer);
       for (let k = 0; k < seq.length; k++) if (seq[k].taskId !== bucket[k].taskId) changed = true;
       out.push(...seq);
     } else {
@@ -578,6 +604,9 @@ export interface GatedReorderOptions {
   windowProfile?: WindowProfile | null;
   /** The comfort cap already decided for this plan (comfort takes pricing precedence). */
   comfortCapMinutes?: number | null;
+  /** The at-risk (thin-buffer) project set decided on the base plan — the S3a `w_buffer`
+   *  lever, biasing those projects' work into fast windows. Absent ⇒ no buffer bias. */
+  thinBufferProjects?: ReadonlySet<string> | null;
   /** Gate slack on `allOnTime` (default ARRANGE_ODDS_EPSILON). */
   oddsEpsilon?: number;
   /** `J` term weights (default ARRANGE_WEIGHTS). */
@@ -614,6 +643,7 @@ export function gatedReorder(
   const arranged = arrangeOrder(order, capacities, deps, today, {
     windowProfile: profile,
     comfortCapMinutes: cap,
+    thinBufferProjects: opts.thinBufferProjects,
     weights: opts.weights,
   });
   // Nothing moved ⇒ canonical everywhere (arrangeOrder returns the same reference).
