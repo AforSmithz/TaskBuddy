@@ -27,7 +27,7 @@ import { dayCapacities, type DayCapacity, type DependencyEdge } from "./schedule
 import { globalForecastJoint, type ForecastOptions } from "./forecast";
 import { buildGlobalPlan, effectiveOrder, effortToDifficulty, type AllocTask } from "./allocate";
 import { activityDrainCommitments, currentWeekOwedDates } from "./recurring";
-import { windowCapacities, type WindowProfile } from "./arrange";
+import { arrangeOrder, windowCapacities, type WindowProfile } from "./arrange";
 
 /** The slice of the server gather a move's pure forecast-patch reads. Only the
  *  skip-move arm touches the gather (to find the activity's owed dates); every
@@ -61,6 +61,12 @@ export interface JointForecastContext extends MovePatchContext {
    *  (mirrors the forecast's in-loop precedence). The scorer threads it on an augmented
    *  context — it is a post-gather decision, not a `ForecastGather` field. */
   comfortCapMinutes?: number | null;
+  /** OVERHAUL S3b Phase 3 slice 3 — when set, replay the within-day reorder the scorer
+   *  decided on the base order: after building this subset's order, re-sequence it with
+   *  the deterministic `arrangeOrder` (group projects + slot hard work into fast windows)
+   *  before pricing. Decided once on the base (like the comfort cap), not re-gated per
+   *  subset; false ⇒ the canonical order, bit-for-bit. */
+  arrangeReorder?: boolean;
 }
 
 /** The forecast's per-iteration estimation-bias options, drawn from the user's
@@ -352,7 +358,17 @@ export function jointOddsWithMoves(
   } else if (g.windowProfile) {
     opts.windowCapacities = windowCapacities(capacities, g.windowProfile);
   }
-  return globalForecastJoint(plan.order, capacities, state.deadlineByProject, g.today, opts);
+  // S3b Phase 3 slice 3 — replay the within-day reorder decided on the base, when set:
+  // re-sequence this subset's order (group projects + slot hard work into fast windows)
+  // before pricing. Deterministic over inputs the client mirrors (order, the same
+  // skip-adjusted capacities, deps, profile, cap), so server == client for the subset.
+  const order = g.arrangeReorder
+    ? arrangeOrder(plan.order, capacities, state.deps, g.today, {
+        windowProfile: g.windowProfile,
+        comfortCapMinutes: g.comfortCapMinutes,
+      })
+    : plan.order;
+  return globalForecastJoint(order, capacities, state.deadlineByProject, g.today, opts);
 }
 
 /**
@@ -429,6 +445,12 @@ export interface ResolveInput {
    *  already rides on `tasks`, so the re-solve stays bit-identical); takes precedence over
    *  `windowProfile`, matching the server's `jointOddsWithMoves`. */
   comfortCapMinutes?: number | null;
+  /** OVERHAUL S3b Phase 3 slice 3 — the within-day reorder flag the scorer decided on the
+   *  base order. When set, the client replays the SAME deterministic `arrangeOrder` on its
+   *  re-derived order before pricing (reads only `tasks`/`deps`/`capacities`/`windowProfile`/
+   *  `comfortCapMinutes`/`today`, all already shipped, so the re-solve stays bit-identical
+   *  to the server's `jointOddsWithMoves`). */
+  arrangeReorder?: boolean;
 }
 
 /** Element-wise sum of two per-day hour series (aligned by index — both span the same
@@ -473,7 +495,7 @@ export function resolveSubsetOdds(
   }
   // The order is always built from the BASE capacities (server computes it from
   // `ctx.budget`, unaffected by skips); only the MC sees the freed capacity.
-  const order = effectiveOrder(
+  const baseOrder = effectiveOrder(
     state.tasks,
     state.deps,
     state.deadlineByProject,
@@ -491,6 +513,16 @@ export function resolveSubsetOdds(
         ),
       }))
     : input.capacities;
+  // S3b Phase 3 slice 3 — replay the within-day reorder the server decided on the base
+  // (group projects + slot hard work into fast windows), over the SAME skip-adjusted
+  // capacities the server's `jointOddsWithMoves` buckets by — so the arranged order is
+  // bit-identical to the server's for this subset.
+  const order = input.arrangeReorder
+    ? arrangeOrder(baseOrder, capacities, state.deps, input.today, {
+        windowProfile: input.windowProfile,
+        comfortCapMinutes: input.comfortCapMinutes,
+      })
+    : baseOrder;
   const opts: ForecastOptions = {
     sigma: input.model.sigma,
     meanLog: input.model.meanLog,
