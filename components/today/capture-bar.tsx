@@ -1,16 +1,20 @@
 "use client";
 
 import { useState, useTransition } from "react";
-import { quickAddErrandAction } from "@/lib/actions";
+import { runCheckinAction, type CheckinRunResult } from "@/lib/actions";
+import { CheckinReview } from "./checkin-review";
 
 /**
- * The full-width universal capture bar. For now Enter drops whatever you type
- * into today's queue as a one-off errand (the same action as Quick-add); the
- * natural-language register-router that splits ideas / status / vents comes in a
- * later phase. The soft gradient orb + ↵ affordance match Direction F.
+ * The full-width universal capture bar (§5.6). Type a free-form check-in — what you
+ * did, what changed, an idea, a vent — and Enter runs the interpret → resolve →
+ * propose loop, then shows an inline review whose accepted moves commit as one
+ * reversible PlanVersion (reusing the S1 review/commit/undo machinery). The state
+ * machine: idle → interpreting → reviewing → (committed, inside the review). The
+ * soft gradient orb + ↵ affordance match Direction F.
  */
 export function CaptureBar() {
   const [value, setValue] = useState("");
+  const [result, setResult] = useState<CheckinRunResult | null>(null);
   const [pending, startTransition] = useTransition();
 
   function submit(e: React.FormEvent) {
@@ -18,9 +22,19 @@ export function CaptureBar() {
     const text = value.trim();
     if (!text || pending) return;
     startTransition(async () => {
-      await quickAddErrandAction(text, null);
-      setValue("");
+      const res = await runCheckinAction(text);
+      setResult(res);
     });
+  }
+
+  function reset() {
+    setResult(null);
+    setValue("");
+  }
+
+  // Reviewing — the interpreted proposals replace the input until the user is done.
+  if (result) {
+    return <CheckinReview result={result} onDone={reset} />;
   }
 
   return (
@@ -29,14 +43,18 @@ export function CaptureBar() {
       className="flex items-center gap-3.5 rounded-[18px] border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-4 shadow-[var(--shadow-md)]"
     >
       <span
-        className="size-[30px] shrink-0 rounded-full bg-[image:var(--gradient-brand)]"
+        className={`size-[30px] shrink-0 rounded-full bg-[image:var(--gradient-brand)] ${pending ? "animate-pulse" : ""}`}
         aria-hidden
       />
       <input
         value={value}
         onChange={(e) => setValue(e.target.value)}
         disabled={pending}
-        placeholder="Type anything — an idea, an update, what's on your mind…"
+        placeholder={
+          pending
+            ? "Reading your check-in…"
+            : "Type anything — what you did, an update, an idea…"
+        }
         aria-label="Capture anything"
         className="min-w-0 flex-1 bg-transparent text-[15px] font-medium text-[var(--color-fg)] placeholder:text-[var(--color-fg-subtle)] focus:outline-none"
       />

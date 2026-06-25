@@ -8,6 +8,8 @@ import {
   applyReroute,
   applyTaskModifications,
   commitStrategyBundle,
+  createJointScorer,
+  type JointScorer,
   confirmDraft,
   createDraft,
   createErrandTask,
@@ -48,10 +50,14 @@ import {
   generateTaskModifications,
 } from "./strategist";
 import { generatePortfolioStrategy } from "./portfolio-strategist";
+import { interpretCheckin, resolveCheckin, proposeFromCheckin } from "./checkin";
+import { SKILL_TASK_PREFIX, type ResolveInput } from "./portfolio-state";
 import { requireUser } from "./auth";
 import type { ValueModel } from "./value-model";
 import type { WindowAvailability } from "./window-availability";
 import type {
+  CheckinCandidate,
+  CheckinReview,
   CompletionConfidence,
   DegradedCriterion,
   DraftClassification,
@@ -566,6 +572,110 @@ export async function commitStrategyBundleAction(
   });
   revalidateAll();
   return version;
+}
+
+// --- §5.6 NL check-in / reflection loop -------------------------------------
+
+/** The serialized result the capture bar renders: the reviewable proposals + the
+ *  client re-solve inputs (so Family-A toggles re-solve live, like the strategy
+ *  card) + the base odds + which interpret path ran (for the subtle source hint). */
+export interface CheckinRunResult {
+  review: CheckinReview;
+  resolveInput: ResolveInput;
+  baseAllOnTime: number;
+  source: "llm" | "heuristic";
+}
+
+/** How many candidate entities the interpret prompt sees (the rest still resolve).
+ *  Caps the prompt, not the resolution blast radius (design §"candidate set"). */
+const CHECKIN_PROMPT_CAP = 60;
+
+/** Derive the check-in candidate set from the already-computed joint scorer — the
+ *  open real tasks + the unattained skill-node frontier are ALREADY in
+ *  `resolveInput.tasks` (skill nodes namespaced with `SKILL_TASK_PREFIX`), so this
+ *  re-gathers nothing. Activities come off the scorer. Handles are stable within a
+ *  run (T#/S#/A#). Returns the resolve set + the global unattained skill set
+ *  (the spillover blast radius). */
+function checkinCandidates(scorer: JointScorer): {
+  candidates: CheckinCandidate[];
+  skillNodes: CheckinCandidate[];
+} {
+  const candidates: CheckinCandidate[] = [];
+  const skillNodes: CheckinCandidate[] = [];
+  let t = 0;
+  let s = 0;
+  for (const task of scorer.resolveInput.tasks) {
+    if (task.id.startsWith(SKILL_TASK_PREFIX)) {
+      const node: CheckinCandidate = {
+        handle: `S${++s}`,
+        type: "skill_node",
+        id: task.id.slice(SKILL_TASK_PREFIX.length),
+        title: task.title,
+        goalId: task.projectId,
+        goalName: task.projectName,
+      };
+      candidates.push(node);
+      skillNodes.push(node);
+    } else {
+      candidates.push({
+        handle: `T${++t}`,
+        type: "task",
+        id: task.id,
+        title: task.title,
+        goalId: task.projectId,
+        goalName: task.projectName,
+      });
+    }
+  }
+  scorer.activities.forEach((a, i) => {
+    candidates.push({
+      handle: `A${i + 1}`,
+      type: "activity",
+      id: a.id,
+      title: a.title,
+      goalId: "",
+      goalName: a.area,
+    });
+  });
+  return { candidates, skillNodes };
+}
+
+/**
+ * Run the interpret → resolve → propose loop over a free-form check-in (§5.6). The
+ * review/commit half is the existing S1 machinery — the capture bar commits the
+ * accepted Family-A subset via `commitStrategyBundleAction` and runs the Family-B
+ * actions individually. No mutation happens here; this is read-only interpretation.
+ */
+export async function runCheckinAction(rawReport: string): Promise<CheckinRunResult> {
+  await requireUser();
+  const report = rawReport.trim();
+  const scorer = await createJointScorer();
+  const { candidates, skillNodes } = checkinCandidates(scorer);
+
+  const { result, source } = await interpretCheckin(
+    report,
+    // Rank by Today-relevance is implicit (resolveInput.tasks is the ordered plan);
+    // cap what the model SEES, resolve against the full set below.
+    candidates.slice(0, CHECKIN_PROMPT_CAP),
+  );
+  const resolved = resolveCheckin(result, candidates);
+  const review = proposeFromCheckin(
+    resolved,
+    {
+      today: scorer.resolveInput.today,
+      baseAllOnTime: scorer.baseAllOnTime,
+      cumulative: scorer.cumulative,
+    },
+    skillNodes,
+  );
+  review.rawReport = result.rawReport;
+
+  return {
+    review,
+    resolveInput: scorer.resolveInput,
+    baseAllOnTime: scorer.baseAllOnTime,
+    source,
+  };
 }
 
 /** Revert one applied bundle whole (vision §8.2): restore its snapshot, then refresh. */
