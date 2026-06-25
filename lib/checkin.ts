@@ -5,6 +5,7 @@ import type {
   CheckinIntentKind,
   CheckinInterpretation,
   CheckinRegister,
+  ResolvedCheckinIntent,
 } from "./types";
 import type { ChatMessage } from "./openrouter";
 
@@ -252,4 +253,161 @@ function heuristicInterpret(rawReport: string): CheckinInterpretation {
     })
     .filter((i): i is CheckinIntent => i !== null);
   return { intents, rawReport };
+}
+
+// --- §5.6 stage B — resolveCheckin() (deterministic, zero LLM) ---------------
+//
+// Fuzzy-bind each ungrounded intent's handle/phrase to the LIVE candidate set →
+// resolved | ambiguous | unresolved. The firewall against "marked the wrong task
+// done": this module only ever emits ids that exist in the candidate set; an
+// uncertain reference surfaces as ambiguous/unresolved for the user, never a
+// silent mutation. Pure → the bulk of the Tier-1 golden tests live here.
+//
+// `attain_skill`-bound intents (skill_gained) resolve against the *unlocked
+// skill-node frontier*; the cross-goal spillover detector (slice 4) runs on top
+// of these resolutions, not inside them.
+
+/** Which candidate entity types each intent kind may bind to. Kinds that create
+ *  NEW work or no entity (add_task, idea, vent) need no resolution → they pass
+ *  through as `resolved` with a null match (their "entity" is the source quote). */
+const ALLOWED_TYPES: Record<CheckinIntentKind, CheckinCandidate["type"][]> = {
+  completed: ["task"],
+  reschedule: ["task", "activity"],
+  time_logged: ["task"],
+  skill_gained: ["skill_node"],
+  add_task: [],
+  idea: [],
+  vent: [],
+};
+
+/** Coverage below this is not a match at all. */
+const MATCH_THRESHOLD = 0.6;
+/** A second candidate within this of the best makes the binding AMBIGUOUS. */
+const AMBIGUITY_EPSILON = 0.15;
+
+// Noise tokens stripped before scoring: articles/prepositions plus the action
+// verbs a quote-fallback drags in ("finished the auth flow" → {auth, flow}).
+const STOPWORDS = new Set([
+  "the", "a", "an", "my", "to", "on", "of", "for", "with", "in", "at", "and",
+  "or", "this", "that", "it", "i", "im", "ive", "now", "finally", "basic",
+  "finished", "completed", "wrapped", "done", "did", "spent", "logged", "push",
+  "pushing", "moving", "move", "reschedule", "rescheduling", "deferring", "defer",
+  "habit", "task",
+]);
+
+function tokenize(s: string): string[] {
+  return s
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .filter((t) => t.length > 0 && !STOPWORDS.has(t));
+}
+
+/** Levenshtein distance, capped early — only used for single-token typo tolerance. */
+function editDistance(a: string, b: string): number {
+  const m = a.length;
+  const n = b.length;
+  if (Math.abs(m - n) > 2) return 3; // too far apart to be a typo
+  let prev = Array.from({ length: n + 1 }, (_, i) => i);
+  for (let i = 1; i <= m; i++) {
+    const cur = [i];
+    for (let j = 1; j <= n; j++) {
+      cur[j] = Math.min(
+        prev[j] + 1,
+        cur[j - 1] + 1,
+        prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1),
+      );
+    }
+    prev = cur;
+  }
+  return prev[n];
+}
+
+/** Two tokens match if equal, a shared ≥4-char prefix (so "auth" binds both "Auth
+ *  flow" and "Authorization" — surfacing the ambiguity), or a 1-2 edit typo. */
+function tokensMatch(a: string, b: string): boolean {
+  if (a === b) return true;
+  if (a.length < 4 || b.length < 4) return false; // too short for safe fuzzing
+  if (a.startsWith(b) || b.startsWith(a)) return true;
+  const tol = Math.min(2, Math.floor(Math.min(a.length, b.length) / 4));
+  return editDistance(a, b) <= Math.max(1, tol);
+}
+
+/**
+ * How well the user's phrase is covered by a candidate title: the share of the
+ * phrase's content tokens that appear (exact or typo-close) in the title. 1.0 =
+ * every word the user used is in the title ("the auth flow" ⊆ "Auth flow setup").
+ */
+function coverage(phrase: string, title: string): number {
+  const pt = tokenize(phrase);
+  const tt = tokenize(title);
+  if (pt.length === 0 || tt.length === 0) return 0;
+  const matched = pt.filter((p) => tt.some((t) => tokensMatch(p, t))).length;
+  return matched / pt.length;
+}
+
+function resolved(
+  intent: CheckinIntent,
+  match: CheckinCandidate,
+  candidates: CheckinCandidate[],
+): ResolvedCheckinIntent {
+  return { intent, status: "resolved", match, candidates };
+}
+
+/**
+ * Resolve one intent against the full candidate set. Handle-exact bind wins; else
+ * fuzzy phrase coverage decides. Two near-tied matches ⇒ `ambiguous` (the top is
+ * shown but proposed unchecked, all ties offered for disambiguation), never an
+ * auto-pick. No match ⇒ `unresolved` (a non-actionable chip).
+ */
+function resolveOne(
+  intent: CheckinIntent,
+  candidates: CheckinCandidate[],
+): ResolvedCheckinIntent {
+  const allowed = ALLOWED_TYPES[intent.kind];
+  // Kinds that need no existing entity are resolved by construction.
+  if (allowed.length === 0) {
+    return { intent, status: "resolved", match: null, candidates: [] };
+  }
+
+  const pool = candidates.filter((c) => allowed.includes(c.type));
+
+  // 1. Exact handle bind — the model echoed a candidate handle (already validated
+  //    against the prompt set in normalize; the prompt set ⊆ this full set).
+  if (intent.handle) {
+    const hit = pool.find((c) => c.handle === intent.handle);
+    if (hit) return resolved(intent, hit, [hit]);
+  }
+
+  // 2. Fuzzy phrase match. Fall back to the quote when no phrase was extracted.
+  const phrase = intent.entityPhrase ?? intent.quote;
+  const scored = pool
+    .map((c) => ({ c, score: coverage(phrase, c.title) }))
+    .filter((s) => s.score >= MATCH_THRESHOLD)
+    .sort((a, b) => b.score - a.score);
+
+  if (scored.length === 0) {
+    return { intent, status: "unresolved", match: null, candidates: [] };
+  }
+
+  const top = scored[0];
+  const ties = scored.filter((s) => top.score - s.score <= AMBIGUITY_EPSILON);
+  if (ties.length > 1) {
+    // Two comparable matches — surface both, auto-apply neither.
+    return {
+      intent,
+      status: "ambiguous",
+      match: top.c,
+      candidates: ties.map((s) => s.c),
+    };
+  }
+  return resolved(intent, top.c, [top.c]);
+}
+
+/** Stage B: resolve every interpreted intent against the live candidate set. */
+export function resolveCheckin(
+  interpretation: CheckinInterpretation,
+  candidates: CheckinCandidate[],
+): ResolvedCheckinIntent[] {
+  return interpretation.intents.map((intent) => resolveOne(intent, candidates));
 }
