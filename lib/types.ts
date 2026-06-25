@@ -1189,3 +1189,144 @@ export interface PlanVersion {
   /** Set when undone; null while the bundle stands. */
   revertedAt: string | null;
 }
+
+// --- §5.6 NL check-in / reflection loop -------------------------------------
+//
+// The interpret → propose → review → commit loop over a free-form activity
+// report (design/s5.6-nl-checkin-loop.md). Interpret is THREE stages so the LLM
+// never authors a binding (§0 firewall):
+//   A — interpretCheckin()  (LLM, fuzzy): NL → ungrounded, quoted, register-tagged
+//                            intents referencing entities by quote + echoed handle.
+//   B — resolveCheckin()    (deterministic): fuzzy-bind each quote to the live
+//                            candidate set → resolved | ambiguous | unresolved.
+//   C — proposeFromCheckin() (deterministic): resolved intents → StrategyMove[]
+//                            (Family A) + odds-silent action intents (Family B);
+//                            odds ALWAYS from jointOddsWithMoves, never the LLM.
+//
+// Two invariants this loop adds to the S1 list:
+//   - No move without a resolved entity AND a verbatim source quote (blocks
+//     fabrication, stale ids, and the prompt-injection vector of acting on an
+//     entity the user never named — every move traces to a `quote` span).
+//   - CompletionConfidence is a pure function of move PROVENANCE (check-in
+//     mark_done = self_assessed; spillover attain_skill = inferred), never of any
+//     model/resolution confidence score — those gate review PRESENTATION only.
+
+/** The user's tone for one clause — orthogonal to the action it implies. */
+export type CheckinRegister = "status" | "idea" | "vent";
+
+/**
+ * What one clause of a report wants to do — drives the move family in stage C.
+ * Family A (forecast-affecting, rides S1 review/commit/undo): completed,
+ * reschedule, add_task, skill_gained. Family B (odds-silent): time_logged, idea.
+ * vent maps to no move (a non-actionable acknowledgement chip).
+ */
+export type CheckinIntentKind =
+  | "completed" // → mark_done
+  | "reschedule" // → reschedule_task / defer
+  | "add_task" // → add_tasks
+  | "skill_gained" // → attain_skill (the one new move kind, slice 4)
+  | "time_logged" // → log_progress (Family B)
+  | "idea" // → quick capture (Family B)
+  | "vent"; // → acknowledge only (no move)
+
+/** Model/resolution confidence — gates REVIEW PRESENTATION only (high → checked
+ *  by default, low → proposed unchecked). NEVER feeds CompletionConfidence. */
+export type CheckinConfidence = "high" | "low";
+
+/**
+ * Stage A output — one *ungrounded* intent. References any existing entity ONLY
+ * by a verbatim `quote` plus the `handle` the model echoed from the candidate set
+ * we control; it never emits a raw DB id. Deterministic stage B binds the handle/
+ * phrase to a real entity; stage C turns it into a move.
+ */
+export interface CheckinIntent {
+  kind: CheckinIntentKind;
+  register: CheckinRegister;
+  /** Verbatim span from the report that triggered this intent — the provenance
+   *  every downstream move must trace to (invariant). */
+  quote: string;
+  /** The candidate handle the model echoed (e.g. "T3", "S1.2"), or null when the
+   *  intent names no existing entity (a brand-new task, a pure idea/vent). */
+  handle: string | null;
+  /** The free-text surface form the user used for the entity — the fuzzy-resolve
+   *  key when the handle is absent or wrong. Null for handle-less intents. */
+  entityPhrase: string | null;
+  /** Kind-specific free text resolved deterministically in stage C: the target
+   *  date phrase for `reschedule` ("next week"), the new title for `add_task`,
+   *  the minutes phrase for `time_logged`, the note body for `idea`. */
+  detail: string | null;
+  confidence: CheckinConfidence;
+}
+
+/** Stage A result, shaped like ExtractionResult (returned with a `source` sibling
+ *  by interpretCheckin). `intents` may be empty — a pure vent is valid. */
+export interface CheckinInterpretation {
+  intents: CheckinIntent[];
+  /** Echo of the raw report — the review header + observability context. */
+  rawReport: string;
+}
+
+/** One entity the resolver may bind a quote to — the candidate set is the blast
+ *  radius (open tasks, the unlocked skill-node frontier, active activities). */
+export interface CheckinCandidate {
+  /** Stable handle shown to the model + used to disambiguate (e.g. "T3"). */
+  handle: string;
+  type: "task" | "skill_node" | "activity";
+  /** The real DB id — stage B emits this only on a confident bind. */
+  id: string;
+  title: string;
+  /** Owning goal/project (for move construction + display). */
+  goalId: string;
+  goalName: string;
+}
+
+export type CheckinResolutionStatus = "resolved" | "ambiguous" | "unresolved";
+
+/** Stage B output — an intent paired with the outcome of binding it. */
+export interface ResolvedCheckinIntent {
+  intent: CheckinIntent;
+  status: CheckinResolutionStatus;
+  /** The bound candidate when `resolved`; the top match (shown, but proposed
+   *  unchecked) when `ambiguous`; null when `unresolved`. */
+  match: CheckinCandidate | null;
+  /** Every candidate that matched — length > 1 surfaces the disambiguation
+   *  affordance (the firewall against silently picking a winner). */
+  candidates: CheckinCandidate[];
+}
+
+/** A Family-B (odds-silent) action to confirm — a descriptor the capture bar
+ *  dispatches to the matching Server Action. `log_progress` SETs actual time (so
+ *  re-submitting is idempotent); it is odds-silent now but the raw material for
+ *  future estimation calibration — don't let a "logs are inert" cleanup drop it. */
+export type CheckinActionIntent =
+  | { kind: "log_progress"; taskId: string; title: string; minutes: number; quote: string }
+  | { kind: "capture_idea"; text: string; quote: string }
+  | { kind: "acknowledge"; quote: string };
+
+export type CheckinProposalFamily = "A" | "B";
+
+/**
+ * Stage C output — one reviewable row. Family A carries a `StrategyMove` that
+ * rides S1's review/commit/undo with live re-solved odds; Family B carries an
+ * odds-silent `CheckinActionIntent`. Membership is DERIVED (Family A iff the move's
+ * `applyMoveToAlloc` arm is non-identity), never a hand list. `defaultChecked`
+ * derives from intent confidence + resolution status (high + resolved → true).
+ */
+export interface CheckinProposal {
+  family: CheckinProposalFamily;
+  resolved: ResolvedCheckinIntent;
+  /** Family A: the move (else null). Family B: the action (else null). */
+  move: StrategyMove | null;
+  action: CheckinActionIntent | null;
+  defaultChecked: boolean;
+}
+
+/** The full review surface stage C hands the capture bar: actionable proposals
+ *  plus the non-actionable chips (unresolved references + acknowledged vents). */
+export interface CheckinReview {
+  proposals: CheckinProposal[];
+  /** Intents that resolved to nothing actionable — rendered as inert chips
+   *  ("Couldn't match 'the thing I built yesterday'") + vent acknowledgements. */
+  chips: ResolvedCheckinIntent[];
+  rawReport: string;
+}
