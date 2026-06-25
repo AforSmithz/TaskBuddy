@@ -1,11 +1,17 @@
 import type {
+  CheckinActionIntent,
   CheckinCandidate,
   CheckinConfidence,
   CheckinIntent,
   CheckinIntentKind,
   CheckinInterpretation,
+  CheckinProposal,
   CheckinRegister,
+  CheckinReview,
   ResolvedCheckinIntent,
+  StrategyMove,
+  StrategyMovePayload,
+  SuggestedTask,
 } from "./types";
 import type { ChatMessage } from "./openrouter";
 
@@ -410,4 +416,236 @@ export function resolveCheckin(
   candidates: CheckinCandidate[],
 ): ResolvedCheckinIntent[] {
   return interpretation.intents.map((intent) => resolveOne(intent, candidates));
+}
+
+// --- §5.6 stage C — proposeFromCheckin() (deterministic) --------------------
+//
+// Resolved intents → reviewable proposals. Family A (forecast-affecting) become
+// `StrategyMove`s that ride S1's review/commit/undo, with odds re-solved through
+// the SAME `jointOddsWithMoves` the strategy card uses (so the previewed number ==
+// a direct call — the S1 parity gate). Family B (odds-silent) become
+// `CheckinActionIntent`s rendered as confirmable but number-less rows. Everything
+// that resolved to nothing actionable (unresolved references, vents) becomes a
+// chip. Pure: the scoring context is injected, so the whole stage is fixture-testable.
+//
+// skill_gained → `attain_skill` is the one new move kind and lands in SLICE 4 with
+// its forecast arm + persist spec; until then a resolved skill_gained intent is
+// surfaced as an inert chip, never silently dropped.
+
+/** The minimal slice of `JointScorer` (lib/store.ts) stage C needs — injected so
+ *  the stage stays pure/testable. `cumulative` IS `jointOddsWithMoves` at full
+ *  iterations, so odds parity with the strategy card holds by construction. */
+export interface CheckinProposeContext {
+  today: string;
+  baseAllOnTime: number;
+  cumulative(ordered: StrategyMove[]): { afterEach: number[]; combined: number };
+}
+
+function addDays(isoDate: string, days: number): string {
+  const d = new Date(`${isoDate}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
+/** Resolve a relative date phrase ("next week", "tomorrow", "in 3 days") to an ISO
+ *  date, or null when it names no parseable target (→ a plain defer instead). */
+function resolveDatePhrase(phrase: string | null, today: string): string | null {
+  if (!phrase) return null;
+  const p = phrase.toLowerCase();
+  if (/\btomorrow\b/.test(p)) return addDays(today, 1);
+  if (/\btoday\b/.test(p)) return today;
+  if (/\bnext week\b/.test(p)) return addDays(today, 7);
+  if (/\bnext month\b/.test(p)) return addDays(today, 30);
+  if (/\bthis week\b/.test(p)) return addDays(today, 3);
+  const inDays = p.match(/\bin (\d+) days?\b/);
+  if (inDays) return addDays(today, Number(inDays[1]));
+  const inWeeks = p.match(/\bin (\d+) weeks?\b/);
+  if (inWeeks) return addDays(today, Number(inWeeks[1]) * 7);
+  return null;
+}
+
+/** Parse a logged-time phrase ("~2h", "90 min", "1.5 hours") to minutes, or null. */
+function parseMinutes(detail: string | null): number | null {
+  if (!detail) return null;
+  const hr = detail.match(/(\d+(?:\.\d+)?)\s*(?:h\b|hr|hour)/i);
+  if (hr) return Math.round(Number(hr[1]) * 60);
+  const min = detail.match(/(\d+)\s*(?:m\b|min)/i);
+  if (min) return Number(min[1]);
+  return null;
+}
+
+/** A move's review row is checked by default only when its intent is confident AND
+ *  cleanly resolved — an ambiguous or low-confidence match is proposed unchecked. */
+function isDefaultChecked(r: ResolvedCheckinIntent): boolean {
+  return r.status === "resolved" && r.intent.confidence === "high";
+}
+
+/** Neutral 1-5 factors for a check-in-captured task — it scores plausibly through
+ *  `computePriority` without the interpreter authoring a priority. */
+const NEUTRAL_FACTORS = {
+  urgency: 3,
+  impact: 3,
+  dependency: 1,
+  risk: 2,
+  effort: 2,
+  confidence: 3,
+} as const;
+
+/** Build the Family-A `StrategyMove` for a resolved intent, or null when the kind
+ *  has no forecast-affecting move yet (skill_gained → slice 4) or no valid target. */
+function moveForIntent(r: ResolvedCheckinIntent, today: string): StrategyMove | null {
+  const { intent, match } = r;
+  // Every Family-A move must trace to a resolved entity (the invariant).
+  if (!match) return null;
+
+  const base = {
+    projectId: match.goalId,
+    projectName: match.goalName,
+    // Odds are filled in by the cumulative re-solve below; seed at the base.
+    probabilityAfter: 0,
+    portfolioProbabilityAfter: 0,
+  };
+
+  let payload: StrategyMovePayload;
+  let rationale: string;
+
+  switch (intent.kind) {
+    case "completed":
+      payload = { kind: "mark_done", taskId: match.id, title: match.title };
+      rationale = `You said you finished "${match.title}".`;
+      break;
+    case "reschedule": {
+      if (match.type === "activity") {
+        payload = { kind: "skip_activity", activityId: match.id, title: match.title, period: "week" };
+        rationale = `Skipping "${match.title}" this week.`;
+        break;
+      }
+      const dueDate = resolveDatePhrase(intent.detail, today);
+      if (dueDate) {
+        payload = { kind: "reschedule_task", taskId: match.id, title: match.title, dueDate };
+        rationale = `Pushing "${match.title}" to ${dueDate}.`;
+      } else {
+        payload = { kind: "defer", taskId: match.id, title: match.title };
+        rationale = `Setting "${match.title}" aside for now.`;
+      }
+      break;
+    }
+    default:
+      // completed/reschedule are the only entity-bound Family-A kinds in slice 3.
+      return null;
+  }
+
+  return { ...base, kind: payload.kind, rationale, payload };
+}
+
+/** Build the Family-B odds-silent action for a resolved intent, or null. */
+function actionForIntent(r: ResolvedCheckinIntent): CheckinActionIntent | null {
+  const { intent, match } = r;
+  switch (intent.kind) {
+    case "time_logged": {
+      if (!match) return null;
+      const minutes = parseMinutes(intent.detail);
+      if (minutes === null) return null;
+      return { kind: "log_progress", taskId: match.id, title: match.title, minutes, quote: intent.quote };
+    }
+    case "add_task":
+    case "idea":
+      // v1: a check-in add with no project context is captured as a standalone
+      // item (quick errand), not a project-scoped add_tasks move — odds-silent.
+      // Project-scoped add_tasks rides with task-scoped NL (slice 6).
+      return { kind: "capture_idea", text: intent.detail ?? intent.quote, quote: intent.quote };
+    default:
+      return null;
+  }
+}
+
+/**
+ * Stage C: turn resolved intents into the review surface. Family-A moves are
+ * scored together through one `cumulative` call so each row shows the contention-
+ * correct portfolio odds AFTER it (and every move before it) — the exact number the
+ * client live re-solve will reproduce. `add_tasks` of a synthesized SuggestedTask is
+ * available for a future project-scoped path; v1 keeps captures in Family B.
+ */
+export function proposeFromCheckin(
+  resolved: ResolvedCheckinIntent[],
+  ctx: CheckinProposeContext,
+): CheckinReview {
+  const proposals: CheckinProposal[] = [];
+  const chips: ResolvedCheckinIntent[] = [];
+
+  // First pass: classify each resolved intent into a Family-A move, a Family-B
+  // action, or a chip — without odds yet (the moves are scored together after).
+  type Pending =
+    | { family: "A"; resolved: ResolvedCheckinIntent; move: StrategyMove }
+    | { family: "B"; resolved: ResolvedCheckinIntent; action: CheckinActionIntent };
+  const pending: Pending[] = [];
+
+  for (const r of resolved) {
+    if (r.status === "unresolved") {
+      chips.push(r);
+      continue;
+    }
+    const move = moveForIntent(r, ctx.today);
+    if (move) {
+      pending.push({ family: "A", resolved: r, move });
+      continue;
+    }
+    const action = actionForIntent(r);
+    if (action) {
+      pending.push({ family: "B", resolved: r, action });
+      continue;
+    }
+    // vent, an as-yet-unsupported skill_gained, or a target-less intent → chip.
+    chips.push(r);
+  }
+
+  // Score every Family-A move together so each carries its cumulative portfolio
+  // odds — identical to a direct `jointOddsWithMoves` over the same prefix (S1 parity).
+  const familyA = pending.filter((p): p is Extract<Pending, { family: "A" }> => p.family === "A");
+  const orderedMoves = familyA.map((p) => p.move);
+  const { afterEach } = ctx.cumulative(orderedMoves);
+  familyA.forEach((p, i) => {
+    const after = afterEach[i] ?? ctx.baseAllOnTime;
+    // Solo odds: this one move applied alone (what it buys on its own).
+    p.move.probabilityAfter = ctx.cumulative([p.move]).combined;
+    p.move.portfolioProbabilityAfter = after;
+  });
+
+  for (const p of pending) {
+    if (p.family === "A") {
+      proposals.push({
+        family: "A",
+        resolved: p.resolved,
+        move: p.move,
+        action: null,
+        defaultChecked: isDefaultChecked(p.resolved),
+      });
+    } else {
+      proposals.push({
+        family: "B",
+        resolved: p.resolved,
+        move: null,
+        action: p.action,
+        defaultChecked: isDefaultChecked(p.resolved),
+      });
+    }
+  }
+
+  return { proposals, chips, rawReport: "" };
+}
+
+/** Synthesize a SuggestedTask from a captured add-task intent — kept for the
+ *  future project-scoped `add_tasks` path (slice 6); unused by the v1 propose. */
+export function suggestedTaskFromIntent(intent: CheckinIntent, area: string): SuggestedTask {
+  return {
+    ...NEUTRAL_FACTORS,
+    title: (intent.detail ?? intent.quote).slice(0, 120),
+    description: "",
+    estimated_minutes: 30,
+    due_date: null,
+    blocked_by: null,
+    priority_reason: "Captured from a check-in.",
+    area,
+    gap_kind: "rework",
+  };
 }
