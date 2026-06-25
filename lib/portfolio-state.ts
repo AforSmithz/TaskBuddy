@@ -134,6 +134,12 @@ export interface AllocState {
   skipCompletions: ActivityCompletion[];
 }
 
+/** Skill alloc-task ids are namespaced so they never collide with real task uuids.
+ *  Lives in this client-safe module (not store.ts) because the `attain_skill`
+ *  forecast arm below — which runs CLIENT-SIDE during live re-solve — must rebuild
+ *  the same id from a node id; store.ts imports it back. */
+export const SKILL_TASK_PREFIX = "skill:";
+
 /** A synthetic alloc task for injected work, scored from its 1-5 factors so
  *  `buildGlobalPlan` orders it plausibly among the real tasks. */
 export function syntheticAllocTask(
@@ -201,6 +207,15 @@ export function applyMoveToAlloc(
     case "defer":
     case "mark_done":
       return { ...state, tasks: state.tasks.filter((t) => t.id !== p.taskId) };
+
+    case "attain_skill":
+      // Attaining a skill drops its synthetic forecast task (id `skill:`+nodeId),
+      // freeing the budget it occupied — the same "drop a task by id" mechanic as
+      // mark_done. This is why attain_skill is Family A (a non-identity arm).
+      return {
+        ...state,
+        tasks: state.tasks.filter((t) => t.id !== SKILL_TASK_PREFIX + p.nodeId),
+      };
 
     case "triage": {
       const drop = new Set(p.taskIds);

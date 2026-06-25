@@ -1024,6 +1024,7 @@ export type StrategyMoveKind =
   | "reshape"
   | "reroute"
   | "mark_done"
+  | "attain_skill"
   | "skip_activity"
   | "hold";
 
@@ -1037,7 +1038,27 @@ export type StrategyMovePayload =
   | { kind: "reschedule_deadline"; deadline: string }
   | { kind: "reschedule_task"; taskId: string; title: string; dueDate: string }
   | { kind: "unblock"; taskId: string; title: string }
-  | { kind: "mark_done"; taskId: string; title: string }
+  | {
+      kind: "mark_done";
+      taskId: string;
+      title: string;
+      /** Provenance of the completion (§5.6 invariant: a pure function of WHERE the
+       *  move came from). A check-in "I finished X" → `self_assessed`; omitted by the
+       *  strategist's own inference → defaults to `inferred` in persist. */
+      confidence?: CompletionConfidence;
+    }
+  | {
+      // §5.6 — the user attained a skill node (drops its synthetic forecast task).
+      kind: "attain_skill";
+      goalId: string;
+      nodeId: string;
+      title: string;
+      /** `self_assessed` for a stated check-in skill; `inferred` for spillover. */
+      confidence: CompletionConfidence;
+      /** Set when this attainment was INFERRED from attaining an overlapping node
+       *  in another goal — the spillover provenance (no DB column; lives here). */
+      viaSpilloverFrom?: string;
+    }
   | { kind: "triage"; taskIds: string[]; titles: string[] }
   | { kind: "add_tasks"; tasks: SuggestedTask[] }
   | { kind: "reshape"; mods: TaskModification[] }
@@ -1155,6 +1176,9 @@ export interface RowSnapshot {
   tasks: (Partial<Task> & { id: string })[];
   /** Prior values of goals the bundle mutated — id + the prior deadline. */
   goals: (Partial<Goal> & { id: string })[];
+  /** Prior attainment of skill nodes an `attain_skill` move flipped (§5.6) — id +
+   *  attained/confidence/at — so undo reverts a skill back to unattained. */
+  skillNodes: (Partial<SkillNode> & { id: string })[];
   /** Synthetic task rows the bundle inserted (add_tasks / reshape-split / scope-down
    *  debt / reroute) — deleted on undo. */
   insertedTaskIds: string[];

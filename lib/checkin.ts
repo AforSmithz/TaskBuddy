@@ -511,8 +511,28 @@ function moveForIntent(r: ResolvedCheckinIntent, today: string): StrategyMove | 
 
   switch (intent.kind) {
     case "completed":
-      payload = { kind: "mark_done", taskId: match.id, title: match.title };
+      // §5.6 invariant: a check-in completion is self_assessed (the user said it),
+      // never inferred — the provenance rides on the payload.
+      payload = {
+        kind: "mark_done",
+        taskId: match.id,
+        title: match.title,
+        confidence: "self_assessed",
+      };
       rationale = `You said you finished "${match.title}".`;
+      break;
+    case "skill_gained":
+      if (match.type !== "skill_node") return null;
+      // A stated skill the user attained → self_assessed (spillover is inferred,
+      // built separately by detectSpilloverMoves).
+      payload = {
+        kind: "attain_skill",
+        goalId: match.goalId,
+        nodeId: match.id,
+        title: match.title,
+        confidence: "self_assessed",
+      };
+      rationale = `You can now "${match.title}".`;
       break;
     case "reschedule": {
       if (match.type === "activity") {
@@ -536,6 +556,69 @@ function moveForIntent(r: ResolvedCheckinIntent, today: string): StrategyMove | 
   }
 
   return { ...base, kind: payload.kind, rationale, payload };
+}
+
+/** Spillover threshold — two skill-node titles must be near-identical (this much
+ *  bidirectional coverage) to count as the same concept across goals. Strict on
+ *  purpose: an over-eager cross-goal attainment is worse than a missed one. */
+const SPILLOVER_COVERAGE = 0.85;
+
+/**
+ * Spillover v1 (§5.4 deferred): when the user attains a skill node, infer the
+ * attainment of an overlapping node in a DIFFERENT goal (cross-goal node ↔ node,
+ * computed — no schema). Each spillover move is `attain_skill` at `inferred`
+ * confidence with `viaSpilloverFrom` provenance. Pure. `allSkillNodes` is the
+ * global UNATTAINED skill-node candidate set; node → project-task spillover is
+ * deferred (no checkpoint edge exists).
+ */
+export function detectSpilloverMoves(
+  resolved: ResolvedCheckinIntent[],
+  allSkillNodes: CheckinCandidate[],
+): { move: StrategyMove; source: ResolvedCheckinIntent; target: CheckinCandidate }[] {
+  const out: { move: StrategyMove; source: ResolvedCheckinIntent; target: CheckinCandidate }[] = [];
+  const claimed = new Set<string>(); // node ids already attained directly or via spillover
+
+  // Nodes attained directly this check-in — don't re-propose them as spillover.
+  for (const r of resolved) {
+    if (r.intent.kind === "skill_gained" && r.status === "resolved" && r.match) {
+      claimed.add(r.match.id);
+    }
+  }
+
+  for (const r of resolved) {
+    if (r.intent.kind !== "skill_gained" || r.status !== "resolved" || !r.match) continue;
+    const source = r.match;
+    for (const node of allSkillNodes) {
+      if (node.type !== "skill_node") continue;
+      if (node.goalId === source.goalId) continue; // same goal isn't spillover
+      if (claimed.has(node.id)) continue;
+      const fwd = coverage(source.title, node.title);
+      const back = coverage(node.title, source.title);
+      if (fwd < SPILLOVER_COVERAGE || back < SPILLOVER_COVERAGE) continue;
+      claimed.add(node.id);
+      out.push({
+        source: r,
+        target: node,
+        move: {
+          kind: "attain_skill",
+          projectId: node.goalId,
+          projectName: node.goalName,
+          probabilityAfter: 0,
+          portfolioProbabilityAfter: 0,
+          rationale: `Spillover: "${node.title}" in ${node.goalName} overlaps the skill you just gained.`,
+          payload: {
+            kind: "attain_skill",
+            goalId: node.goalId,
+            nodeId: node.id,
+            title: node.title,
+            confidence: "inferred",
+            viaSpilloverFrom: source.id,
+          },
+        },
+      });
+    }
+  }
+  return out;
 }
 
 /** Build the Family-B odds-silent action for a resolved intent, or null. */
@@ -569,6 +652,7 @@ function actionForIntent(r: ResolvedCheckinIntent): CheckinActionIntent | null {
 export function proposeFromCheckin(
   resolved: ResolvedCheckinIntent[],
   ctx: CheckinProposeContext,
+  allSkillNodes: CheckinCandidate[] = [],
 ): CheckinReview {
   const proposals: CheckinProposal[] = [];
   const chips: ResolvedCheckinIntent[] = [];
@@ -576,7 +660,7 @@ export function proposeFromCheckin(
   // First pass: classify each resolved intent into a Family-A move, a Family-B
   // action, or a chip — without odds yet (the moves are scored together after).
   type Pending =
-    | { family: "A"; resolved: ResolvedCheckinIntent; move: StrategyMove }
+    | { family: "A"; resolved: ResolvedCheckinIntent; move: StrategyMove; defaultChecked: boolean }
     | { family: "B"; resolved: ResolvedCheckinIntent; action: CheckinActionIntent };
   const pending: Pending[] = [];
 
@@ -587,7 +671,7 @@ export function proposeFromCheckin(
     }
     const move = moveForIntent(r, ctx.today);
     if (move) {
-      pending.push({ family: "A", resolved: r, move });
+      pending.push({ family: "A", resolved: r, move, defaultChecked: isDefaultChecked(r) });
       continue;
     }
     const action = actionForIntent(r);
@@ -595,8 +679,21 @@ export function proposeFromCheckin(
       pending.push({ family: "B", resolved: r, action });
       continue;
     }
-    // vent, an as-yet-unsupported skill_gained, or a target-less intent → chip.
+    // vent or a target-less intent → chip.
     chips.push(r);
+  }
+
+  // Spillover (slice 4): infer cross-goal skill attainments from the directly
+  // attained nodes. Inferred ⇒ always proposed UNCHECKED (an opt-in, not a silent
+  // write) regardless of the source intent's confidence.
+  for (const s of detectSpilloverMoves(resolved, allSkillNodes)) {
+    pending.push({
+      family: "A",
+      // Same source quote (provenance), but the row points at the inferred target.
+      resolved: { ...s.source, match: s.target, candidates: [s.target] },
+      move: s.move,
+      defaultChecked: false,
+    });
   }
 
   // Score every Family-A move together so each carries its cumulative portfolio
@@ -618,7 +715,7 @@ export function proposeFromCheckin(
         resolved: p.resolved,
         move: p.move,
         action: null,
-        defaultChecked: isDefaultChecked(p.resolved),
+        defaultChecked: p.defaultChecked,
       });
     } else {
       proposals.push({

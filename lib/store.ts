@@ -132,6 +132,7 @@ import {
   syntheticAllocTask,
   jointOddsWithMoves,
   cumulativeJointOdds,
+  SKILL_TASK_PREFIX,
   type AllocContext,
   type ResolveInput,
 } from "./portfolio-state";
@@ -1347,6 +1348,27 @@ async function getTasksByIds(ids: string[]): Promise<Task[]> {
   return memDB().tasks.filter((t) => set.has(t.id));
 }
 
+/** Read a skill node's current attainment fields — the pre-image an `attain_skill`
+ *  move snapshots so undo can revert it to unattained (§5.6). */
+async function snapshotSkillNodeAttainment(
+  id: string,
+): Promise<(Partial<SkillNode> & { id: string })[]> {
+  const fields = ["attained", "attained_confidence", "attained_at"] as const;
+  let row: SkillNode | undefined;
+  if (isSupabaseConfigured()) {
+    const supabase = await getRequestClient();
+    const { data } = await supabase.from("skill_nodes").select("*").eq("id", id).maybeSingle();
+    row = (data as SkillNode | null) ?? undefined;
+  } else {
+    await ensureSeeded();
+    row = memDB().skillNodes.find((n) => n.id === id);
+  }
+  if (!row) return [];
+  const snap: Partial<SkillNode> & { id: string } = { id };
+  for (const f of fields) (snap as Record<string, unknown>)[f] = row[f];
+  return [snap];
+}
+
 // --- Move spec registry (S1 step 4) ----------------------------------------
 //
 // One `MoveSpec` per `StrategyMoveKind` co-locates that kind's two server-side DB
@@ -1370,6 +1392,9 @@ async function getTasksByIds(ids: string[]): Promise<Task[]> {
 type MoveRowSnapshot = {
   tasks: (Partial<Task> & { id: string })[];
   goals: (Partial<Goal> & { id: string })[];
+  /** Prior attainment of skill nodes an `attain_skill` move flips (§5.6) — absent
+   *  for every other kind. */
+  skillNodes?: (Partial<SkillNode> & { id: string })[];
 };
 
 /** The synthetic-row ids one move's `persist` inserted, so undo can delete them. */
@@ -1436,9 +1461,22 @@ const MOVE_SPECS: { [K in StrategyMoveKind]: MoveSpec<K> } = {
     persist: async (p) => {
       await updateTask(p.taskId, {
         status: "done",
-        completion_confidence: "inferred",
+        // §5.6: provenance rides on the payload. A check-in "I finished X" carries
+        // `self_assessed`; the strategist's own inference omits it → `inferred`.
+        completion_confidence: p.confidence ?? "inferred",
         completed_at: new Date().toISOString(),
       });
+      return {};
+    },
+  },
+  attain_skill: {
+    snapshot: async (p) => ({
+      tasks: [],
+      goals: [],
+      skillNodes: await snapshotSkillNodeAttainment(p.nodeId),
+    }),
+    persist: async (p) => {
+      await setSkillNodeAttained(p.nodeId, true, p.confidence);
       return {};
     },
   },
@@ -1525,10 +1563,12 @@ export async function commitStrategyBundle(
   //    later move in the same bundle can't overwrite an earlier move's pre-image).
   const taskSnap = new Map<string, Partial<Task> & { id: string }>();
   const goalSnap = new Map<string, Partial<Goal> & { id: string }>();
+  const skillSnap = new Map<string, Partial<SkillNode> & { id: string }>();
   for (const move of ordered) {
-    const { tasks, goals } = await specFor(move.payload.kind).snapshot(move.payload, move);
+    const { tasks, goals, skillNodes } = await specFor(move.payload.kind).snapshot(move.payload, move);
     for (const t of tasks) if (!taskSnap.has(t.id)) taskSnap.set(t.id, t);
     for (const goal of goals) if (!goalSnap.has(goal.id)) goalSnap.set(goal.id, goal);
+    for (const n of skillNodes ?? []) if (!skillSnap.has(n.id)) skillSnap.set(n.id, n);
   }
 
   // 2. Apply, accumulating the synthetic rows inserted (so undo can delete them).
@@ -1559,6 +1599,7 @@ export async function commitStrategyBundle(
     restore: {
       tasks: [...taskSnap.values()],
       goals: [...goalSnap.values()],
+      skillNodes: [...skillSnap.values()],
       insertedTaskIds,
       insertedEntryIds,
       activityCompletionIds,
@@ -1702,6 +1743,11 @@ export async function undoPlanVersion(id: string): Promise<void> {
   // Restore prior goal deadlines.
   for (const goal of restore.goals) {
     if ("deadline" in goal) await setProjectDeadline(goal.id, goal.deadline ?? null);
+  }
+  // Restore prior skill-node attainment (§5.6) — revert an attained skill back to
+  // whatever it was (typically unattained at its prior null confidence).
+  for (const n of restore.skillNodes ?? []) {
+    await setSkillNodeAttained(n.id, n.attained ?? false, n.attained_confidence ?? null);
   }
   // Delete the synthetic rows the bundle inserted (tasks, their recovery entries,
   // and any skip rows).
@@ -2414,9 +2460,10 @@ interface SkillWork {
   estimates: number[];
 }
 
-/** Skill alloc-task ids are namespaced so they never collide with real task uuids
- *  (and so the recovery/conflict code, which targets real rows, can tell them apart). */
-const SKILL_TASK_PREFIX = "skill:";
+// `SKILL_TASK_PREFIX` is defined in the client-safe portfolio-state module (the
+// `attain_skill` forecast arm rebuilds the same id client-side) and imported above;
+// the recovery/conflict code, which targets real rows, uses it to tell skill alloc
+// tasks apart from real task uuids.
 
 /**
  * Turn a learning goal's skill nodes into work the joint forecast can reason
