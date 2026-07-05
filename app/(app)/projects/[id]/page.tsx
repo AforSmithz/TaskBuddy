@@ -29,6 +29,7 @@ import { DeferredTasks } from "@/components/forecast/deferred-tasks";
 import { DefinitionOfDone } from "@/components/goals/definition-of-done";
 import { GoalKindEditor } from "@/components/goals/goal-kind-badge";
 import { SkillPlan } from "@/components/goals/skill-plan";
+import { CaptureBar } from "@/components/today/capture-bar";
 
 export default async function ProjectPage({
   params,
@@ -61,12 +62,19 @@ export default async function ProjectPage({
 
   const openCount = projectTasks.filter((t) => t.status !== "done").length;
   const countById = new Map<string, { total: number; open: number }>();
+  const areaCounts = new Map<string, number>();
   for (const t of projectTasks) {
     const e = countById.get(t.entry_id) ?? { total: 0, open: 0 };
     e.total += 1;
     if (t.status !== "done") e.open += 1;
     countById.set(t.entry_id, e);
+    areaCounts.set(t.area, (areaCounts.get(t.area) ?? 0) + 1);
   }
+
+  // The area a scoped check-in files new tasks under — the goal's modal task area
+  // (SuggestedTask requires one), falling back to "Work" like the store's own adds.
+  const scopeArea =
+    [...areaCounts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? "Work";
 
   return (
     <main className="mx-auto max-w-[960px] px-8 py-8">
@@ -96,6 +104,15 @@ export default async function ProjectPage({
           </p>
         </div>
         <GoalKindEditor goalId={project.id} kind={project.kind} />
+      </div>
+
+      {/* Task-scoped check-in (§5.6 slice 6a): a free-form update bound to THIS goal.
+          "finished X", "pushing Y", or "I also need to Z" resolve against the goal's
+          own work first, and a new task lands on the goal with live-re-solved odds. */}
+      <div className="mt-5">
+        <CaptureBar
+          scope={{ goalId: project.id, goalName: project.name, area: scopeArea }}
+        />
       </div>
 
       {/* Proactive recovery — surfaced only when the project is off track. */}
