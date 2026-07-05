@@ -24,6 +24,7 @@ import {
   setSkillNodeAttained,
   getCachedStrategy,
   getEntry,
+  listAllTasks,
   logActivityCompletion,
   logWorkSession,
   logCommitment,
@@ -42,7 +43,7 @@ import {
   updateTask,
   type NewActivityInput,
 } from "./store";
-import { generateFollowUp } from "./generate";
+import { buildEODSummary, generateFollowUp, type EODSummary } from "./generate";
 import { decomposeLearningGoal } from "./decompose";
 import {
   generateCorrectiveTasks,
@@ -58,6 +59,7 @@ import type { WindowAvailability } from "./window-availability";
 import type {
   CheckinCandidate,
   CheckinReview,
+  CheckinScope,
   CompletionConfidence,
   DegradedCriterion,
   DraftClassification,
@@ -584,6 +586,10 @@ export interface CheckinRunResult {
   resolveInput: ResolveInput;
   baseAllOnTime: number;
   source: "llm" | "heuristic";
+  /** Deterministic end-of-day reflection (done / blocked / tomorrow's focus),
+   *  shown beside the post-commit outcome summary as reflective context (§5.6
+   *  slice 6a "outcome summary"). Derived server-side; never computed client-side. */
+  eod: EODSummary;
 }
 
 /** How many candidate entities the interpret prompt sees (the rest still resolve).
@@ -640,23 +646,44 @@ function checkinCandidates(scorer: JointScorer): {
   return { candidates, skillNodes };
 }
 
+/** Order the prompt candidate set so the scoped goal's own entities come first
+ *  before the cap — the scope is the disambiguation. Resolution still runs against
+ *  the FULL set (an off-scope reference still resolves), so this only biases what
+ *  the model SEES, never the blast radius. A stable partition (no reordering
+ *  within each side) keeps the un-scoped ordering intact. */
+function rankForScope(
+  candidates: CheckinCandidate[],
+  scope: CheckinScope | undefined,
+): CheckinCandidate[] {
+  if (!scope) return candidates;
+  const inScope = candidates.filter((c) => c.goalId === scope.goalId);
+  const rest = candidates.filter((c) => c.goalId !== scope.goalId);
+  return [...inScope, ...rest];
+}
+
 /**
  * Run the interpret → resolve → propose loop over a free-form check-in (§5.6). The
  * review/commit half is the existing S1 machinery — the capture bar commits the
  * accepted Family-A subset via `commitStrategyBundleAction` and runs the Family-B
  * actions individually. No mutation happens here; this is read-only interpretation.
+ *
+ * `scope` (§5.6 slice 6a) binds the check-in to one goal — its entities rank first
+ * in the interpret prompt, and an `add_task` intent becomes a Family-A `add_tasks`
+ * move on that goal instead of a standalone capture. Absent for the global bar.
  */
-export async function runCheckinAction(rawReport: string): Promise<CheckinRunResult> {
+export async function runCheckinAction(
+  rawReport: string,
+  scope?: CheckinScope,
+): Promise<CheckinRunResult> {
   await requireUser();
   const report = rawReport.trim();
-  const scorer = await createJointScorer();
+  const [scorer, tasks] = await Promise.all([createJointScorer(), listAllTasks()]);
   const { candidates, skillNodes } = checkinCandidates(scorer);
 
   const { result, source } = await interpretCheckin(
     report,
-    // Rank by Today-relevance is implicit (resolveInput.tasks is the ordered plan);
-    // cap what the model SEES, resolve against the full set below.
-    candidates.slice(0, CHECKIN_PROMPT_CAP),
+    // Cap what the model SEES (scope-ranked), resolve against the full set below.
+    rankForScope(candidates, scope).slice(0, CHECKIN_PROMPT_CAP),
   );
   const resolved = resolveCheckin(result, candidates);
   const review = proposeFromCheckin(
@@ -665,6 +692,7 @@ export async function runCheckinAction(rawReport: string): Promise<CheckinRunRes
       today: scorer.resolveInput.today,
       baseAllOnTime: scorer.baseAllOnTime,
       cumulative: scorer.cumulative,
+      scope,
     },
     skillNodes,
   );
@@ -675,6 +703,7 @@ export async function runCheckinAction(rawReport: string): Promise<CheckinRunRes
     resolveInput: scorer.resolveInput,
     baseAllOnTime: scorer.baseAllOnTime,
     source,
+    eod: buildEODSummary(tasks),
   };
 }
 
