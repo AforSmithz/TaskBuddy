@@ -14,7 +14,7 @@ import {
   type CheckinRunResult,
 } from "@/lib/actions";
 import { band, formatPct } from "@/components/forecast/forecast-meter";
-import type { CheckinProposal } from "@/lib/types";
+import type { CheckinProposal, StrategyMove } from "@/lib/types";
 import { cn } from "@/lib/cn";
 
 function toneText(p: number): string {
@@ -33,6 +33,28 @@ function actionLabel(p: CheckinProposal): { icon: typeof Timer; text: string } {
   if (a?.kind === "log_progress") return { icon: Timer, text: `Log ${a.minutes} min` };
   if (a?.kind === "capture_idea") return { icon: Sparkles, text: "Capture" };
   return { icon: Check, text: "Note" };
+}
+
+/** One line of the post-commit outcome summary (§5.6 slice 6a) — a glyph + the item
+ *  title, derived purely from the committed move's payload (no new computation). The
+ *  glyph carries the meaning: ✓ done/learned, ＋ added scope, → moved, − skipped. */
+function moveOutcome(move: StrategyMove): { glyph: string; text: string; done: boolean } {
+  const p = move.payload;
+  switch (p.kind) {
+    case "mark_done":
+      return { glyph: "✓", text: p.title, done: true };
+    case "attain_skill":
+      return { glyph: "✓", text: `learned ${p.title}`, done: true };
+    case "add_tasks":
+      return { glyph: "＋", text: p.tasks[0]?.title ?? "new task", done: false };
+    case "reschedule_task":
+    case "defer":
+      return { glyph: "→", text: "title" in p ? p.title : move.rationale, done: false };
+    case "skip_activity":
+      return { glyph: "−", text: p.title, done: false };
+    default:
+      return { glyph: "·", text: move.rationale, done: false };
+  }
 }
 
 /**
@@ -75,6 +97,13 @@ export function CheckinReview({
     seq.forEach((x, i) => byIndex.set(x.index, afterEach[i]));
     return { byIndex, combined };
   }, [proposals, included, resolveInput]);
+
+  // Base portfolio odds (no moves) — the "before" of the post-commit odds transition.
+  // Same sanctioned S1 client re-solve as `live`; never a hand-rolled probability.
+  const baseCombined = useMemo(
+    () => resolveSubsetCumulative(resolveInput as ResolveInput, []).combined,
+    [resolveInput],
+  );
 
   function toggle(index: number) {
     setIncluded((s) => {
@@ -130,32 +159,122 @@ export function CheckinReview({
   }
 
   if (committed) {
+    // Post-commit outcome summary (§5.6 slice 6a): what the accepted moves did,
+    // grouped by goal (recital ✓ / work ✓ / gym −), the portfolio odds transition,
+    // and a reflective end-of-day read. All from already-committed data + the same
+    // sanctioned S1 re-solve — no fresh probability is computed here.
+    const groups = new Map<string, ReturnType<typeof moveOutcome>[]>();
+    for (const { p } of familyA) {
+      const key = p.move!.projectName || "Portfolio";
+      const arr = groups.get(key) ?? [];
+      arr.push(moveOutcome(p.move!));
+      groups.set(key, arr);
+    }
+    const hadOdds = familyA.length > 0;
+    const eod = result.eod;
+    const eodBits = [
+      `${eod.completed.length} done`,
+      eod.in_review.length > 0 ? `${eod.in_review.length} in review` : null,
+    ].filter((x): x is string => x !== null);
+
     return (
-      <div className="flex items-center justify-between rounded-[18px] border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-3.5 shadow-[var(--shadow-md)]">
-        <span className="flex items-center gap-2 text-[14px] font-medium text-[var(--color-fg)]">
-          <Check className="size-4 text-[var(--color-status-done)]" aria-hidden />
-          Logged {total} update{total === 1 ? "" : "s"}.
-        </span>
-        <span className="flex items-center gap-3">
-          {versionId && (
+      <div className="rounded-[18px] border border-[var(--color-border)] bg-[var(--color-surface)] shadow-[var(--shadow-md)]">
+        <div className="flex items-center justify-between border-b border-[var(--color-border)] px-4 py-3">
+          <span className="flex items-center gap-2 text-[14px] font-medium text-[var(--color-fg)]">
+            <Check className="size-4 text-[var(--color-status-done)]" aria-hidden />
+            Logged {total} update{total === 1 ? "" : "s"}
+          </span>
+          <span className="flex items-center gap-3">
+            {versionId && (
+              <button
+                type="button"
+                onClick={undo}
+                disabled={pending}
+                className="flex items-center gap-1.5 text-[13px] font-medium text-[var(--color-fg-subtle)] hover:text-[var(--color-fg)] disabled:opacity-50"
+              >
+                <Undo2 className="size-3.5" aria-hidden />
+                Undo
+              </button>
+            )}
             <button
               type="button"
-              onClick={undo}
-              disabled={pending}
-              className="flex items-center gap-1.5 text-[13px] font-medium text-[var(--color-fg-subtle)] hover:text-[var(--color-fg)] disabled:opacity-50"
+              onClick={onDone}
+              className="text-[13px] font-medium text-[var(--color-accent-fg)] hover:underline"
             >
-              <Undo2 className="size-3.5" aria-hidden />
-              Undo
+              Done
             </button>
+          </span>
+        </div>
+
+        {hadOdds && (
+          <div className="flex items-center justify-between border-b border-[var(--color-border)] px-4 py-2.5">
+            <span className="text-[12px] text-[var(--color-fg-muted)]">
+              Portfolio odds of all deadlines landing
+            </span>
+            <span className="flex items-center gap-1.5 text-[13px] font-semibold tabular-nums">
+              <span className="text-[var(--color-fg-subtle)]">{formatPct(baseCombined)}</span>
+              <span className="text-[var(--color-fg-subtle)]">→</span>
+              <span className={toneText(live.combined)}>{formatPct(live.combined)}</span>
+            </span>
+          </div>
+        )}
+
+        {groups.size > 0 && (
+          <ul className="divide-y divide-[var(--color-border)]">
+            {[...groups.entries()].map(([name, items]) => (
+              <li key={name} className="px-4 py-2.5">
+                <p className="text-[11px] font-medium uppercase tracking-wide text-[var(--color-fg-subtle)]">
+                  {name}
+                </p>
+                <ul className="mt-1 space-y-0.5">
+                  {items.map((it, i) => (
+                    <li key={i} className="flex items-baseline gap-2 text-[13px] text-[var(--color-fg)]">
+                      <span
+                        className={cn(
+                          "shrink-0 tabular-nums",
+                          it.done ? "text-[var(--color-status-done)]" : "text-[var(--color-fg-subtle)]",
+                        )}
+                        aria-hidden
+                      >
+                        {it.glyph}
+                      </span>
+                      <span className="min-w-0 truncate">{it.text}</span>
+                    </li>
+                  ))}
+                </ul>
+              </li>
+            ))}
+          </ul>
+        )}
+
+        {familyB.length > 0 && (
+          <div className="flex flex-wrap gap-x-3 gap-y-1 border-t border-[var(--color-border)] px-4 py-2.5 text-[12px] text-[var(--color-fg-muted)]">
+            {familyB.map(({ p }, i) => {
+              const a = p.action!;
+              const Icon = a.kind === "log_progress" ? Timer : Sparkles;
+              return (
+                <span key={i} className="flex items-center gap-1">
+                  <Icon className="size-3" aria-hidden />
+                  {a.kind === "log_progress"
+                    ? `${a.minutes}m on ${a.title}`
+                    : a.kind === "capture_idea"
+                      ? `captured “${a.text}”`
+                      : "noted"}
+                </span>
+              );
+            })}
+          </div>
+        )}
+
+        <div className="border-t border-[var(--color-border)] px-4 py-2.5 text-[12px] text-[var(--color-fg-subtle)]">
+          Today so far: {eodBits.join(" · ")}
+          {eod.tomorrow_focus[0] && (
+            <>
+              {" · up next: "}
+              <span className="text-[var(--color-fg-muted)]">{eod.tomorrow_focus[0]}</span>
+            </>
           )}
-          <button
-            type="button"
-            onClick={onDone}
-            className="text-[13px] font-medium text-[var(--color-accent-fg)] hover:underline"
-          >
-            Done
-          </button>
-        </span>
+        </div>
       </div>
     );
   }
