@@ -1354,3 +1354,19 @@ export interface CheckinReview {
   chips: ResolvedCheckinIntent[];
   rawReport: string;
 }
+
+/**
+ * Project scope for a task-scoped check-in (§5.6 slice 6a). When a check-in runs
+ * bound to a goal (the capture bar on a project page), an `add_task` intent — "I
+ * also need to do Y" — becomes a real Family-A `add_tasks` move ON THIS GOAL
+ * (forecast-affecting, live-re-solved), instead of the odds-silent standalone
+ * capture the global bar produces with no project context. The scope is also the
+ * disambiguation: the goal's own entities rank first in the interpret prompt.
+ */
+export interface CheckinScope {
+  goalId: string;
+  goalName: string;
+  /** Life-area the new task inherits — the goal's modal task area (SuggestedTask
+   *  requires one; the strategist's own adds inherit it the same way). */
+  area: string;
+}

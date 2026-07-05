@@ -8,6 +8,7 @@ import type {
   CheckinProposal,
   CheckinRegister,
   CheckinReview,
+  CheckinScope,
   ResolvedCheckinIntent,
   StrategyMove,
   StrategyMovePayload,
@@ -439,6 +440,10 @@ export interface CheckinProposeContext {
   today: string;
   baseAllOnTime: number;
   cumulative(ordered: StrategyMove[]): { afterEach: number[]; combined: number };
+  /** Set when the check-in is scoped to a goal (§5.6 slice 6a) — an `add_task`
+   *  intent then becomes a Family-A `add_tasks` move on this goal instead of a
+   *  standalone Family-B capture. Absent for the global capture bar. */
+  scope?: CheckinScope;
 }
 
 function addDays(isoDate: string, days: number): string {
@@ -492,10 +497,37 @@ const NEUTRAL_FACTORS = {
 } as const;
 
 /** Build the Family-A `StrategyMove` for a resolved intent, or null when the kind
- *  has no forecast-affecting move yet (skill_gained → slice 4) or no valid target. */
-function moveForIntent(r: ResolvedCheckinIntent, today: string): StrategyMove | null {
+ *  has no forecast-affecting move (an unscoped add_task → Family-B capture) or no
+ *  valid target. `scope` is set for a task-scoped check-in (§5.6 slice 6a). */
+function moveForIntent(
+  r: ResolvedCheckinIntent,
+  today: string,
+  scope?: CheckinScope,
+): StrategyMove | null {
   const { intent, match } = r;
-  // Every Family-A move must trace to a resolved entity (the invariant).
+
+  // §5.6 slice 6a — a SCOPED `add_task` ("I also need to do Y") becomes a real
+  // Family-A `add_tasks` move on the scope goal: forecast-affecting (it injects a
+  // synthetic task, so the live re-solve honestly shows the added load) and undoable
+  // through the same PlanVersion. Its "entity" is the source quote, so it needs no
+  // resolved match — this is the one Family-A kind that precedes the match guard.
+  // Unscoped, it returns null and falls through to the Family-B standalone capture
+  // (`actionForIntent`), exactly as the global bar does today.
+  if (intent.kind === "add_task") {
+    if (!scope) return null;
+    const task = suggestedTaskFromIntent(intent, scope.area);
+    return {
+      kind: "add_tasks",
+      projectId: scope.goalId,
+      projectName: scope.goalName,
+      rationale: `Add "${task.title}" to ${scope.goalName}.`,
+      probabilityAfter: 0,
+      portfolioProbabilityAfter: 0,
+      payload: { kind: "add_tasks", tasks: [task] },
+    };
+  }
+
+  // Every other Family-A move must trace to a resolved entity (the invariant).
   if (!match) return null;
 
   const base = {
@@ -633,9 +665,10 @@ function actionForIntent(r: ResolvedCheckinIntent): CheckinActionIntent | null {
     }
     case "add_task":
     case "idea":
-      // v1: a check-in add with no project context is captured as a standalone
-      // item (quick errand), not a project-scoped add_tasks move — odds-silent.
-      // Project-scoped add_tasks rides with task-scoped NL (slice 6).
+      // An UNSCOPED add (the global bar) or any `idea` has no project context, so
+      // it's captured as a standalone item (quick errand) — odds-silent. A SCOPED
+      // `add_task` is intercepted earlier by `moveForIntent` and never reaches here
+      // (it becomes a Family-A `add_tasks` move on the goal — §5.6 slice 6a).
       return { kind: "capture_idea", text: intent.detail ?? intent.quote, quote: intent.quote };
     default:
       return null;
@@ -646,8 +679,9 @@ function actionForIntent(r: ResolvedCheckinIntent): CheckinActionIntent | null {
  * Stage C: turn resolved intents into the review surface. Family-A moves are
  * scored together through one `cumulative` call so each row shows the contention-
  * correct portfolio odds AFTER it (and every move before it) — the exact number the
- * client live re-solve will reproduce. `add_tasks` of a synthesized SuggestedTask is
- * available for a future project-scoped path; v1 keeps captures in Family B.
+ * client live re-solve will reproduce. When `ctx.scope` is set (a task-scoped
+ * check-in, §5.6 slice 6a), an `add_task` intent joins Family A as an `add_tasks`
+ * move on the scope goal; unscoped, captures stay in Family B.
  */
 export function proposeFromCheckin(
   resolved: ResolvedCheckinIntent[],
@@ -669,7 +703,7 @@ export function proposeFromCheckin(
       chips.push(r);
       continue;
     }
-    const move = moveForIntent(r, ctx.today);
+    const move = moveForIntent(r, ctx.today, ctx.scope);
     if (move) {
       pending.push({ family: "A", resolved: r, move, defaultChecked: isDefaultChecked(r) });
       continue;
@@ -731,8 +765,9 @@ export function proposeFromCheckin(
   return { proposals, chips, rawReport: "" };
 }
 
-/** Synthesize a SuggestedTask from a captured add-task intent — kept for the
- *  future project-scoped `add_tasks` path (slice 6); unused by the v1 propose. */
+/** Synthesize a SuggestedTask from a captured add-task intent — the payload of a
+ *  scoped `add_tasks` move (§5.6 slice 6a). Neutral factors so it scores plausibly
+ *  through `computePriority` without the interpreter authoring a priority. */
 export function suggestedTaskFromIntent(intent: CheckinIntent, area: string): SuggestedTask {
   return {
     ...NEUTRAL_FACTORS,
