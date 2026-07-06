@@ -391,6 +391,7 @@ export async function assembleEntry(
       completion_confidence: null,
       completed_at: null,
       origin: null,
+      resolved_by: null,
       sort_index: i,
       created_at: createdAt,
     };
@@ -1001,6 +1002,9 @@ export async function updateTask(
       // Confidence-tagged completion (set when status → done, cleared on reopen).
       | "completion_confidence"
       | "completed_at"
+      // Blocker-resolution provenance (set by a resolve_blocker cascade, cleared on
+      // reopen/undo). §5.6 slice 6b.
+      | "resolved_by"
       // Reshaped in place by the strategist's scope-down move.
       | "title"
       | "description"
@@ -1369,6 +1373,46 @@ async function snapshotSkillNodeAttainment(
   return [snap];
 }
 
+/** The FULL dependency rows where a task is the PREREQ (`depends_on_task_id ===
+ *  blockerId`) — the edges a `resolve_blocker` cascade frees (§5.6 6b). Read from
+ *  the LIVE active DAG (`listAllDependencies`) so the snapshot pre-image and the
+ *  persist delete agree, an off-DAG/stale advisory id no-ops, and it mirrors the
+ *  forecast arm's `deps.filter(depends_on_task_id !== blocker)` exactly. */
+async function getDependenciesByBlocker(blockerId: string): Promise<TaskDependency[]> {
+  const all = await listAllDependencies();
+  return all.filter((d) => d.depends_on_task_id === blockerId);
+}
+
+/** Delete dependency edges by id (supabase + memDB), mirroring `deleteTasks`. */
+async function deleteDependencies(ids: string[]): Promise<void> {
+  if (ids.length === 0) return;
+  if (isSupabaseConfigured()) {
+    const supabase = await getRequestClient();
+    await supabase.from("task_dependencies").delete().in("id", ids);
+    return;
+  }
+  await ensureSeeded();
+  const set = new Set(ids);
+  const db = memDB();
+  db.deps = db.deps.filter((d) => !set.has(d.id));
+}
+
+/** Re-insert FULL dependency rows — the undo of a `resolve_blocker` cascade (§5.6 6b).
+ *  Re-inserting the ORIGINAL rows (same id/entry_id) restores DAG identity and
+ *  re-satisfies whatever FK/RLS admitted them. Mirrors `deleteTasks` across stores. */
+async function insertDependencies(rows: TaskDependency[]): Promise<void> {
+  if (rows.length === 0) return;
+  if (isSupabaseConfigured()) {
+    const supabase = await getRequestClient();
+    const { error } = await supabase.from("task_dependencies").insert(rows);
+    if (error)
+      throw new Error(`Supabase task_dependencies re-insert failed: ${error.message}`);
+    return;
+  }
+  await ensureSeeded();
+  memDB().deps.push(...rows);
+}
+
 // --- Move spec registry (S1 step 4) ----------------------------------------
 //
 // One `MoveSpec` per `StrategyMoveKind` co-locates that kind's two server-side DB
@@ -1395,6 +1439,9 @@ type MoveRowSnapshot = {
   /** Prior attainment of skill nodes an `attain_skill` move flips (§5.6) — absent
    *  for every other kind. */
   skillNodes?: (Partial<SkillNode> & { id: string })[];
+  /** FULL dependency rows a `resolve_blocker` cascade will DELETE (§5.6 6b) — captured
+   *  as the pre-image so undo re-inserts the originals byte-identical; absent otherwise. */
+  dependencies?: TaskDependency[];
 };
 
 /** The synthetic-row ids one move's `persist` inserted, so undo can delete them. */
@@ -1447,6 +1494,34 @@ const MOVE_SPECS: { [K in StrategyMoveKind]: MoveSpec<K> } = {
     }),
     persist: async (p) => {
       await updateTask(p.taskId, { status: "todo", blocked_by: null });
+      return {};
+    },
+  },
+  resolve_blocker: {
+    // §5.6 6b — snapshot the blocker's done-fields + provenance AND the FULL edge rows
+    // the cascade will delete, so undo restores the task and re-inserts the exact edges.
+    snapshot: async (p) => ({
+      tasks: await snapshotTaskFields(
+        [p.blockerTaskId],
+        ["status", "completion_confidence", "completed_at", "resolved_by"],
+      ),
+      goals: [],
+      dependencies: await getDependenciesByBlocker(p.blockerTaskId),
+    }),
+    persist: async (p) => {
+      // Mark the blocker done (a check-in resolution is `self_assessed` — the invariant)
+      // + stamp the free-text provenance, then delete every edge INTO it. The edges are
+      // RE-DERIVED from the LIVE DAG here (never from the advisory `freedTaskIds`), so a
+      // stale entry simply no-ops — decision #8. Cascade is one-hop: a freed dependent
+      // becomes actionable but is NEVER auto-completed (the joint re-solve schedules it).
+      await updateTask(p.blockerTaskId, {
+        status: "done",
+        completion_confidence: p.confidence ?? "self_assessed",
+        completed_at: new Date().toISOString(),
+        resolved_by: p.resolvedBy,
+      });
+      const edges = await getDependenciesByBlocker(p.blockerTaskId);
+      await deleteDependencies(edges.map((e) => e.id));
       return {};
     },
   },
@@ -1564,11 +1639,15 @@ export async function commitStrategyBundle(
   const taskSnap = new Map<string, Partial<Task> & { id: string }>();
   const goalSnap = new Map<string, Partial<Goal> & { id: string }>();
   const skillSnap = new Map<string, Partial<SkillNode> & { id: string }>();
+  // Dependency edges a resolve_blocker cascade deletes — deduped by edge id as a
+  // pre-image, so undo re-inserts each original exactly once (§5.6 6b).
+  const depSnap = new Map<string, TaskDependency>();
   for (const move of ordered) {
-    const { tasks, goals, skillNodes } = await specFor(move.payload.kind).snapshot(move.payload, move);
+    const { tasks, goals, skillNodes, dependencies } = await specFor(move.payload.kind).snapshot(move.payload, move);
     for (const t of tasks) if (!taskSnap.has(t.id)) taskSnap.set(t.id, t);
     for (const goal of goals) if (!goalSnap.has(goal.id)) goalSnap.set(goal.id, goal);
     for (const n of skillNodes ?? []) if (!skillSnap.has(n.id)) skillSnap.set(n.id, n);
+    for (const d of dependencies ?? []) if (!depSnap.has(d.id)) depSnap.set(d.id, d);
   }
 
   // 2. Apply, accumulating the synthetic rows inserted (so undo can delete them).
@@ -1603,6 +1682,7 @@ export async function commitStrategyBundle(
       insertedTaskIds,
       insertedEntryIds,
       activityCompletionIds,
+      deletedDependencies: [...depSnap.values()],
     },
     revertedAt: null,
   };
@@ -1749,6 +1829,10 @@ export async function undoPlanVersion(id: string): Promise<void> {
   for (const n of restore.skillNodes ?? []) {
     await setSkillNodeAttained(n.id, n.attained ?? false, n.attained_confidence ?? null);
   }
+  // Re-insert the dependency edges a resolve_blocker cascade deleted (§5.6 6b) — the
+  // ORIGINAL rows, so the DAG is byte-identical. `?? []` for bundles persisted before
+  // 6b (their jsonb `restore` has no `deletedDependencies` key).
+  await insertDependencies(restore.deletedDependencies ?? []);
   // Delete the synthetic rows the bundle inserted (tasks, their recovery entries,
   // and any skip rows).
   await deleteTasks(restore.insertedTaskIds);
@@ -2367,6 +2451,7 @@ export async function createErrandTask(
     completion_confidence: null,
     completed_at: null,
     origin: null,
+    resolved_by: null,
     sort_index: 0,
     created_at: new Date().toISOString(),
   };
@@ -4094,6 +4179,7 @@ function buildRecoveryTaskRow(
     completion_confidence: null,
     completed_at: null,
     origin: input.origin ?? null,
+    resolved_by: null,
     sort_index: sortIndex,
     created_at: createdAt,
   };
