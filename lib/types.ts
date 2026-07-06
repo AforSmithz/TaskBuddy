@@ -295,6 +295,13 @@ export interface Task {
   completed_at: string | null;
   /** Provenance when it changes treatment — `"debt"` for a scope-cut follow-up. */
   origin: TaskOrigin | null;
+  /**
+   * How a blocker was resolved, when reported through a check-in (§5.6 slice 6b,
+   * cascade-with-provenance) — free text like "Used a template". Display/audit
+   * provenance only, never a number or an id (§0-safe); null for an ordinary task
+   * or a plain resolution with no stated method.
+   */
+  resolved_by: string | null;
   sort_index: number;
   created_at: string;
 }
@@ -1025,6 +1032,11 @@ export type StrategyMoveKind =
   | "reroute"
   | "mark_done"
   | "attain_skill"
+  // §5.6 slice 6b — resolve a structural blocker: mark it done + cascade one-hop
+  // edge removal over `task_dependencies` (frees its direct dependents) + stamp
+  // free-text provenance. Distinct from `unblock` (which clears the SOFT
+  // `blocked_by` flag on one dependent); never overloads it.
+  | "resolve_blocker"
   | "skip_activity"
   | "hold";
 
@@ -1058,6 +1070,21 @@ export type StrategyMovePayload =
       /** Set when this attainment was INFERRED from attaining an overlapping node
        *  in another goal — the spillover provenance (no DB column; lives here). */
       viaSpilloverFrom?: string;
+    }
+  | {
+      // §5.6 slice 6b — the user resolved a blocker (a task others depend on). Persist
+      // marks it done, deletes every `task_dependencies` edge INTO it (`depends_on_task_id
+      // === blockerTaskId`), and stamps `resolved_by`. `freedTaskIds` is advisory display
+      // only — persist re-derives the edges from the LIVE DAG, so a stale id no-ops.
+      kind: "resolve_blocker";
+      blockerTaskId: string;
+      title: string;
+      /** `self_assessed` for a check-in resolution (the user said it); the invariant. */
+      confidence: CompletionConfidence;
+      /** Free-text "how" ("Used a template"), or null for a plain resolution. */
+      resolvedBy: string | null;
+      /** The blocker's direct dependents at generation time — display only. */
+      freedTaskIds: string[];
     }
   | { kind: "triage"; taskIds: string[]; titles: string[] }
   | { kind: "add_tasks"; tasks: SuggestedTask[] }
@@ -1187,6 +1214,11 @@ export interface RowSnapshot {
   insertedEntryIds: string[];
   /** Skip rows (ActivityCompletion) a `skip_activity` move inserted — deleted on undo. */
   activityCompletionIds: string[];
+  /** Dependency edges a `resolve_blocker` cascade DELETED (§5.6 slice 6b) — the FULL
+   *  rows (id/entry_id/reason), so undo re-INSERTS the originals and the DAG is byte-
+   *  identical. `plan_versions.restore` is jsonb ⇒ no migration; rows persisted before
+   *  6b read `deletedDependencies ?? []`. */
+  deletedDependencies: TaskDependency[];
 }
 
 /**
@@ -1245,10 +1277,11 @@ export type CheckinRegister = "status" | "idea" | "vent";
  * vent maps to no move (a non-actionable acknowledgement chip).
  */
 export type CheckinIntentKind =
-  | "completed" // → mark_done
+  | "completed" // → mark_done (or resolve_blocker when the task is a blocker, slice 6b)
   | "reschedule" // → reschedule_task / defer
   | "add_task" // → add_tasks
   | "skill_gained" // → attain_skill (the one new move kind, slice 4)
+  | "resolved" // → resolve_blocker (blocker) / unblock (dependent) by DAG role (slice 6b)
   | "time_logged" // → log_progress (Family B)
   | "idea" // → quick capture (Family B)
   | "vent"; // → acknowledge only (no move)
