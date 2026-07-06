@@ -17,6 +17,7 @@ import {
   Sparkles,
   TrafficCone,
   Undo2,
+  Unlock,
 } from "lucide-react";
 import type {
   PortfolioStrategy,
@@ -58,6 +59,7 @@ const MOVE_ICON: Record<StrategyMoveKind, typeof ArrowRight> = {
   reschedule_deadline: CalendarClock,
   reschedule_task: CalendarClock,
   unblock: Lock,
+  resolve_blocker: Unlock,
   mark_done: Check,
   attain_skill: GraduationCap,
   triage: TrafficCone,

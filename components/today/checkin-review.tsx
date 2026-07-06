@@ -6,6 +6,7 @@ import {
   resolveSubsetCumulative,
   type ResolveInput,
 } from "@/lib/portfolio-state";
+import type { DependencyEdge } from "@/lib/schedule";
 import {
   commitStrategyBundleAction,
   logActualTimeAction,
@@ -35,16 +36,50 @@ function actionLabel(p: CheckinProposal): { icon: typeof Timer; text: string } {
   return { icon: Check, text: "Note" };
 }
 
-/** One line of the post-commit outcome summary (§5.6 slice 6a) — a glyph + the item
- *  title, derived purely from the committed move's payload (no new computation). The
- *  glyph carries the meaning: ✓ done/learned, ＋ added scope, → moved, − skipped. */
-function moveOutcome(move: StrategyMove): { glyph: string; text: string; done: boolean } {
+/** Optional context for `moveOutcome` — the shipped task titles + DAG so a
+ *  resolve_blocker line can name its freed dependents (§5.6 6b). Display-only. */
+interface OutcomeCtx {
+  titleById: Map<string, string>;
+  deps: DependencyEdge[];
+}
+
+/** One line of the post-commit outcome summary (§5.6 slice 6a/6b) — a glyph + the item
+ *  title (+ optional sub-lines), derived purely from the committed move's payload and
+ *  the shipped re-solve inputs (no probability is computed here — frontend rule §2.8).
+ *  The glyph carries the meaning: ✓ done/learned/cleared, ＋ added scope, → moved, − skipped. */
+function moveOutcome(
+  move: StrategyMove,
+  ctx?: OutcomeCtx,
+): { glyph: string; text: string; done: boolean; sub?: string[] } {
   const p = move.payload;
   switch (p.kind) {
     case "mark_done":
       return { glyph: "✓", text: p.title, done: true };
     case "attain_skill":
       return { glyph: "✓", text: `learned ${p.title}`, done: true };
+    case "resolve_blocker": {
+      // Cleared a blocker: list the freed dependents by title, and honestly flag any
+      // that still wait on OTHER work (partial satisfaction — decision #3). Both reads
+      // are display-only filters over the shipped DAG + titles, never a re-derivation.
+      const titleById = ctx?.titleById;
+      const deps = ctx?.deps ?? [];
+      const sub = p.freedTaskIds.map((id) => {
+        const title = titleById?.get(id) ?? "a task";
+        const stillGated = deps.some(
+          (d) =>
+            d.task_id === id &&
+            d.depends_on_task_id !== p.blockerTaskId &&
+            (titleById?.has(d.depends_on_task_id) ?? false),
+        );
+        return stillGated ? `${title} — still waiting on other work` : `freed ${title}`;
+      });
+      return {
+        glyph: "✓",
+        text: `cleared ${p.title}${p.resolvedBy ? ` · via ${p.resolvedBy}` : ""}`,
+        done: true,
+        sub: sub.length > 0 ? sub : undefined,
+      };
+    }
     case "add_tasks":
       return { glyph: "＋", text: p.tasks[0]?.title ?? "new task", done: false };
     case "reschedule_task":
@@ -163,11 +198,17 @@ export function CheckinReview({
     // grouped by goal (recital ✓ / work ✓ / gym −), the portfolio odds transition,
     // and a reflective end-of-day read. All from already-committed data + the same
     // sanctioned S1 re-solve — no fresh probability is computed here.
+    // Titles + DAG for naming a resolve_blocker's freed dependents (§5.6 6b) — the same
+    // shipped re-solve inputs the odds use; no fresh computation, display only.
+    const outcomeCtx: OutcomeCtx = {
+      titleById: new Map(resolveInput.tasks.map((t) => [t.id, t.title])),
+      deps: resolveInput.deps,
+    };
     const groups = new Map<string, ReturnType<typeof moveOutcome>[]>();
     for (const { p } of familyA) {
       const key = p.move!.projectName || "Portfolio";
       const arr = groups.get(key) ?? [];
-      arr.push(moveOutcome(p.move!));
+      arr.push(moveOutcome(p.move!, outcomeCtx));
       groups.set(key, arr);
     }
     const hadOdds = familyA.length > 0;
@@ -228,17 +269,31 @@ export function CheckinReview({
                 </p>
                 <ul className="mt-1 space-y-0.5">
                   {items.map((it, i) => (
-                    <li key={i} className="flex items-baseline gap-2 text-[13px] text-[var(--color-fg)]">
-                      <span
-                        className={cn(
-                          "shrink-0 tabular-nums",
-                          it.done ? "text-[var(--color-status-done)]" : "text-[var(--color-fg-subtle)]",
-                        )}
-                        aria-hidden
-                      >
-                        {it.glyph}
+                    <li key={i} className="text-[13px] text-[var(--color-fg)]">
+                      <span className="flex items-baseline gap-2">
+                        <span
+                          className={cn(
+                            "shrink-0 tabular-nums",
+                            it.done ? "text-[var(--color-status-done)]" : "text-[var(--color-fg-subtle)]",
+                          )}
+                          aria-hidden
+                        >
+                          {it.glyph}
+                        </span>
+                        <span className="min-w-0 truncate">{it.text}</span>
                       </span>
-                      <span className="min-w-0 truncate">{it.text}</span>
+                      {it.sub && it.sub.length > 0 && (
+                        <ul className="ml-6 mt-0.5 space-y-0.5">
+                          {it.sub.map((s, j) => (
+                            <li
+                              key={j}
+                              className="truncate text-[12px] text-[var(--color-fg-subtle)]"
+                            >
+                              ↳ {s}
+                            </li>
+                          ))}
+                        </ul>
+                      )}
                     </li>
                   ))}
                 </ul>
