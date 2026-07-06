@@ -4,6 +4,7 @@ import {
   getWindowAvailability,
   listAllTasks,
   listRecurringActivities,
+  valueWeightsAffectPlan,
 } from "@/lib/store";
 import { SEED_AREAS } from "@/lib/types";
 import { PageHeader } from "@/components/ui/page-header";
@@ -18,12 +19,14 @@ import { WindowAvailabilityForm } from "@/components/settings/window-availabilit
  * exactly the buckets their work falls into.
  */
 export default async function SettingsPage() {
-  const [model, windowAvailability, tasks, activities] = await Promise.all([
-    getValueModel(),
-    getWindowAvailability(),
-    listAllTasks(),
-    listRecurringActivities(),
-  ]);
+  const [model, windowAvailability, tasks, activities, weightsActive] =
+    await Promise.all([
+      getValueModel(),
+      getWindowAvailability(),
+      listAllTasks(),
+      listRecurringActivities(),
+      valueWeightsAffectPlan(),
+    ]);
 
   const areas = Array.from(
     new Set([
@@ -46,7 +49,7 @@ export default async function SettingsPage() {
 
       <Reveal delay={0.05} className="mt-7">
         <Card className="rounded-[22px] p-6 shadow-[var(--shadow-md)]">
-          <ValueModelForm model={model} areas={areas} />
+          <ValueModelForm model={model} areas={areas} weightsActive={weightsActive} />
         </Card>
       </Reveal>
 
