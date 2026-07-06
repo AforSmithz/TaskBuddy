@@ -112,6 +112,7 @@ create table if not exists tasks (
   completion_confidence text,                       -- verified|self_assessed|inferred|in_progress (null while open)
   completed_at      timestamptz,                    -- set when status → done
   origin            text,                            -- 'debt' for materialized scope-cut follow-ups (null = ordinary task)
+  resolved_by       text,                            -- §5.6 6b: how a blocker was resolved ('Used a template'); null = none
   sort_index        integer default 0,
   created_at        timestamptz not null default now()
 );
