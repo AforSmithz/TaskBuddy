@@ -205,7 +205,8 @@ export async function updateTaskStatusAction(
   const patch: Partial<Task> =
     status === "done"
       ? { status, completion_confidence: confidence, completed_at: new Date().toISOString() }
-      : { status, completion_confidence: null, completed_at: null };
+      : // Reopening clears all done-provenance, incl. any blocker-resolution note (§5.6 6b).
+        { status, completion_confidence: null, completed_at: null, resolved_by: null };
   await updateTask(taskId, patch);
   // S2 slice B: accrue the local when-signal for a genuine user completion. Inferred
   // (strategist) completions are excluded — there is no client clock to honestly
@@ -693,6 +694,9 @@ export async function runCheckinAction(
       baseAllOnTime: scorer.baseAllOnTime,
       cumulative: scorer.cumulative,
       scope,
+      // §5.6 6b — the live structural DAG, so a completed/resolved intent on a blocker
+      // promotes to a cascade (chosen by graph role, not the model).
+      deps: scorer.resolveInput.deps,
     },
     skillNodes,
   );
