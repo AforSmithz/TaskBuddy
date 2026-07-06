@@ -174,6 +174,9 @@ export function syntheticAllocTask(
  *  - defer / mark_done  → drop the task (the budget it occupied is freed).
  *  - triage             → drop every task in the batch.
  *  - unblock            → drop dep edges into the task (frees its ordering).
+ *  - resolve_blocker    → drop the blocker task AND every edge that pointed AT it
+ *                         (`depends_on_task_id === blocker`), freeing its direct
+ *                         dependents — the opposite edge direction from unblock (§5.6 6b).
  *  - reschedule_deadline→ move the project's deadline (what `globalForecast` gates on).
  *  - reschedule_task    → near-noop: the project deadline gates the joint odds,
  *                         not a task's own due date (alloc tasks carry no due date).
@@ -224,6 +227,20 @@ export function applyMoveToAlloc(
 
     case "unblock":
       return { ...state, deps: state.deps.filter((d) => d.task_id !== p.taskId) };
+
+    case "resolve_blocker":
+      // Resolving a blocker drops it (its budget frees, like mark_done) AND removes
+      // every edge INTO it (`depends_on_task_id === blocker`), so its direct dependents
+      // stop being topo-gated by it. This is the FORECAST twin of the persist that marks
+      // the blocker done + deletes those same edges (§5.6 6b). Dropping the task alone
+      // would already free the dependents via allocate.ts's both-endpoints-open guard;
+      // the explicit `deps` filter mirrors persist and stays correct even if the blocker
+      // isn't present as an open alloc task.
+      return {
+        ...state,
+        tasks: state.tasks.filter((t) => t.id !== p.blockerTaskId),
+        deps: state.deps.filter((d) => d.depends_on_task_id !== p.blockerTaskId),
+      };
 
     case "reschedule_deadline": {
       const deadlineByProject = new Map(state.deadlineByProject);
