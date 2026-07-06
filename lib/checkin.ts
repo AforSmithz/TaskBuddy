@@ -15,6 +15,7 @@ import type {
   SuggestedTask,
 } from "./types";
 import type { ChatMessage } from "./openrouter";
+import type { DependencyEdge } from "./schedule";
 
 // §5.6 stage A — interpret a free-form activity report into ungrounded, quoted,
 // register-tagged intents (design/s5.6-nl-checkin-loop.md). Shaped exactly like
@@ -37,6 +38,7 @@ const INTENT_KINDS: readonly CheckinIntentKind[] = [
   "reschedule",
   "add_task",
   "skill_gained",
+  "resolved",
   "time_logged",
   "idea",
   "vent",
@@ -52,7 +54,7 @@ Return ONLY a JSON object with this exact shape (no markdown, no commentary):
 
 {
   "intents": [{
-    "kind": "completed"|"reschedule"|"add_task"|"skill_gained"|"time_logged"|"idea"|"vent",
+    "kind": "completed"|"reschedule"|"add_task"|"skill_gained"|"resolved"|"time_logged"|"idea"|"vent",
     "register": "status"|"idea"|"vent",
     "quote": string,            // a VERBATIM span copied from the report — the words that triggered this intent
     "handle": string|null,      // the handle of the candidate entity this clause names, copied EXACTLY from the list below; null if it names none
@@ -67,6 +69,7 @@ Intent kinds:
 - "reschedule": the user is pushing / postponing / moving an existing item to a later time. -> names a task handle + a time in "detail".
 - "add_task": the user says they need to do something NOT already in the list. -> handle null, entityPhrase null, the new work in "detail".
 - "skill_gained": the user says they can now do something they couldn't before ("I can finally write a SQL join"). -> names a skill handle if one matches, else handle null + the skill in "detail".
+- "resolved": the user says an EXISTING item is now unblocked, or they cleared / removed a blocker that other work was waiting on ("I unblocked the deploy", "cleared the blocker on the API, used a template"). -> names the task handle; if they say HOW they resolved it, put that method phrase in "detail" ("using a template"), else null. Use "completed" instead when they simply finished the item without framing it as unblocking.
 - "time_logged": the user reports how long they spent on an existing item ("spent ~2h on the API client"). -> names a task handle + the amount in "detail".
 - "idea": a thought / suggestion to capture for later, register "idea".
 - "vent": an emotional note with no action ("ugh, rough day"), register "vent".
@@ -192,6 +195,7 @@ const COMPLETED_RE = /\b(finished|completed|wrapped up|wrapped|done with|did the
 const RESCHEDULE_RE = /\b(push(?:ing)?|postpon\w*|defer\w*|moving|move|reschedul\w*|bumping|put off)\b/i;
 const ADD_RE = /\b(need to|have to|also need|must|should|todo|to-do|add a|going to)\b/i;
 const SKILL_RE = /\b(can (?:now|finally)|finally (?:can|able)|learned (?:how|to)|figured out how|now able to|i can)\b/i;
+const RESOLVE_RE = /\b(unblocked|no longer blocked|cleared the (?:blocker|blockage)|resolved the blocker|removed the blocker)\b/i;
 const TIME_RE = /\b(spent|put in|logged|took me)\b|~?\s*\d+\s*(?:h\b|hr|hour|min|m\b)/i;
 const IDEA_RE = /\b(idea|maybe|thinking about|what if|consider|might)\b/i;
 const NEGATION_RE = /\b(not|didn'?t|couldn'?t|won'?t|failed to|haven'?t)\b/i;
@@ -211,6 +215,10 @@ function classifyClause(clause: string): CheckinIntentKind {
   // A negated completion isn't a completion — fall through to a status/vent note.
   if (!negated && COMPLETED_RE.test(clause)) return "completed";
   if (RESCHEDULE_RE.test(clause)) return "reschedule";
+  // A cleared/removed blocker → resolved (stage C promotes it to a cascade when the
+  // bound task is a structural blocker). Checked before skill/time so "unblocked X"
+  // doesn't fall through. A negated "not unblocked yet" is not a resolution.
+  if (!negated && RESOLVE_RE.test(clause)) return "resolved";
   if (!negated && SKILL_RE.test(clause)) return "skill_gained";
   if (TIME_RE.test(clause)) return "time_logged";
   if (ADD_RE.test(clause)) return "add_task";
@@ -222,13 +230,15 @@ function classifyClause(clause: string): CheckinIntentKind {
  *  stripped of leading articles — a best-effort surface form for stage B. */
 function extractPhrase(clause: string, kind: CheckinIntentKind): string | null {
   const after = clause.replace(
-    /^.*?\b(finished|completed|wrapped up|wrapped|done with|did the|push(?:ing)?|postpon\w*|defer\w*|moving|reschedul\w*|spent|logged|need to|have to|add a)\b\s*/i,
+    /^.*?\b(finished|completed|wrapped up|wrapped|done with|did the|push(?:ing)?|postpon\w*|defer\w*|moving|reschedul\w*|spent|logged|need to|have to|add a|unblocked|cleared|resolved|removed)\b\s*/i,
     "",
   );
   const phrase = after
     // For "spent ~2h on the API client" drop the leading duration + "on/for".
     .replace(/^~?\s*\d+\s*(?:h\b|hr\w*|hour\w*|min\w*|m\b)\s*(?:on|for)?\s*/i, "")
     .replace(/^(the|a|an|my|to|on|with)\s+/i, "")
+    // "cleared the blocker on the deploy" → the entity is what the blocker was ON.
+    .replace(/^(?:blocker|blockage|dependency)\s+(?:on|for)\s+(?:the\s+)?/i, "")
     .replace(/\s+(to|by|next|tomorrow|this|until).*$/i, "")
     .trim();
   if (kind === "vent" || kind === "idea" || kind === "add_task") return null;
@@ -252,7 +262,10 @@ function heuristicInterpret(rawReport: string): CheckinInterpretation {
             ? clause
             : kind === "reschedule" || kind === "time_logged"
               ? (clause.match(/\b(next week|tomorrow|today|this week|~?\s*\d+\s*(?:h\b|hr|hour|min|m\b)[^,.]*)/i)?.[0]?.trim() ?? null)
-              : null,
+              : kind === "resolved"
+                ? // The method clause ("using a template") → provenance in stage C.
+                  (clause.match(/\b(?:using|used|via|with|by|through)\s+[^,.]+/i)?.[0]?.trim() ?? null)
+                : null,
         // Heuristic can't gauge real confidence; mark low so review proposes it
         // unchecked (the user confirms) rather than auto-applying a guess.
         confidence: "low",
@@ -280,6 +293,9 @@ function heuristicInterpret(rawReport: string): CheckinInterpretation {
 const ALLOWED_TYPES: Record<CheckinIntentKind, CheckinCandidate["type"][]> = {
   completed: ["task"],
   reschedule: ["task", "activity"],
+  // A resolution binds to a task (the blocker OR a plain dependent); stage C picks
+  // the move — resolve_blocker vs unblock — from the bound task's DAG role (§5.6 6b).
+  resolved: ["task"],
   time_logged: ["task"],
   skill_gained: ["skill_node"],
   add_task: [],
@@ -444,6 +460,10 @@ export interface CheckinProposeContext {
    *  intent then becomes a Family-A `add_tasks` move on this goal instead of a
    *  standalone Family-B capture. Absent for the global capture bar. */
   scope?: CheckinScope;
+  /** The live structural dependency DAG (§5.6 slice 6b) — stage C reads it to pick a
+   *  resolved/completed intent's move by the bound task's DAG role (blocker →
+   *  resolve_blocker + cascade; plain dependent → unblock). Empty when unavailable. */
+  deps?: DependencyEdge[];
 }
 
 function addDays(isoDate: string, days: number): string {
@@ -496,13 +516,79 @@ const NEUTRAL_FACTORS = {
   confidence: 3,
 } as const;
 
+// --- §5.6 slice 6b — DAG-role move selection --------------------------------
+//
+// A resolution's move is chosen from the bound task's position in the STRUCTURAL
+// `task_dependencies` DAG, never from the model (decision #7): a blocker (a task
+// others depend on) cascades via `resolve_blocker`; a plain dependent uses the
+// existing single-task `unblock`. This is what keeps the LLM off the "which edges
+// to cut" decision — deterministic code reads the graph.
+
+/** A task is a structural BLOCKER iff some edge names it as a prereq
+ *  (`depends_on_task_id === id`) — i.e. it has ≥1 direct dependent. */
+function isBlocker(taskId: string, deps: DependencyEdge[]): boolean {
+  return deps.some((d) => d.depends_on_task_id === taskId);
+}
+
+/** The ids of a blocker's DIRECT dependents — the tasks a cascade frees (one hop). */
+function directDependents(taskId: string, deps: DependencyEdge[]): string[] {
+  return deps.filter((d) => d.depends_on_task_id === taskId).map((d) => d.task_id);
+}
+
+/** Normalize a stated method clause into display provenance ("using a template" →
+ *  "Used a template"); null when none was given. Derived from a verbatim span, never
+ *  authored — display/audit only, so §0 holds (the LLM never writes an id or a number). */
+function methodProvenance(detail: string | null): string | null {
+  if (!detail) return null;
+  const cleaned = detail
+    .trim()
+    .replace(/^(using|used|via|with|by|through)\s+/i, "")
+    .trim();
+  return cleaned.length > 0 ? `Used ${cleaned}` : null;
+}
+
+/** Build the Family-A `resolve_blocker` move for a resolved blocker: mark it done +
+ *  cascade one-hop edge removal + stamp provenance (§5.6 6b). Confidence is always
+ *  `self_assessed` (a check-in resolution — the invariant). `freedTaskIds` are the
+ *  direct dependents at generation time (advisory; persist re-derives from the live DAG). */
+function resolveBlockerMove(
+  match: CheckinCandidate,
+  detail: string | null,
+  deps: DependencyEdge[],
+): StrategyMove {
+  const freed = directDependents(match.id, deps);
+  const resolvedBy = methodProvenance(detail);
+  const n = freed.length;
+  return {
+    kind: "resolve_blocker",
+    projectId: match.goalId,
+    projectName: match.goalName,
+    // Odds filled in by the cumulative re-solve in proposeFromCheckin; seed at base.
+    probabilityAfter: 0,
+    portfolioProbabilityAfter: 0,
+    rationale: `Cleared "${match.title}" — frees ${n} task${n === 1 ? "" : "s"}${
+      resolvedBy ? ` (via ${resolvedBy})` : ""
+    }.`,
+    payload: {
+      kind: "resolve_blocker",
+      blockerTaskId: match.id,
+      title: match.title,
+      confidence: "self_assessed",
+      resolvedBy,
+      freedTaskIds: freed,
+    },
+  };
+}
+
 /** Build the Family-A `StrategyMove` for a resolved intent, or null when the kind
  *  has no forecast-affecting move (an unscoped add_task → Family-B capture) or no
- *  valid target. `scope` is set for a task-scoped check-in (§5.6 slice 6a). */
+ *  valid target. `scope` is set for a task-scoped check-in (§5.6 slice 6a); `deps`
+ *  is the live DAG that decides a completed/resolved intent's move (§5.6 slice 6b). */
 function moveForIntent(
   r: ResolvedCheckinIntent,
   today: string,
   scope?: CheckinScope,
+  deps: DependencyEdge[] = [],
 ): StrategyMove | null {
   const { intent, match } = r;
 
@@ -543,6 +629,12 @@ function moveForIntent(
 
   switch (intent.kind) {
     case "completed":
+      // §5.6 6b — a completion reported on a structural BLOCKER auto-promotes to a
+      // cascade that frees its direct dependents, regardless of the verb used
+      // (decision #7); a non-blocker stays a plain mark_done. The DAG decides.
+      if (match.type === "task" && isBlocker(match.id, deps)) {
+        return resolveBlockerMove(match, intent.detail, deps);
+      }
       // §5.6 invariant: a check-in completion is self_assessed (the user said it),
       // never inferred — the provenance rides on the payload.
       payload = {
@@ -552,6 +644,17 @@ function moveForIntent(
         confidence: "self_assessed",
       };
       rationale = `You said you finished "${match.title}".`;
+      break;
+    case "resolved":
+      // §5.6 6b — pick by the bound task's DAG role: a blocker cascades; a plain
+      // dependent uses the existing single-task unblock (no provenance — keeps the
+      // strategist's own unblock path untouched, zero regression risk).
+      if (match.type !== "task") return null;
+      if (isBlocker(match.id, deps)) {
+        return resolveBlockerMove(match, intent.detail, deps);
+      }
+      payload = { kind: "unblock", taskId: match.id, title: match.title };
+      rationale = `Unblocking "${match.title}".`;
       break;
     case "skill_gained":
       if (match.type !== "skill_node") return null;
@@ -703,7 +806,7 @@ export function proposeFromCheckin(
       chips.push(r);
       continue;
     }
-    const move = moveForIntent(r, ctx.today, ctx.scope);
+    const move = moveForIntent(r, ctx.today, ctx.scope, ctx.deps);
     if (move) {
       pending.push({ family: "A", resolved: r, move, defaultChecked: isDefaultChecked(r) });
       continue;
