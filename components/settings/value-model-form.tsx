@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useTransition } from "react";
-import { Check } from "lucide-react";
+import { Check, Info } from "lucide-react";
 import { updateValueModelAction } from "@/lib/actions";
 import {
   NEUTRAL_AREA_WEIGHT,
@@ -50,9 +50,16 @@ const RECOVERY_OPTIONS: {
 export function ValueModelForm({
   model,
   areas,
+  weightsActive,
 }: {
   model: ValueModel;
   areas: string[];
+  /**
+   * Whether the saved area weights currently reorder the plan (server-computed).
+   * When false, they're inert (enough slack that work follows deadlines) and we
+   * say so, rather than let the user think a dormant weight is doing something.
+   */
+  weightsActive: boolean;
 }) {
   const [pending, startTransition] = useTransition();
   const [saved, setSaved] = useState(false);
@@ -170,6 +177,17 @@ export function ValueModelForm({
             </div>
           ))}
         </div>
+        {!weightsActive && (
+          <p className="flex items-start gap-2 rounded-[12px] border border-[var(--color-border)] px-3 py-2.5 text-[12px] leading-relaxed text-[var(--color-fg-muted)]">
+            <Info className="mt-0.5 size-3.5 shrink-0" aria-hidden />
+            <span>
+              These weights only reorder your plan when goals compete for the same
+              hours — a deadline with more to do than time before it. Right now you
+              have enough slack that your work just follows its deadlines, so
+              they&apos;re recorded but aren&apos;t changing anything yet.
+            </span>
+          </p>
+        )}
       </fieldset>
 
       <div className="flex items-center gap-3">
