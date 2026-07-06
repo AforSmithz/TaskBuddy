@@ -3284,6 +3284,35 @@ export async function forecastDashboard(): Promise<{
 }
 
 /**
+ * Do the Value Model's area weights currently change the plan at all? The weights
+ * scale each task's cost-of-delay, so they only re-rank work under contention
+ * (overload → WSJF) or when goals share a deadline; with enough slack the order is
+ * pure earliest-deadline-first and the weights are inert. Compares the canonical
+ * order under the saved weights against a neutral (importance = 1) build, so the
+ * settings page can honestly tell the user when their weights aren't doing anything
+ * yet. Cheap: two deterministic plan builds, no Monte Carlo.
+ */
+export async function valueWeightsAffectPlan(): Promise<boolean> {
+  const g = await gatherForecast();
+  const ctx = allocContext(g, g.commitments);
+  const base = {
+    deps: ctx.deps,
+    deadlineByProject: g.deadlineByProject,
+    budget: ctx.budget,
+    today: g.today,
+  };
+  const weighted = buildGlobalPlan({ ...base, tasks: ctx.tasks }).order;
+  const neutral = buildGlobalPlan({
+    ...base,
+    tasks: ctx.tasks.map((t) => ({ ...t, importance: 1 })),
+  }).order;
+  return (
+    weighted.length !== neutral.length ||
+    weighted.some((e, i) => e.taskId !== neutral[i].taskId)
+  );
+}
+
+/**
  * Forecast + recovery for a single project (project page), off one gather.
  * Both are null when the project has no deadline / doesn't exist.
  */
