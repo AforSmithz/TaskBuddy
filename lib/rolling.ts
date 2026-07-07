@@ -8,6 +8,7 @@ import {
   COMMITTED_PLAN_SCHEMA_VERSION,
   type CommittedPlan,
   type EffectiveOrderEntry,
+  type PlanRoll,
   type PlanRollKind,
 } from "./types";
 
@@ -450,4 +451,127 @@ export function undoRollDecision(ctx: UndoRollContext): UndoRollResult {
     j: ctx.scoreJ(ctx.candidate.order),
     restored: false,
   };
+}
+
+// --- Roll-cause diagnosis (S3c-3: "why your plan changed") -------------------
+
+/**
+ * Why a roll reshaped the plan — the single salient cause a timeline row narrates. A pure
+ * derivation from the roll's `kind` plus a diff of its order against the order it superseded
+ * (the immediately-prior roll). Deterministic-first; an optional LLM narrator (S3c-3c) would
+ * consume this same union later (design/s3c3-roll-cause-diagnosis.md §2/§3).
+ */
+export type RollCause =
+  | { kind: "initial" } // first-ever commit — no prior arrangement to diff
+  | { kind: "day-roll" } // the anchor advanced; the sticky near part re-froze
+  | { kind: "deadline-in"; project: string; others: number } // existing task newly pulled ahead
+  | { kind: "new-work"; project: string | null; count: number } // task(s) added since the prior roll
+  | { kind: "completed"; count: number } // task(s) left the plan (finished / cleared)
+  | { kind: "reprioritized" }; // same task set, only resequenced
+
+export interface RollDiagnosis {
+  cause: RollCause;
+  /** The plain-language line the timeline shows. */
+  summary: string;
+}
+
+/** The deterministic narration for a diagnosed cause. Kept beside {@link diagnoseRoll} so the
+ *  whole diagnosis is one pure unit; an LLM variant (§6) would swap only this string layer. */
+function rollSummary(cause: RollCause): string {
+  switch (cause.kind) {
+    case "initial":
+      return "First plan committed.";
+    case "day-roll":
+      return "Rolled the plan forward a day.";
+    case "deadline-in":
+      return cause.others > 0
+        ? `Pulled ${cause.project} forward to protect its deadline (and ${cause.others} other${cause.others > 1 ? "s" : ""}).`
+        : `Pulled ${cause.project} forward to protect its deadline.`;
+    case "new-work":
+      return cause.project
+        ? `Fit in new work on ${cause.project}.`
+        : `Fit in ${cause.count} new task${cause.count > 1 ? "s" : ""}.`;
+    case "completed":
+      return `Tightened up after you cleared ${cause.count} task${cause.count > 1 ? "s" : ""}.`;
+    case "reprioritized":
+      return "Reordered your near-term plan.";
+  }
+}
+
+/**
+ * Classify WHY a roll reshaped the plan. Pure: reads the roll's `kind` and diffs its arrangement
+ * against the one it superseded (`prior` = the immediately-prior roll's order, null for the
+ * first-ever commit). Fixed precedence, one salient cause per roll (the `diagnoseCause`
+ * discipline) under the coarse `kind` gate:
+ *
+ *   initial / anchor  → short-circuit (the trigger is known: first commit / date advance).
+ *   material          → deadline-in > new-work > completed > reprioritized.
+ *
+ * The deadline signal is the stored order's own `pulledAhead` + `projectName` (`allocate.ts`):
+ * an EXISTING task not pulled ahead before and pulled now was leapfrogged by deadline pressure
+ * (`deadline-in`). A BRAND-NEW pulled task is `new-work` — the cause is the addition, not a
+ * deadline move — so the two never mis-fire into each other. Authors no odds.
+ */
+function rollCause(
+  roll: Pick<PlanRoll, "kind" | "order">,
+  prior: Pick<PlanRoll, "order"> | null,
+): RollCause {
+  if (roll.kind === "initial") return { kind: "initial" };
+  if (roll.kind === "anchor") return { kind: "day-roll" };
+  // material — diff against the superseded arrangement. Only the first commit is prior-less
+  // (and that is `initial`); guard defensively so a missing prior degrades to the generic line.
+  if (!prior) return { kind: "reprioritized" };
+
+  const priorIds = new Set(prior.order.map((e) => e.taskId));
+  const priorPulled = new Set(
+    prior.order.filter((e) => e.pulledAhead).map((e) => e.taskId),
+  );
+
+  // deadline-in: an EXISTING task deadline pressure newly leapfrogged ahead. The nearest-lead
+  // (lowest-rank) one names the cause; any others are counted.
+  const newlyPulled = roll.order
+    .filter((e) => e.pulledAhead && priorIds.has(e.taskId) && !priorPulled.has(e.taskId))
+    .sort((a, b) => a.rank - b.rank);
+  if (newlyPulled.length > 0) {
+    return {
+      kind: "deadline-in",
+      project: newlyPulled[0].projectName,
+      others: newlyPulled.length - 1,
+    };
+  }
+
+  // new-work: tasks present now that were never in the prior arrangement.
+  const added = roll.order.filter((e) => !priorIds.has(e.taskId));
+  if (added.length > 0) {
+    const projects = new Set(added.map((e) => e.projectName));
+    return {
+      kind: "new-work",
+      project: projects.size === 1 ? added[0].projectName : null,
+      count: added.length,
+    };
+  }
+
+  // completed: tasks that left the plan (finished / cleared / deferred).
+  const rollIds = new Set(roll.order.map((e) => e.taskId));
+  const dropped = prior.order.filter((e) => !rollIds.has(e.taskId));
+  if (dropped.length > 0) return { kind: "completed", count: dropped.length };
+
+  // Same task set, only resequenced — the honest generic. Model / value / capacity triggers
+  // that move neither the membership nor the pull-state land here; §6 defers naming them.
+  return { kind: "reprioritized" };
+}
+
+/**
+ * Diagnose why a roll reshaped the plan (design/s3c3-roll-cause-diagnosis.md) — a structural
+ * {@link RollCause} plus the plain-language line the timeline shows. Pure and client-safe;
+ * authors no odds (it changes no arrangement, only narrates one). `prior` is the arrangement
+ * this roll superseded (the immediately-prior roll's order), or null when `roll` was the
+ * first-ever commit.
+ */
+export function diagnoseRoll(
+  roll: Pick<PlanRoll, "kind" | "order">,
+  prior: Pick<PlanRoll, "order"> | null,
+): RollDiagnosis {
+  const cause = rollCause(roll, prior);
+  return { cause, summary: rollSummary(cause) };
 }
