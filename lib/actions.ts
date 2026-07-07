@@ -7,6 +7,7 @@ import {
   addGoalCriterion,
   applyReroute,
   applyTaskModifications,
+  commitRollingPlan,
   commitStrategyBundle,
   createJointScorer,
   type JointScorer,
@@ -95,7 +96,7 @@ function pick(formData: FormData, name: string): string | null {
   return value && value !== AUTO ? value : null;
 }
 
-function revalidateAll() {
+function revalidatePaths() {
   revalidatePath("/");
   revalidatePath("/board");
   revalidatePath("/entries", "layout");
@@ -103,6 +104,25 @@ function revalidateAll() {
   revalidatePath("/activities");
   // The strategist banner keys off capacity/odds, which activities change.
   revalidatePath("/strategy");
+}
+
+/**
+ * Run after every mutation: roll the rolling-horizon committed plan forward (S3c-1) then
+ * revalidate the affected paths. Mutations are exactly the situation-changing events (complete /
+ * add / defer / reroute / log-time → model update), so this is where the committed row is kept
+ * fresh; the read paths only DECIDE what to show and persist nothing (design §Decisions #6). The
+ * roll is best-effort — any failure is swallowed so it can never break the mutation that
+ * triggered it (the next mutation re-rolls, and the read path shows a correct plan meanwhile).
+ * The date-guard lives inside `commitRollingPlan` (an unchanged fingerprint + anchor is a cheap
+ * no-op). Named `revalidateAll` at the call sites for continuity with the pre-S3c signature.
+ */
+async function revalidateAll() {
+  try {
+    await commitRollingPlan();
+  } catch (err) {
+    console.error("rolling-plan roll failed (non-fatal):", err);
+  }
+  revalidatePaths();
 }
 
 /**
@@ -177,7 +197,7 @@ export async function confirmDraftAction(
 ): Promise<void> {
   await requireUser();
   await confirmDraft(entryId, declinedTaskIds, classification);
-  revalidateAll();
+  await revalidateAll();
   redirect(`/entries/${entryId}`);
 }
 
@@ -185,7 +205,7 @@ export async function confirmDraftAction(
 export async function discardDraftAction(entryId: string): Promise<void> {
   await requireUser();
   await discardDraft(entryId);
-  revalidateAll();
+  await revalidateAll();
   redirect("/create");
 }
 
@@ -216,14 +236,14 @@ export async function updateTaskStatusAction(
   if (status === "done" && confidence !== "inferred" && local) {
     await logWorkSession({ taskId, minutes: 0, kind: "complete", local });
   }
-  revalidateAll();
+  await revalidateAll();
 }
 
 /** Elevate an already-done task's completion to `verified` (keeps `completed_at`). */
 export async function verifyTaskAction(taskId: string): Promise<void> {
   await requireUser();
   await updateTask(taskId, { completion_confidence: "verified" });
-  revalidateAll();
+  await revalidateAll();
 }
 
 // --- Definition of done (goal criteria) -------------------------------------
@@ -236,7 +256,7 @@ export async function addGoalCriterionAction(
   await requireUser();
   if (!text.trim()) return;
   await addGoalCriterion(goalId, text);
-  revalidateAll();
+  await revalidateAll();
 }
 
 /** Mark a criterion met (at a confidence) or unmet. */
@@ -247,7 +267,7 @@ export async function setGoalCriterionMetAction(
 ): Promise<void> {
   await requireUser();
   await setGoalCriterionMet(id, met, met ? confidence : null);
-  revalidateAll();
+  await revalidateAll();
 }
 
 /** Reclassify a goal as a project or a learning goal. */
@@ -257,8 +277,7 @@ export async function setGoalKindAction(
 ): Promise<void> {
   await requireUser();
   await setGoalKind(goalId, kind);
-  revalidatePath("/");
-  revalidatePath("/projects", "layout");
+  await revalidateAll();
 }
 
 /**
@@ -272,7 +291,7 @@ export async function decomposeGoalAction(goalId: string): Promise<void> {
   if (!goal || goal.kind !== "learning") return;
   const skills = await decomposeLearningGoal(goal.name, goal.description);
   await replaceSkillNodes(goalId, skills);
-  revalidatePath("/projects", "layout");
+  await revalidateAll();
 }
 
 /** Mark a skill node attained (at a confidence) or not-yet. */
@@ -283,14 +302,14 @@ export async function setSkillAttainedAction(
 ): Promise<void> {
   await requireUser();
   await setSkillNodeAttained(id, attained, attained ? confidence : null);
-  revalidatePath("/projects", "layout");
+  await revalidateAll();
 }
 
 /** Remove a criterion from a goal's definition of done. */
 export async function removeGoalCriterionAction(id: string): Promise<void> {
   await requireUser();
   await removeGoalCriterion(id);
-  revalidateAll();
+  await revalidateAll();
 }
 
 /** Assign a task to a life-area (Today-page tabs). */
@@ -300,7 +319,7 @@ export async function updateTaskAreaAction(
 ): Promise<void> {
   await requireUser();
   await updateTask(taskId, { area });
-  revalidateAll();
+  await revalidateAll();
 }
 
 /**
@@ -313,7 +332,7 @@ export async function deferTaskAction(
 ): Promise<void> {
   await requireUser();
   await updateTask(taskId, { deferred });
-  revalidateAll();
+  await revalidateAll();
 }
 
 /**
@@ -325,7 +344,7 @@ export async function deferTaskAction(
 export async function applyTriageAction(taskIds: string[]): Promise<void> {
   await requireUser();
   await Promise.all(taskIds.map((id) => updateTask(id, { deferred: true })));
-  revalidateAll();
+  await revalidateAll();
 }
 
 /**
@@ -336,7 +355,7 @@ export async function applyTriageAction(taskIds: string[]): Promise<void> {
 export async function undoTriageAction(taskIds: string[]): Promise<void> {
   await requireUser();
   await Promise.all(taskIds.map((id) => updateTask(id, { deferred: false })));
-  revalidateAll();
+  await revalidateAll();
 }
 
 /**
@@ -349,14 +368,14 @@ export async function rescheduleTaskAction(
 ): Promise<void> {
   await requireUser();
   await updateTask(taskId, { due_date: dueDate });
-  revalidateAll();
+  await revalidateAll();
 }
 
 /** Clear a task's blocker and return it to the active queue. */
 export async function unblockTaskAction(taskId: string): Promise<void> {
   await requireUser();
   await updateTask(taskId, { status: "todo", blocked_by: null });
-  revalidateAll();
+  await revalidateAll();
 }
 
 /** Record actual time spent on a task (estimated vs actual tracking). */
@@ -368,7 +387,7 @@ export async function logActualTimeAction(
   await updateTask(taskId, {
     actual_minutes: Math.max(0, Math.round(minutes)),
   });
-  revalidateAll();
+  await revalidateAll();
 }
 
 // --- Time budget & forecast -------------------------------------------------
@@ -380,8 +399,7 @@ export async function setProjectDeadlineAction(
 ): Promise<void> {
   await requireUser();
   await setProjectDeadline(projectId, deadline || null);
-  revalidatePath("/");
-  revalidatePath("/projects", "layout");
+  await revalidateAll();
 }
 
 /** Update the weekly availability template. */
@@ -390,8 +408,7 @@ export async function setAvailabilityAction(
 ): Promise<void> {
   await requireUser();
   await setAvailability(rows);
-  revalidatePath("/");
-  revalidatePath("/projects", "layout");
+  await revalidateAll();
 }
 
 /**
@@ -414,7 +431,7 @@ export async function setAutoStrategyAction(value: boolean): Promise<void> {
 export async function updateValueModelAction(model: ValueModel): Promise<void> {
   await requireUser();
   await setValueModel(model);
-  revalidateAll();
+  await revalidateAll();
 }
 
 /**
@@ -427,7 +444,7 @@ export async function updateWindowAvailabilityAction(
 ): Promise<void> {
   await requireUser();
   await setWindowAvailability(avail);
-  revalidateAll();
+  await revalidateAll();
 }
 
 /** Override deployable hours for one specific date. */
@@ -437,8 +454,7 @@ export async function setOverrideAction(
 ): Promise<void> {
   await requireUser();
   await setOverride(date, hours);
-  revalidatePath("/");
-  revalidatePath("/projects", "layout");
+  await revalidateAll();
 }
 
 /**
@@ -453,8 +469,7 @@ export async function logCommitmentAction(
   await requireUser();
   try {
     const pitCalls = await logCommitment(date, hours, label);
-    revalidatePath("/");
-    revalidatePath("/projects", "layout");
+    await revalidateAll();
     return { pitCalls, error: null };
   } catch (err) {
     console.error("logCommitment failed:", err);
@@ -489,7 +504,7 @@ export async function acceptRecoveryTasksAction(
 ): Promise<void> {
   await requireUser();
   await addCorrectiveTasks(projectId, tasks);
-  revalidateAll();
+  await revalidateAll();
 }
 
 /**
@@ -516,7 +531,7 @@ export async function applyModificationsAction(
 ): Promise<void> {
   await requireUser();
   await applyTaskModifications(projectId, mods);
-  revalidateAll();
+  await revalidateAll();
 }
 
 /**
@@ -549,7 +564,7 @@ export async function applyRerouteAction(
 ): Promise<void> {
   await requireUser();
   await applyReroute(projectId, replacedTaskIds, tasks, degradedCriteria);
-  revalidateAll();
+  await revalidateAll();
 }
 
 // --- Strategy bundles: snapshot-on-commit + undo (S1 step 3 / §1.3) ----------
@@ -573,7 +588,7 @@ export async function commitStrategyBundleAction(
     oddsAfter,
     reason,
   });
-  revalidateAll();
+  await revalidateAll();
   return version;
 }
 
@@ -715,7 +730,7 @@ export async function runCheckinAction(
 export async function undoPlanVersionAction(id: string): Promise<void> {
   await requireUser();
   await undoPlanVersion(id);
-  revalidateAll();
+  await revalidateAll();
 }
 
 /**
@@ -762,7 +777,7 @@ export async function createActivityAction(
 ): Promise<void> {
   await requireUser();
   await createRecurringActivity(input);
-  revalidateAll();
+  await revalidateAll();
 }
 
 /** Patch a recurring activity (edit fields). */
@@ -772,7 +787,7 @@ export async function updateActivityAction(
 ): Promise<void> {
   await requireUser();
   await updateRecurringActivity(id, patch);
-  revalidateAll();
+  await revalidateAll();
 }
 
 /** Toggle whether the strategist may auto-sacrifice this activity. */
@@ -782,14 +797,14 @@ export async function setActivityProtectedAction(
 ): Promise<void> {
   await requireUser();
   await updateRecurringActivity(id, { protected: isProtected });
-  revalidateAll();
+  await revalidateAll();
 }
 
 /** Soft-archive a recurring activity (keeps completion history). */
 export async function archiveActivityAction(id: string): Promise<void> {
   await requireUser();
   await updateRecurringActivity(id, { active: false });
-  revalidateAll();
+  await revalidateAll();
 }
 
 /** Log a completed session for an activity today (minutes default to its estimate). */
@@ -805,7 +820,7 @@ export async function logActivityCompletionAction(
   if (local) {
     await logWorkSession({ activityId, minutes: minutes ?? 0, kind: "complete", local });
   }
-  revalidateAll();
+  await revalidateAll();
 }
 
 /** Skip an activity's current instance today (reversible). */
@@ -815,7 +830,7 @@ export async function skipActivityAction(
 ): Promise<void> {
   await requireUser();
   await skipActivity(activityId, date);
-  revalidateAll();
+  await revalidateAll();
 }
 
 /** Undo a skip. */
@@ -825,7 +840,7 @@ export async function unskipActivityAction(
 ): Promise<void> {
   await requireUser();
   await unskipActivity(activityId, date);
-  revalidateAll();
+  await revalidateAll();
 }
 
 /** Apply a strategist `skip_activity` move: skip the activity for the rest of
@@ -835,7 +850,7 @@ export async function skipActivityForWeekAction(
 ): Promise<void> {
   await requireUser();
   await skipActivityForWeek(activityId);
-  revalidateAll();
+  await revalidateAll();
 }
 
 /** Quick-add a one-off errand (a plain task under the reserved Errands project). */
@@ -847,5 +862,5 @@ export async function quickAddErrandAction(
   await requireUser();
   if (!title.trim()) return;
   await createErrandTask(title, dueDate ?? null, estimatedMinutes ?? 30);
-  revalidateAll();
+  await revalidateAll();
 }
