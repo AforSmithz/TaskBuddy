@@ -1289,6 +1289,60 @@ export interface CommittedPlan {
   committedAt: string;
 }
 
+// --- Rolling-horizon history (S3c-2) ----------------------------------------
+
+/**
+ * Why a passive roll fired — the seam S3c-3's `diagnoseRoll` reads to narrate it
+ * ("shifted because the Recital deadline moved in"). `material` = the stability
+ * gate let a materially-better candidate through; `anchor` = the date advanced and
+ * the near part re-froze; `initial` = the first-ever commit (no prior arrangement
+ * to diff, so `prevJ` is null). Stored as free text (like {@link TaskOrigin}) so a
+ * future roll-kind needs no migration; validated in TS.
+ */
+export type PlanRollKind = "material" | "anchor" | "initial";
+
+/**
+ * One retained automatic roll of the committed plan (OVERHAUL §5a substrate S3c-2,
+ * design/s3c2-passive-roll-history.md). Where {@link CommittedPlan} is the single
+ * CURRENT plan, a `PlanRoll` is a capped history entry the rolling wrapper appends
+ * each time it actually rolls (a material better-candidate or an anchor advance,
+ * never a stay-put reload) — the memory that powers the "how my plan evolved"
+ * timeline and a roll-undo. A SIBLING to {@link PlanVersion}, not an overload:
+ * `PlanVersion` undoes an applied strategy bundle's ROW mutations, whereas a
+ * `PlanRoll` retains an ARRANGEMENT snapshot whose undo restores a prior order
+ * THROUGH reconcile + re-price (never resurrecting a completed/deleted task).
+ * Authors no odds — it stores an arrangement + its soft score `j` only. Capped at
+ * the most recent 50 per user (oldest pruned).
+ */
+export interface PlanRoll {
+  id: string;
+  /** ISO timestamp the roll fired. */
+  rolledAt: string;
+  /** The committed plan's frozen-zone (anchor) day at roll time (CommittedPlan.anchor). */
+  anchor: string;
+  /** The committed plan's situation fingerprint at roll time (CommittedPlan.fingerprint). */
+  fingerprint: string;
+  /** The committed arrangement's soft score `J` (from `arrangementScore`). */
+  j: number;
+  /** Why the roll fired — the diff seam S3c-3's `diagnoseRoll` reads. */
+  kind: PlanRollKind;
+  /** The superseded arrangement's `J`; null for the first-ever commit (`initial`). */
+  prevJ: number | null;
+  /**
+   * The committed cross-project order this roll retained — the ARRANGED, gated
+   * order (post `gatedReorder`), same shape as `CommittedPlan.order`. The replay
+   * basis a roll-undo feeds back through reconcile as a preference seed (never
+   * restored-verbatim as truth), so it can't resurrect a completed/deleted task.
+   * Persisted to the `plan_order` jsonb column (not `order`, a reserved word).
+   */
+  order: EffectiveOrderEntry[];
+  /** Set when this roll is undone; the entry stays in history (struck-through). Null while it stands. */
+  revertedAt: string | null;
+  /** Reuse {@link COMMITTED_PLAN_SCHEMA_VERSION}: a row whose version doesn't match
+   *  the current `order` shape is treated as invalid, like a stale CommittedPlan. */
+  schemaVersion: number;
+}
+
 // --- §5.6 NL check-in / reflection loop -------------------------------------
 //
 // The interpret → propose → review → commit loop over a free-form activity
