@@ -1,4 +1,5 @@
 import "server-only";
+import { createHash } from "crypto";
 import type {
   GoalKind,
   SkillNode,
@@ -27,6 +28,7 @@ import type {
   ForecastResult,
   GoalCriterion,
   OpenQuestion,
+  CommittedPlan,
   PitCall,
   PlanVersion,
   PortfolioStrategy,
@@ -49,7 +51,7 @@ import type {
   TaskStatus,
   TriageMove,
 } from "./types";
-import { ON_TRACK_PROBABILITY, isOnTrack } from "./types";
+import { COMMITTED_PLAN_SCHEMA_VERSION, ON_TRACK_PROBABILITY, isOnTrack } from "./types";
 import { extractEntry } from "./extraction";
 import { estimationModel } from "./generate";
 import {
@@ -80,6 +82,7 @@ import {
   earliestAchievableDeadline,
   forecast,
   globalForecast,
+  globalForecastJoint,
   recoveryMoves,
   type CandidateTask,
   type ForecastOptions,
@@ -95,12 +98,17 @@ import {
   type GlobalPlan,
 } from "./allocate";
 import {
+  arrangementScore,
   comfortSmooth,
   gatedReorder,
   windowCapacities,
   windowProfileFromEnergy,
+  type ArrangeOrderOptions,
+  type ComfortSmoothResult,
+  type GatedReorderResult,
   type WindowProfile,
 } from "./arrange";
+import { rollDecision, type RollContext, type RollDecisionResult } from "./rolling";
 import {
   SAMPLE_ACTIVITIES,
   SAMPLE_ENTRIES,
@@ -194,6 +202,9 @@ interface MemDB {
   portfolioStrategy: PortfolioStrategy | null;
   /** Applied strategy bundles, newest-first — the plan version history (§1.3). */
   planVersions: PlanVersion[];
+  /** The plan the user is currently following — the rolling-horizon committed row
+   *  (S3c-1), or null until first committed. */
+  committedPlan: CommittedPlan | null;
   seeded: boolean;
 }
 
@@ -226,6 +237,7 @@ function memDB(): MemDB {
       valueModel: null,
       portfolioStrategy: null,
       planVersions: [],
+      committedPlan: null,
       seeded: false,
     };
   }
@@ -1304,6 +1316,50 @@ export async function setCachedStrategy(
   }
   await ensureSeeded();
   memDB().portfolioStrategy = strategy;
+}
+
+// --- Rolling-horizon committed plan (S3c-1) ---------------------------------
+
+/**
+ * The plan the user is currently following (the rolling-horizon committed row), or null
+ * if none has been committed yet. One row per user (mirrors the strategy cache). A row
+ * whose `schemaVersion` doesn't match the current one is treated as absent — safe
+ * invalidation to the no-regret fresh path rather than a mis-replay. Read on every load by
+ * both read-path deciders (which persist nothing) and by the mutation-time roll.
+ */
+export async function getCommittedPlan(): Promise<CommittedPlan | null> {
+  let plan: CommittedPlan | null;
+  if (isSupabaseConfigured()) {
+    const supabase = await getRequestClient();
+    const { data } = await supabase
+      .from("committed_plan")
+      .select("plan")
+      .maybeSingle();
+    plan = (data as { plan?: CommittedPlan } | null)?.plan ?? null;
+  } else {
+    await ensureSeeded();
+    plan = memDB().committedPlan;
+  }
+  if (plan && plan.schemaVersion !== COMMITTED_PLAN_SCHEMA_VERSION) return null;
+  return plan;
+}
+
+/** Persist the committed plan (one row per user, upserted). Called only by the
+ *  mutation-time roll (`commitRollingPlan`); the read path never writes. */
+export async function setCommittedPlan(plan: CommittedPlan): Promise<void> {
+  if (isSupabaseConfigured()) {
+    const supabase = await getRequestClient();
+    const user_id = await currentUserId(supabase);
+    const { error } = await supabase.from("committed_plan").upsert(
+      { user_id, plan, updated_at: new Date().toISOString() },
+      { onConflict: "user_id" },
+    );
+    if (error)
+      throw new Error(`Supabase committed_plan upsert failed: ${error.message}`);
+    return;
+  }
+  await ensureSeeded();
+  memDB().committedPlan = plan;
 }
 
 // --- Plan version history (S1 step 3 / vision §1.3) -------------------------
@@ -2903,6 +2959,7 @@ function buildResolveInput(
   comfortCapMinutes: number | null,
   arrangeReorder: boolean,
   thinBuffer: ReadonlyMap<string, number>,
+  committedOrder: string[] | null,
 ): ResolveInput {
   return {
     tasks: ctx.tasks,
@@ -2929,28 +2986,48 @@ function buildResolveInput(
     // rebuilds the Map and feeds the SAME `arrangeOrder`, so the buffer-biased order stays
     // bit-identical (it can't be recomputed client-side — needs the per-project forecast dist).
     thinBufferUrgency: Object.fromEntries(thinBuffer),
+    // S3c-1 — when the rolling-horizon wrapper is showing a STICKY committed plan, ship its
+    // order (task-id sequence, already reconciled to the current set) so the client's empty
+    // (base) subset prices it VERBATIM (reorder OFF) instead of re-deriving + re-arranging —
+    // the server already arranged + gated it, so this is a pure replay and the base re-solve
+    // stays client==server EXACT. Null (fresh candidate) ⇒ the pre-S3c path, bit-for-bit.
+    committedOrder: committedOrder ?? undefined,
   };
 }
 
-export async function createJointScorer(): Promise<JointScorer> {
-  // The cached strategy is the temporal baseline for cause-diagnosis: the
-  // optimizer reads each recovery's `cause` for the step-5 response-class
-  // tiebreak, and `constraint_change` can only be diagnosed against it (a task
-  // added since, or odds that have since dropped). Without it the optimizer's
-  // causes would silently collapse to the residual-only classes. Loaded in
-  // parallel with the gather so it adds no latency.
-  const [g, cachedStrategy] = await Promise.all([
-    gatherForecast(),
-    getCachedStrategy(),
-  ]);
-  const ctx = allocContext(g, g.commitments);
-  // S3b Phase 3 slice 2 — decide the comfort cap ONCE on the base canonical order (the
-  // same decision `forecastDashboard` makes), then meter EVERY joint re-solve by that one
-  // scalar: the base, the optimizer's move probes, the cumulative display, AND the client
-  // subset re-solve. This closes the slice-1 divergence — the strategy page, the dashboard
-  // headline, and the live "before" now all quote the comfort-capped plan you follow.
-  // No-regret: comfortCapMinutes === null (no hard-work signal / no afforded slack) ⇒ the
-  // exact pre-slice-2 (windowed) path, bit-for-bit.
+// --- Rolling-horizon roll cycle (S3c-1) -------------------------------------
+//
+// The S3b arrangement pipeline (`buildGlobalPlan → comfortSmooth → gatedReorder`) prices the
+// best arrangement RIGHT NOW; S3c decides which already-priced arrangement to keep committing
+// to as time advances. `buildArrangement` is the shared pipeline both read paths and the
+// mutation-time roll run (so all three price identically); `rollContextFor` wraps it as the
+// pure `rollDecision`'s inputs (with the MC reprice + soft-J scorer injected as closures — the
+// odds engine stays here, the decision logic lives in `lib/rolling.ts`). Reads DECIDE what to
+// show and persist nothing; the write path (`commitRollingPlan`) is the only writer. See
+// `design/s3c-rolling-horizon-wrapper.md`.
+
+/** The S3b arrangement bundle for a gather: the canonical plan, the comfort decision, the
+ *  thin-buffer urgency map, and the odds-gated candidate arrangement (order + priced odds) the
+ *  user would otherwise follow. Computed once and shared by every S3c call site so the
+ *  displayed plan, the strategy base, and the roll all price the SAME candidate. */
+interface ArrangementBundle {
+  canonical: GlobalPlan;
+  smoothed: ComfortSmoothResult;
+  thinBuffer: ReadonlyMap<string, number>;
+  comfortCapMinutes: number | null;
+  /** The odds-gated within-day reorder — `.order` is the display/candidate order, `.joint`
+   *  its priced odds, `.changed` the single boolean the S1 client + probes replay. */
+  reorder: GatedReorderResult;
+  arrangeReorder: boolean;
+  /** The arrange options the candidate was built under — reused by the churn bucketing +
+   *  the soft-J scorer so the roll measures the same plan the forecast priced. */
+  arrangeOpts: ArrangeOrderOptions;
+}
+
+/** Run the S3b arrangement pipeline for a gather (the same steps `forecastDashboard` /
+ *  `createJointScorer` already ran inline). No Monte-Carlo beyond what `comfortSmooth` +
+ *  `gatedReorder` already do. Pure over the gather. */
+function buildArrangement(g: ForecastGather, ctx: AllocContext): ArrangementBundle {
   const canonical = buildGlobalPlan({
     tasks: ctx.tasks,
     deps: ctx.deps,
@@ -2958,26 +3035,13 @@ export async function createJointScorer(): Promise<JointScorer> {
     budget: ctx.budget,
     today: g.today,
   });
-  const smoothed = comfortSmooth(
-    canonical.order,
-    ctx.capacities,
-    g.deadlineByProject,
-    g.today,
-    { forecast: forecastOptions(g.model), windowProfile: g.windowProfile },
-  );
+  const smoothed = comfortSmooth(canonical.order, ctx.capacities, g.deadlineByProject, g.today, {
+    forecast: forecastOptions(g.model),
+    windowProfile: g.windowProfile,
+  });
   const comfortCapMinutes = smoothed.comfortCapMinutes;
-  // S3b Phase 3 `w_buffer` lever (graded in Phase 4) — the at-risk projects' thin-buffer
-  // URGENCY, read off the comfort baseline's odds. The reorder gives these projects' work
-  // first claim on the day's fast windows in proportion to how thin; decided once on the base
-  // (like the cap) and replayed by every joint re-solve + the client. Empty ⇒ no buffer bias.
   const thinBuffer = thinBufferUrgencyMap(g, g.commitments, smoothed.joint.byProject);
-  // S3b Phase 3 slice 3 — decide the within-day reorder ONCE on the base canonical order
-  // (the same decision `forecastDashboard` makes), gated against the comfort baseline.
-  // `arrangeReorder` is the single boolean every joint re-solve replays: the base, the
-  // optimizer's move probes, the cumulative display, AND the client subset re-solve all
-  // flow the arranged order iff it is set. No-regret: false (no odds-relevant signal, or
-  // the gate declined) ⇒ the exact pre-slice-3 (comfort/windowed) path, bit-for-bit.
-  const arrangeReorder = gatedReorder(
+  const reorder = gatedReorder(
     canonical.order,
     ctx.capacities,
     g.deadlineByProject,
@@ -2990,11 +3054,183 @@ export async function createJointScorer(): Promise<JointScorer> {
       comfortCapMinutes,
       thinBufferUrgency: thinBuffer,
     },
-  ).changed;
+  );
+  const arrangeOpts: ArrangeOrderOptions = {
+    windowProfile: g.windowProfile,
+    comfortCapMinutes,
+    thinBufferUrgency: thinBuffer,
+  };
+  return {
+    canonical,
+    smoothed,
+    thinBuffer,
+    comfortCapMinutes,
+    reorder,
+    arrangeReorder: reorder.changed,
+    arrangeOpts,
+  };
+}
+
+/**
+ * A stable hash of the situation the committed plan is anchored to — the roll trigger. Reuses
+ * the `computePortfolioFingerprint` discipline (bucketed due-dates so far-future edits don't
+ * churn) but reads the already-built gather (pure, no re-query) and EXTENDS it with the
+ * window-profile + velocity generation (`g.windowProfile` / `g.model`) so an S2 model update is
+ * itself a legitimate roll trigger, and the value model (importance re-ranks under contention).
+ * An unchanged fingerprint + anchor ⇒ nothing plan-relevant moved ⇒ the roll stays put cheaply.
+ */
+function rollFingerprint(g: ForecastGather, ctx: AllocContext): string {
+  // Coarse due bucket relative to today — bucketing (not the raw date) keeps far-future
+  // deadline edits from churning the fingerprint while still catching a deadline crossing into
+  // "overdue" or "soon" (the `computePortfolioFingerprint` discipline, kept local + pure).
+  const dueBucket = (dl: string): "overdue" | "soon" | "future" => {
+    const d = dl.slice(0, 10);
+    if (d < g.today) return "overdue";
+    const [ay, am, ad] = g.today.split("-").map(Number);
+    const [by, bm, bd] = d.split("-").map(Number);
+    const days = Math.round((Date.UTC(by, bm - 1, bd) - Date.UTC(ay, am - 1, ad)) / 86_400_000);
+    return days <= 7 ? "soon" : "future";
+  };
+  const tasks = ctx.tasks
+    .map((t) => ({
+      id: t.id,
+      est: t.estimatedMinutes,
+      diff: t.difficulty ?? 0,
+      imp: t.impact,
+      urg: t.urgency,
+      risk: t.risk,
+      w: t.importance ?? 1,
+    }))
+    .sort((a, b) => a.id.localeCompare(b.id));
+  const deadlines = [...g.deadlineByProject]
+    .map(([id, dl]) => [id, dl ? dueBucket(dl) : "none"] as const)
+    .sort((a, b) => a[0].localeCompare(b[0]));
+  const commitments = g.commitments
+    .map((c) => ({ date: c.date.slice(0, 10), hours: c.hours }))
+    .sort((a, b) => a.date.localeCompare(b.date) || a.hours - b.hours);
+  // Availability + overrides are as capacity-determining as commitments (all three feed
+  // `deployableMinutes`), so a change to either must roll the plan — hash them too, else the
+  // write-side fast path would wrongly short-circuit on a pure capacity edit.
+  const availability = g.availability
+    .map((a) => ({ weekday: a.weekday, hours: a.hours }))
+    .sort((a, b) => a.weekday - b.weekday);
+  const overrides = g.overrides
+    .map((o) => ({ date: o.date.slice(0, 10), hours: o.hours }))
+    .sort((a, b) => a.date.localeCompare(b.date));
+  const canonical = JSON.stringify({
+    today: g.today,
+    tasks,
+    deadlines,
+    commitments,
+    availability,
+    overrides,
+    // The S2 window-velocity + global-velocity generation — a model update rolls the plan.
+    windowProfile: g.windowProfile,
+    model: { meanLog: g.model.meanLog, sigma: g.model.sigma, n: g.model.sampleSize },
+    valueModel: g.valueModel,
+  });
+  return createHash("sha256").update(canonical).digest("hex");
+}
+
+/** The forecast options a committed order is REPRICED under — the same composition
+ *  (`comfortCapMinutes` + windowed pricing) `gatedReorder` / `jointOddsWithMoves` use for the
+ *  candidate, so the sticky plan is weighed apples-to-apples against the fresh one. */
+function repriceOptionsFor(
+  g: ForecastGather,
+  ctx: AllocContext,
+  bundle: ArrangementBundle,
+): ForecastOptions {
+  const opts: ForecastOptions = { ...forecastOptions(g.model) };
+  if (bundle.comfortCapMinutes != null) opts.comfortCapMinutes = bundle.comfortCapMinutes;
+  if (g.windowProfile) opts.windowCapacities = windowCapacities(ctx.capacities, g.windowProfile);
+  return opts;
+}
+
+/** Build the pure `rollDecision` inputs for a gather + its arrangement bundle. The Monte-Carlo
+ *  reprice and the soft-`J` scorer are injected as closures over the CURRENT situation, so the
+ *  reconciled committed plan is priced apples-to-apples with the candidate (same comfort cap +
+ *  window pricing), and the decision module authors no odds itself. */
+function rollContextFor(
+  g: ForecastGather,
+  ctx: AllocContext,
+  bundle: ArrangementBundle,
+  committed: CommittedPlan | null,
+): RollContext {
+  const repriceOpts = repriceOptionsFor(g, ctx, bundle);
+  return {
+    committed,
+    canonicalOrder: bundle.canonical.order,
+    candidate: { order: bundle.reorder.order, allOnTime: bundle.reorder.joint.allOnTime },
+    anchor: g.today,
+    fingerprint: rollFingerprint(g, ctx),
+    repriceAllOnTime: (order) =>
+      globalForecastJoint(order, ctx.capacities, g.deadlineByProject, g.today, repriceOpts).allOnTime,
+    scoreJ: (order) => arrangementScore(order, ctx.capacities, g.today, bundle.arrangeOpts),
+    capacities: ctx.capacities,
+    arrangeOpts: bundle.arrangeOpts,
+  };
+}
+
+/**
+ * Roll the committed plan forward and PERSIST the winner — the write-path mutation (§4 step 6).
+ * Called after every mutation (the situation-changing events); the read paths decide what to
+ * show but never write. Fast path: an unchanged fingerprint + anchor with an existing row means
+ * nothing plan-relevant moved, so it re-prices nothing and writes nothing. The mutation hook
+ * (`afterMutation` in `actions.ts`) calls this best-effort — swallowing any failure so a roll
+ * can never break the mutation that triggered it (the read path still shows a correct plan, and
+ * the next mutation re-rolls). Returns the decision for observability.
+ */
+export async function commitRollingPlan(): Promise<RollDecisionResult | null> {
+  const g = await gatherForecast();
+  const ctx = allocContext(g, g.commitments);
+  const committed = await getCommittedPlan();
+  // Fast path — nothing plan-relevant changed since the committed row: keep it, no MC, no write.
+  if (
+    committed &&
+    committed.anchor === g.today &&
+    committed.fingerprint === rollFingerprint(g, ctx)
+  ) {
+    return null;
+  }
+  const bundle = buildArrangement(g, ctx);
+  const decision = rollDecision(rollContextFor(g, ctx, bundle, committed));
+  if (decision.shouldPersist) await setCommittedPlan(decision.toPersist);
+  return decision;
+}
+
+export async function createJointScorer(): Promise<JointScorer> {
+  // The cached strategy is the temporal baseline for cause-diagnosis: the
+  // optimizer reads each recovery's `cause` for the step-5 response-class
+  // tiebreak, and `constraint_change` can only be diagnosed against it (a task
+  // added since, or odds that have since dropped). Without it the optimizer's
+  // causes would silently collapse to the residual-only classes. Loaded in
+  // parallel with the gather so it adds no latency.
+  const [g, cachedStrategy, committed] = await Promise.all([
+    gatherForecast(),
+    getCachedStrategy(),
+    getCommittedPlan(),
+  ]);
+  const ctx = allocContext(g, g.commitments);
+  // The S3b arrangement pipeline decides the comfort cap, the thin-buffer urgency, and the
+  // odds-gated within-day reorder ONCE on the base canonical order (the same decision
+  // `forecastDashboard` makes), then meters EVERY joint re-solve by them: the base, the
+  // optimizer's move probes, the cumulative display, AND the client subset re-solve. No-regret:
+  // no cap / no reorder signal ⇒ the exact pre-S3b (windowed) path, bit-for-bit.
+  const bundle = buildArrangement(g, ctx);
+  const { comfortCapMinutes, thinBuffer, arrangeReorder } = bundle;
+  // S3c-1 rolling horizon — decide whether to keep committing to the plan the user is already
+  // following (sticky) or adopt the fresh candidate. Reads persist NOTHING (the mutation-time
+  // roll is the sole writer); this only picks the "before" the strategy page reasons from.
+  // When sticky, the committed order is priced + shipped VERBATIM with the reorder flag OFF,
+  // so the S1 client re-solve of the empty (base) subset stays EXACT (decision #5). Move-probes
+  // (non-empty subsets) still use the fresh arrangement — a strategy move is a re-plan, never a
+  // sticky hold. No-regret: no committed row ⇒ the candidate verbatim ⇒ pre-S3c path, bit-for-bit.
+  const decision = rollDecision(rollContextFor(g, ctx, bundle, committed));
+  const committedOrder = decision.sticky ? decision.order.map((e) => e.taskId) : null;
   // The joint re-solve context carries the cap + the reorder flag + the thin-buffer set
-  // (mirrors how `windowProfile` rides on `g`); every `jointOddsWithMoves` /
-  // `cumulativeJointOdds` below reads them off `jg`.
-  const jg = { ...g, comfortCapMinutes, arrangeReorder, thinBufferUrgency: thinBuffer };
+  // (mirrors how `windowProfile` rides on `g`) plus the sticky committed order; every
+  // `jointOddsWithMoves` / `cumulativeJointOdds` below reads them off `jg`.
+  const jg = { ...g, comfortCapMinutes, arrangeReorder, thinBufferUrgency: thinBuffer, committedOrder };
   const base = jointOddsWithMoves(jg, ctx, []);
   const baseByProject = base.byProject;
 
@@ -3014,7 +3250,7 @@ export async function createJointScorer(): Promise<JointScorer> {
     baseAllOnTime: base.allOnTime,
     score: (moves) => jointOddsWithMoves(jg, ctx, moves, JOINT_PROBE_ITERATIONS),
     cumulative: (ordered) => cumulativeJointOdds(jg, ctx, ordered),
-    resolveInput: buildResolveInput(g, ctx, comfortCapMinutes, arrangeReorder, thinBuffer),
+    resolveInput: buildResolveInput(g, ctx, comfortCapMinutes, arrangeReorder, thinBuffer, committedOrder),
   };
 }
 
@@ -3285,72 +3521,53 @@ export async function forecastDashboard(): Promise<{
   agendaOrder: GlobalPlan["order"];
   model: EstimationModel;
 }> {
-  const [g, activities, completions, cachedStrategy] = await Promise.all([
+  const [g, activities, completions, cachedStrategy, committed] = await Promise.all([
     gatherForecast(),
     listRecurringActivities(),
     listActivityCompletions(),
     getCachedStrategy(),
+    getCommittedPlan(),
   ]);
   const ctx = allocContext(g, g.commitments);
-  // The canonical plan over all current open work (no triage shedding) — the
-  // cross-project order + the unified schedule. Recurring is NOT in here, so the
-  // schedule/forecast never double-count its already-drained hours.
-  const canonical = buildGlobalPlan({
-    tasks: ctx.tasks,
-    deps: ctx.deps,
-    deadlineByProject: g.deadlineByProject,
-    budget: ctx.budget,
-    today: g.today,
-  });
-  // S3b Phase 3 (slice 1): spread HARD work across days up to a comfort cap, as far as the
-  // odds gate allows (resource smoothing within slack — productivity research caps focused
-  // work at ~3-4 h/day). The order is UNCHANGED; only WHEN hard work lands shifts. The
-  // returned odds are the comfort plan's, so the headline is always the plan you follow
-  // (no-regret: no hard-work signal or no affordable slack ⇒ canonical, bit-for-bit).
-  // Localized to the dashboard this slice — the strategy optimizer + S1 client re-solve
-  // still read the canonical (uncapped) plan (a ≤ε divergence, closed in slice 2).
-  const smoothed = comfortSmooth(canonical.order, ctx.capacities, g.deadlineByProject, g.today, {
-    forecast: forecastOptions(g.model),
-    windowProfile: g.windowProfile,
-  });
-  // S3b Phase 3 `w_buffer` lever (graded in Phase 4) — the at-risk projects' thin-buffer
-  // urgency under the comfort baseline; the reorder gives their work first claim on the day's
-  // fast windows in proportion to how thin. Read off the same baseline the reorder gates
-  // against, mirroring `createJointScorer`.
-  const thinBuffer = thinBufferUrgencyMap(g, g.commitments, smoothed.joint.byProject);
-  // S3b Phase 3 (slice 3): re-sequence WITHIN each near-horizon day to cut context
-  // switches and slot hard work into learned-fast windows (at-risk work first via the
-  // buffer lever), gated so the arranged order never drops `allOnTime` below the comfort
-  // baseline − ε. The arranged order is what the display packs and — when the reorder is
-  // odds-relevant (windows/comfort) and the gate passes — what the headline prices; with
-  // no such signal the grouping is display-only over the byte-identical canonical odds.
-  const reorder = gatedReorder(
-    canonical.order,
-    ctx.capacities,
-    g.deadlineByProject,
-    g.today,
-    ctx.deps,
-    smoothed.joint,
-    {
-      forecast: forecastOptions(g.model),
-      windowProfile: g.windowProfile,
-      comfortCapMinutes: smoothed.comfortCapMinutes,
-      thinBufferUrgency: thinBuffer,
-    },
-  );
-  const odds = reorder.joint.byProject;
+  // The S3b arrangement pipeline over all current open work (no triage shedding): the canonical
+  // cross-project order, the comfort-cap decision (spread HARD work across days within slack),
+  // the thin-buffer urgency, and the odds-gated within-day reorder (cut context switches + slot
+  // hard/at-risk work into learned-fast windows). Recurring is NOT in here, so the schedule /
+  // forecast never double-count its already-drained hours. No-regret: no cap / no reorder signal
+  // ⇒ the canonical plan, bit-for-bit.
+  const bundle = buildArrangement(g, ctx);
+  // S3c-1 rolling horizon: keep committing to the plan the user is following (sticky) unless the
+  // date rolled, the situation moved the fingerprint, or the fresh candidate's soft gain clears
+  // the churn-scaled hysteresis (feasibility/odds always dominating). This READ decides what to
+  // show and persists nothing (the mutation-time roll is the sole writer); a stale anchor on a
+  // quiet new day is harmless — `packGlobal` re-buckets from `g.today` regardless. `decision.order`
+  // IS the display order in both cases (== the fresh candidate when not sticky). No committed row
+  // ⇒ the candidate verbatim ⇒ the exact pre-S3c dashboard, bit-for-bit.
+  const decision = rollDecision(rollContextFor(g, ctx, bundle, committed));
+  // Display == priced: when sticky, reprice the reconciled committed order for the headline +
+  // per-project odds; when fresh, reuse the candidate's already-computed joint (no extra MC).
+  const priced = decision.sticky
+    ? globalForecastJoint(
+        decision.order,
+        ctx.capacities,
+        g.deadlineByProject,
+        g.today,
+        repriceOptionsFor(g, ctx, bundle),
+      )
+    : bundle.reorder.joint;
+  const odds = priced.byProject;
   const forecasts = buildForecasts(g, g.commitments, odds);
   const pitWall = buildPitWall(g, ctx, odds);
   const recoveries = g.projects
     .map((p) => buildRecoveryPlan(g, p, odds, pitWall.conflicts, cachedStrategy))
     .filter((plan): plan is RecoveryPlan => plan !== null);
-  // The displayed plan packs the ARRANGED order, comfort-capped when smoothing fired, so
-  // the shown days match the comfort/arranged odds (display == priced). `globalPlan.order`
-  // stays the canonical order — display metadata + stable priority ranks, unaffected by
-  // the within-day arrangement (which lives in `days`).
+  // The displayed plan packs the FOLLOWED order (sticky committed or fresh candidate),
+  // comfort-capped when smoothing fired, so the shown days match its priced odds (display ==
+  // priced). `globalPlan.order` stays the canonical order — display metadata + stable priority
+  // ranks, unaffected by the within-day arrangement / stickiness (which live in `days`).
   const globalPlan: GlobalPlan = {
-    order: canonical.order,
-    days: packGlobal(reorder.order, ctx.budget, g.today, smoothed.comfortCapMinutes),
+    order: bundle.canonical.order,
+    days: packGlobal(decision.order, ctx.budget, g.today, bundle.comfortCapMinutes),
   };
   // The agenda order: same plan plus today's due recurring instances, ranked as
   // if due today (ordering-only) so a due routine/goal surfaces near the top.

@@ -17,6 +17,7 @@ import type {
   Availability,
   AvailabilityOverride,
   Commitment,
+  EffectiveOrderEntry,
   EstimationModel,
   FactorScores,
   RecurringActivity,
@@ -74,6 +75,13 @@ export interface JointForecastContext extends MovePatchContext {
    *  most). Decided once on the base (like `arrangeReorder`) — it can't be recomputed from
    *  this context's data — and read by `arrangeOrder`; absent ⇒ no buffer bias. */
   thinBufferUrgency?: ReadonlyMap<string, number> | null;
+  /** OVERHAUL S3c-1 — when the rolling-horizon wrapper is showing a STICKY committed plan, the
+   *  committed cross-project order as a task-id sequence (already reconciled to the current
+   *  set). The EMPTY (base) move subset prices this order VERBATIM — the server already arranged
+   *  + gated it, so no re-arrange (`arrangeReorder` is bypassed for the base) — which keeps the
+   *  base re-solve client==server EXACT. Move-probes (non-empty subsets) ignore it: a strategy
+   *  move is a re-plan, not a sticky hold. Absent/null ⇒ the fresh candidate, bit-for-bit. */
+  committedOrder?: string[] | null;
 }
 
 /** The forecast's per-iteration estimation-bias options, drawn from the user's
@@ -336,6 +344,33 @@ export function applyMoveToAlloc(
 }
 
 /**
+ * Reorder a canonical order to a committed task-id sequence (S3c-1 sticky replay). Ids not in
+ * `entries` are skipped and any entry not named by `ids` is appended in its canonical position —
+ * defensive against drift, though the server reconciles the committed order to the current set
+ * before shipping it, so in practice `ids` is a permutation of `entries`. Building the entries
+ * from the SAME source both sides derive (server: `buildGlobalPlan(ctx.tasks).order`; client:
+ * `effectiveOrder(input.tasks)`) and reordering by the shared id sequence is what keeps the
+ * sticky base re-solve client==server EXACT. Pure.
+ */
+function orderByCommitted(
+  entries: EffectiveOrderEntry[],
+  ids: string[],
+): EffectiveOrderEntry[] {
+  const byId = new Map(entries.map((e) => [e.taskId, e]));
+  const seen = new Set<string>();
+  const out: EffectiveOrderEntry[] = [];
+  for (const id of ids) {
+    const e = byId.get(id);
+    if (e && !seen.has(id)) {
+      out.push(e);
+      seen.add(id);
+    }
+  }
+  for (const e of entries) if (!seen.has(e.taskId)) out.push(e);
+  return out;
+}
+
+/**
  * One joint forecast of the whole portfolio after applying an ordered move set —
  * the contention-correct read of "do all of these." Folds each move into a
  * scratch alloc state, rebuilds the global order, and runs `globalForecastJoint`
@@ -394,17 +429,24 @@ export function jointOddsWithMoves(
   // hours), so a preview prices exactly as the dashboard headline does.
   if (g.comfortCapMinutes != null) opts.comfortCapMinutes = g.comfortCapMinutes;
   if (g.windowProfile) opts.windowCapacities = windowCapacities(capacities, g.windowProfile);
-  // S3b Phase 3 slice 3 — replay the within-day reorder decided on the base, when set:
-  // re-sequence this subset's order (group projects + slot hard work into fast windows)
-  // before pricing. Deterministic over inputs the client mirrors (order, the same
-  // skip-adjusted capacities, deps, profile, cap), so server == client for the subset.
-  const order = g.arrangeReorder
-    ? arrangeOrder(plan.order, capacities, state.deps, g.today, {
-        windowProfile: g.windowProfile,
-        comfortCapMinutes: g.comfortCapMinutes,
-        thinBufferUrgency: g.thinBufferUrgency,
-      })
-    : plan.order;
+  // S3c-1 — a STICKY committed plan prices its committed order VERBATIM for the base (no-move)
+  // subset: the server already arranged + gated it, so bypass the within-day reorder (no
+  // re-arrange) and just replay the committed sequence. Only the empty subset is sticky — a
+  // strategy move re-plans, so a non-empty subset falls through to the fresh arrangement below.
+  // S3b Phase 3 slice 3 — otherwise replay the within-day reorder decided on the base, when set:
+  // re-sequence this subset's order (group projects + slot hard work into fast windows) before
+  // pricing. Deterministic over inputs the client mirrors (order, the same skip-adjusted
+  // capacities, deps, profile, cap), so server == client for the subset.
+  const order =
+    moves.length === 0 && g.committedOrder
+      ? orderByCommitted(plan.order, g.committedOrder)
+      : g.arrangeReorder
+        ? arrangeOrder(plan.order, capacities, state.deps, g.today, {
+            windowProfile: g.windowProfile,
+            comfortCapMinutes: g.comfortCapMinutes,
+            thinBufferUrgency: g.thinBufferUrgency,
+          })
+        : plan.order;
   return globalForecastJoint(order, capacities, state.deadlineByProject, g.today, opts);
 }
 
@@ -496,6 +538,12 @@ export interface ResolveInput {
    *  buffer math needs the per-project forecast distribution the server holds). Absent ⇒ no
    *  buffer bias. */
   thinBufferUrgency?: Record<string, number>;
+  /** OVERHAUL S3c-1 — when a STICKY committed plan is shown, its committed order as a task-id
+   *  sequence (already reconciled to the current set). The client prices the EMPTY (base) subset
+   *  by replaying this sequence VERBATIM over its own re-derived entries (reorder OFF) instead of
+   *  re-arranging, so the base re-solve equals the server's sticky base EXACTLY. Non-empty subsets
+   *  ignore it (a strategy move re-plans). Absent ⇒ the fresh candidate, bit-for-bit. */
+  committedOrder?: string[];
 }
 
 /** Element-wise sum of two per-day hour series (aligned by index — both span the same
@@ -558,20 +606,26 @@ export function resolveSubsetOdds(
         ),
       }))
     : input.capacities;
-  // S3b Phase 3 slice 3 — replay the within-day reorder the server decided on the base
-  // (group projects + slot hard work into fast windows), over the SAME skip-adjusted
-  // capacities the server's `jointOddsWithMoves` buckets by — so the arranged order is
-  // bit-identical to the server's for this subset.
-  const order = input.arrangeReorder
-    ? arrangeOrder(baseOrder, capacities, state.deps, input.today, {
-        windowProfile: input.windowProfile,
-        comfortCapMinutes: input.comfortCapMinutes,
-        // Same urgency map the server flagged on the base — replayed, not recomputed (parity).
-        thinBufferUrgency: input.thinBufferUrgency
-          ? new Map(Object.entries(input.thinBufferUrgency))
-          : null,
-      })
-    : baseOrder;
+  // S3c-1 — a STICKY committed plan prices the base (no-move) subset by replaying the committed
+  // order VERBATIM over the client's own re-derived entries (reorder OFF), mirroring the server's
+  // `jointOddsWithMoves` sticky branch exactly so the base re-solve stays client==server EXACT.
+  // A non-empty subset re-plans and falls through to the fresh arrangement below.
+  // S3b Phase 3 slice 3 — otherwise replay the within-day reorder the server decided on the base
+  // (group projects + slot hard work into fast windows), over the SAME skip-adjusted capacities
+  // the server's `jointOddsWithMoves` buckets by — so the arranged order is bit-identical.
+  const order =
+    moves.length === 0 && input.committedOrder
+      ? orderByCommitted(baseOrder, input.committedOrder)
+      : input.arrangeReorder
+        ? arrangeOrder(baseOrder, capacities, state.deps, input.today, {
+            windowProfile: input.windowProfile,
+            comfortCapMinutes: input.comfortCapMinutes,
+            // Same urgency map the server flagged on the base — replayed, not recomputed (parity).
+            thinBufferUrgency: input.thinBufferUrgency
+              ? new Map(Object.entries(input.thinBufferUrgency))
+              : null,
+          })
+        : baseOrder;
   const opts: ForecastOptions = {
     sigma: input.model.sigma,
     meanLog: input.model.meanLog,
