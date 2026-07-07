@@ -1246,6 +1246,49 @@ export interface PlanVersion {
   revertedAt: string | null;
 }
 
+// --- Rolling-horizon wrapper (S3c-1) ----------------------------------------
+
+/**
+ * Bumped when the persisted `CommittedPlan` shape changes so a stale row is safely
+ * invalidated (treated as "no committed plan" ⇒ the no-regret fresh path) rather
+ * than mis-replayed. Start at 1.
+ */
+export const COMMITTED_PLAN_SCHEMA_VERSION = 1;
+
+/**
+ * The plan the user is currently following — the single piece of state the
+ * rolling-horizon wrapper (OVERHAUL §5a substrate S3c-1) applies hysteresis
+ * against so a reload doesn't thrash the imminent day for a marginal soft-objective
+ * gain. One upserted row per user (mirrors `PortfolioStrategy`'s cache row); the
+ * read path decides *what to show* against it (sticky vs. fresh) and the mutation
+ * write path *rolls* it forward. It authors NO odds and adds no arrangement quality
+ * — it only decides which already-priced arrangement to keep committing to as the
+ * days advance. See `design/s3c-rolling-horizon-wrapper.md` and `lib/rolling.ts`.
+ */
+export interface CommittedPlan {
+  /** Forward-compat / safe invalidation (see COMMITTED_PLAN_SCHEMA_VERSION). */
+  schemaVersion: number;
+  /**
+   * The committed cross-project order (the replay basis) — the ARRANGED, gated
+   * order the user follows (post `gatedReorder`), NOT the canonical order. Shipped
+   * for the dashboard display pack, the churn/J metrics, and (as a task-id sequence)
+   * the S1 re-solve verbatim replay.
+   */
+  order: EffectiveOrderEntry[];
+  /** `todayISO()` at commit time — the frozen-zone (anchor) day. A date-granular roll
+   *  fires when this advances; the read path tolerates a stale anchor safely. */
+  anchor: string;
+  /** Situation fingerprint at commit (see `rollFingerprint`), folding open-task
+   *  membership, bucketed deadlines, the window/velocity generation, comfort + value
+   *  model. An unchanged fingerprint + anchor ⇒ nothing material moved ⇒ stay put. */
+  fingerprint: string;
+  /** The committed arrangement's soft score `J` (from `arrangementScore`) — the
+   *  quantity the stability gate weighs the fresh candidate's improvement against. */
+  j: number;
+  /** ISO timestamp the arrangement was committed. */
+  committedAt: string;
+}
+
 // --- §5.6 NL check-in / reflection loop -------------------------------------
 //
 // The interpret → propose → review → commit loop over a free-form activity
