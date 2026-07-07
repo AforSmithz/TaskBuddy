@@ -383,3 +383,71 @@ export function planRollKind(
   }
   return null;
 }
+
+// --- Roll-undo decision (S3c-2 §4) ------------------------------------------
+
+export interface UndoRollContext {
+  /** The arrangement the undone roll superseded — the immediately-prior roll's order, or,
+   *  when the undone roll was the first-ever commit, a fresh S3b build (there is no earlier
+   *  preference). The seed a roll-undo restores. */
+  restoredOrder: EffectiveOrderEntry[];
+  /** Fresh canonical order over the CURRENT task set (`buildGlobalPlan(...).order`) — the
+   *  reconcile basis, so a completed/deleted-since task drops out instead of resurrecting. */
+  canonicalOrder: EffectiveOrderEntry[];
+  /** Fresh candidate arrangement + its priced odds — what undo yields to if the restored
+   *  arrangement is odds-dominated or reconciles to nothing. */
+  candidate: { order: EffectiveOrderEntry[]; allOnTime: number };
+  /** Reprice an order's P(all deadlined projects land) under the CURRENT situation (injected
+   *  so this module authors no odds — mirrors {@link RollContext}). */
+  repriceAllOnTime: (order: EffectiveOrderEntry[]) => number;
+  /** Score an order's soft `J` under the current arrange options (`arrangementScore`). */
+  scoreJ: (order: EffectiveOrderEntry[]) => number;
+  /** Odds slack before feasibility overrides the restore (default ROLL_ODDS_EPSILON). */
+  oddsEpsilon?: number;
+}
+
+export interface UndoRollResult {
+  /** The arrangement to re-commit: the reconciled restore when it is odds-competitive, else
+   *  the fresh candidate. */
+  order: EffectiveOrderEntry[];
+  /** Its soft `J` (for the re-committed plan). */
+  j: number;
+  /** True ⇒ the restore stood; false ⇒ it was odds-dominated (or emptied by staleness) and
+   *  undo yielded to the fresh build. */
+  restored: boolean;
+}
+
+/**
+ * Decide what a roll-undo re-commits (design/s3c2-passive-roll-history.md §4). Undo takes the
+ * arrangement a roll superseded and restores it, but only as a PREFERENCE SEED fed back through
+ * the S3c-1 read path: `reconcileCommitted` against the current task set (dropping
+ * completed/deleted tasks — never resurrecting them, the §7 robustness bar — and folding in new
+ * work) then re-price. Odds/feasibility dominate exactly as {@link rollDecision}: the restore
+ * holds against the SOFT stability gate — deliberately NOT re-running it, because the very gain
+ * that caused the roll still holds and would instantly re-adopt the candidate, making undo a
+ * no-op — but it CANNOT override the odds gate. A reconciled restore that is more than ε below
+ * the fresh candidate's odds (or reconciles to nothing) yields to that candidate. Pure given its
+ * injected pricers, so the whole decision is unit-testable with fakes; the store wraps it with
+ * the real pricers + the reverted-guard (idempotency) + the re-commit.
+ */
+export function undoRollDecision(ctx: UndoRollContext): UndoRollResult {
+  const eps = ctx.oddsEpsilon ?? ROLL_ODDS_EPSILON;
+  const { order: reconciled } = reconcileCommitted(
+    ctx.restoredOrder,
+    ctx.canonicalOrder,
+  );
+  // Odds gate (rollDecision step 4): keep the restore only while it stays within ε of the
+  // fresh candidate's odds. An emptied reconcile (every restored task went stale) has no odds
+  // to defend and falls straight through to the candidate.
+  if (reconciled.length > 0) {
+    const restoredOdds = ctx.repriceAllOnTime(reconciled);
+    if (restoredOdds >= ctx.candidate.allOnTime - eps) {
+      return { order: reconciled, j: ctx.scoreJ(reconciled), restored: true };
+    }
+  }
+  return {
+    order: ctx.candidate.order,
+    j: ctx.scoreJ(ctx.candidate.order),
+    restored: false,
+  };
+}
