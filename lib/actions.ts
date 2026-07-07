@@ -38,6 +38,7 @@ import {
   setWindowAvailability,
   skipActivity,
   skipActivityForWeek,
+  undoPlanRoll,
   undoPlanVersion,
   unskipActivity,
   updateRecurringActivity,
@@ -730,6 +731,18 @@ export async function runCheckinAction(
 export async function undoPlanVersionAction(id: string): Promise<void> {
   await requireUser();
   await undoPlanVersion(id);
+  await revalidateAll();
+}
+
+/**
+ * Undo one automatic roll (S3c-2): restore the arrangement it superseded THROUGH
+ * reconcile + re-price (never a row restore), then refresh. The `revalidateAll` roll
+ * fires under the current fingerprint, so it stays put and the restore holds against
+ * the soft stability gate (design/s3c2-passive-roll-history.md §4).
+ */
+export async function undoPlanRollAction(id: string): Promise<void> {
+  await requireUser();
+  await undoPlanRoll(id);
   await revalidateAll();
 }
 
