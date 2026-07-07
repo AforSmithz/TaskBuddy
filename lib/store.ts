@@ -31,6 +31,7 @@ import type {
   CommittedPlan,
   PitCall,
   PlanVersion,
+  PlanRoll,
   PortfolioStrategy,
   Goal,
   ProjectForecast,
@@ -108,7 +109,12 @@ import {
   type GatedReorderResult,
   type WindowProfile,
 } from "./arrange";
-import { rollDecision, type RollContext, type RollDecisionResult } from "./rolling";
+import {
+  rollDecision,
+  planRollKind,
+  type RollContext,
+  type RollDecisionResult,
+} from "./rolling";
 import {
   SAMPLE_ACTIVITIES,
   SAMPLE_ENTRIES,
@@ -205,6 +211,9 @@ interface MemDB {
   /** The plan the user is currently following — the rolling-horizon committed row
    *  (S3c-1), or null until first committed. */
   committedPlan: CommittedPlan | null;
+  /** Retained automatic rolls of the committed plan, newest-first — the passive-roll
+   *  history (S3c-2), capped at `PLAN_ROLL_CAP`. */
+  planRolls: PlanRoll[];
   seeded: boolean;
 }
 
@@ -238,6 +247,7 @@ function memDB(): MemDB {
       portfolioStrategy: null,
       planVersions: [],
       committedPlan: null,
+      planRolls: [],
       seeded: false,
     };
   }
@@ -1360,6 +1370,69 @@ export async function setCommittedPlan(plan: CommittedPlan): Promise<void> {
   }
   await ensureSeeded();
   memDB().committedPlan = plan;
+}
+
+// --- Passive-roll history (S3c-2) -------------------------------------------
+//
+// Each automatic roll of the committed plan (a material better-candidate or an anchor
+// advance, never a stay-put reload) is appended as a retained `PlanRoll` — the memory
+// that powers the "how my plan evolved" timeline and a roll-undo. A SIBLING to the plan
+// version history below, not an overload: a roll mutates no domain rows, only the
+// arrangement, so its undo restores a prior order THROUGH reconcile rather than writing
+// rows back (design §2). The arrangement lives in the `plan_order` jsonb column — `order`
+// is a reserved word that collides with PostgREST's `?order=` sort param.
+
+/** Soft cap on retained rolls per user; oldest pruned beyond this (design §3, mirrors
+ *  `PLAN_VERSION_CAP`). */
+const PLAN_ROLL_CAP = 50;
+
+/** Append one roll to the history and prune to the cap. Best-effort at the call site:
+ *  `commitRollingPlan` runs inside the mutation hook's swallowed try/catch, so a
+ *  history-append failure can never break the mutation that triggered the roll. */
+async function insertPlanRoll(roll: PlanRoll): Promise<void> {
+  if (isSupabaseConfigured()) {
+    const supabase = await getRequestClient();
+    const user_id = await currentUserId(supabase);
+    const { error } = await supabase.from("plan_rolls").insert({
+      id: roll.id,
+      user_id,
+      rolled_at: roll.rolledAt,
+      anchor: roll.anchor,
+      fingerprint: roll.fingerprint,
+      j: roll.j,
+      kind: roll.kind,
+      prev_j: roll.prevJ,
+      plan_order: roll.order,
+      reverted_at: roll.revertedAt,
+      schema_version: roll.schemaVersion,
+    });
+    if (error)
+      throw new Error(`Supabase plan_rolls insert failed: ${error.message}`);
+    await prunePlanRolls(supabase);
+    return;
+  }
+  await ensureSeeded();
+  const db = memDB();
+  db.planRolls.unshift(roll);
+  if (db.planRolls.length > PLAN_ROLL_CAP) db.planRolls.length = PLAN_ROLL_CAP;
+}
+
+/** Delete rolls older than the most recent `PLAN_ROLL_CAP` (soft cap). */
+async function prunePlanRolls(supabase: RequestClient): Promise<void> {
+  const { data } = await supabase
+    .from("plan_rolls")
+    .select("id")
+    .order("rolled_at", { ascending: false })
+    .range(PLAN_ROLL_CAP, PLAN_ROLL_CAP + 1000);
+  const stale = (data as { id: string }[] | null) ?? [];
+  if (stale.length)
+    await supabase
+      .from("plan_rolls")
+      .delete()
+      .in(
+        "id",
+        stale.map((r) => r.id),
+      );
 }
 
 // --- Plan version history (S1 step 3 / vision §1.3) -------------------------
@@ -3194,7 +3267,29 @@ export async function commitRollingPlan(): Promise<RollDecisionResult | null> {
   }
   const bundle = buildArrangement(g, ctx);
   const decision = rollDecision(rollContextFor(g, ctx, bundle, committed));
-  if (decision.shouldPersist) await setCommittedPlan(decision.toPersist);
+  if (decision.shouldPersist) {
+    await setCommittedPlan(decision.toPersist);
+    // Persist-on-roll (S3c-2): retain a history entry for a GENUINE plan change (a
+    // material better-candidate or an anchor advance), never a stay-put freshen — so the
+    // timeline shows real evolution, not every reload. Same best-effort guard as the
+    // upsert above: a throw here is swallowed by the mutation hook's try/catch.
+    const rollKind = planRollKind(decision, committed);
+    if (rollKind) {
+      const plan = decision.toPersist;
+      await insertPlanRoll({
+        id: crypto.randomUUID(),
+        rolledAt: plan.committedAt,
+        anchor: plan.anchor,
+        fingerprint: plan.fingerprint,
+        j: plan.j,
+        kind: rollKind.kind,
+        prevJ: rollKind.prevJ,
+        order: plan.order,
+        revertedAt: null,
+        schemaVersion: plan.schemaVersion,
+      });
+    }
+  }
   return decision;
 }
 
