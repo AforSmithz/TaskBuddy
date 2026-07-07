@@ -1,9 +1,9 @@
 "use client";
 
 import { useState, useTransition } from "react";
-import { ArrowRight, RotateCcw, Undo2 } from "lucide-react";
-import type { PlanVersion } from "@/lib/types";
-import { undoPlanVersionAction } from "@/lib/actions";
+import { ArrowRight, RefreshCw, RotateCcw, Undo2 } from "lucide-react";
+import type { PlanRoll, PlanRollKind, PlanVersion } from "@/lib/types";
+import { undoPlanRollAction, undoPlanVersionAction } from "@/lib/actions";
 import { formatPct } from "@/components/forecast/forecast-meter";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
@@ -18,67 +18,160 @@ function relativeTime(iso: string): string {
   return `${Math.round(hrs / 24)}d ago`;
 }
 
+/** One entry in the merged plan timeline: an applied strategy bundle (`undoPlanVersion`
+ *  = row restore) or an automatic roll of the committed plan (`undoPlanRoll` = arrangement
+ *  restore). Two distinct undo semantics, one time-ordered feed (design §5). */
+type TimelineEntry =
+  | { type: "apply"; at: string; version: PlanVersion }
+  | { type: "roll"; at: string; roll: PlanRoll };
+
+/** Neutral, structural label per roll kind — WHAT changed, not WHY. The causal
+ *  narration ("shifted because the deadline moved in") is S3c-3's `diagnoseRoll`;
+ *  this slice ships the raw arrangement only. */
+const ROLL_LABEL: Record<PlanRollKind, string> = {
+  material: "Plan reshuffled",
+  anchor: "Rolled forward a day",
+  initial: "Initial plan",
+};
+
+/** The task a roll's arrangement leads with (lowest rank) — the near horizon in one line.
+ *  The stored order is a historical snapshot, shown under a timestamp, so a since-completed
+ *  task here is honest record, not a live claim. */
+function leadTask(roll: PlanRoll): string | null {
+  if (roll.order.length === 0) return null;
+  return roll.order.reduce((a, b) => (a.rank <= b.rank ? a : b)).title;
+}
+
+function RevertedPill() {
+  return (
+    <span className="ml-0.5 rounded-full bg-[var(--color-surface-raised)] px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-[var(--color-fg-subtle)]">
+      Reverted
+    </span>
+  );
+}
+
+/** An applied strategy bundle: the reason, the odds accepted (before → after), moves. */
+function ApplyRow({ version: v, reverted }: { version: PlanVersion; reverted: boolean }) {
+  const showOdds = Number.isFinite(v.oddsBefore) && Number.isFinite(v.oddsAfter);
+  return (
+    <>
+      <p
+        className={cn(
+          "truncate text-[13px] text-[var(--color-fg)]",
+          reverted && "text-[var(--color-fg-subtle)] line-through",
+        )}
+      >
+        {v.reason}
+      </p>
+      <p className="mt-0.5 flex items-center gap-1.5 text-[11px] text-[var(--color-fg-subtle)]">
+        <span>{relativeTime(v.createdAt)}</span>
+        <span aria-hidden>·</span>
+        <span>
+          {v.moves.length} move{v.moves.length > 1 ? "s" : ""}
+        </span>
+        {showOdds && (
+          <>
+            <span aria-hidden>·</span>
+            <span className="inline-flex items-center gap-1 tabular-nums">
+              {formatPct(v.oddsBefore)}
+              <ArrowRight className="size-3" />
+              {formatPct(v.oddsAfter)}
+            </span>
+          </>
+        )}
+        {reverted && <RevertedPill />}
+      </p>
+    </>
+  );
+}
+
+/** An automatic roll of the committed plan: what kind of shift, and its near-horizon lead.
+ *  The leading icon tags it as a roll (vs an apply) without recomputing anything client-side. */
+function RollRow({ roll, reverted }: { roll: PlanRoll; reverted: boolean }) {
+  const lead = leadTask(roll);
+  return (
+    <>
+      <p
+        className={cn(
+          "flex min-w-0 items-center gap-1.5 text-[13px] text-[var(--color-fg)]",
+          reverted && "text-[var(--color-fg-subtle)] line-through",
+        )}
+      >
+        <RefreshCw className="size-3.5 shrink-0 text-[var(--color-fg-subtle)]" />
+        <span className="truncate">{ROLL_LABEL[roll.kind]}</span>
+      </p>
+      <p className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[11px] text-[var(--color-fg-subtle)]">
+        <span className="shrink-0">{relativeTime(roll.rolledAt)}</span>
+        {lead && (
+          <>
+            <span aria-hidden className="shrink-0">
+              ·
+            </span>
+            <span className="truncate">
+              leads with{" "}
+              <span className="text-[var(--color-fg-muted)]">{lead}</span>
+            </span>
+          </>
+        )}
+        {reverted && <RevertedPill />}
+      </p>
+    </>
+  );
+}
+
 /**
- * The plan version history (vision §1.3): every applied strategy bundle, newest
- * first, with the odds the user accepted (before → after) and a whole-bundle Revert
- * — undo restores the snapshot in one shot (§8.2). A reverted bundle stays listed
- * (struck through) so the record is complete. Server-rendered list; revert is the
- * only interaction, so each row drives `undoPlanVersionAction` through a transition.
+ * The plan timeline (vision §1.3): every applied strategy bundle AND every automatic
+ * roll of the committed plan, unioned into one newest-first feed. Applies carry the odds
+ * the user accepted and a whole-bundle Revert; rolls carry their near-horizon lead and a
+ * roll-Undo that restores the prior arrangement through reconcile. Reverted entries stay
+ * listed (struck through) so the record is complete. Each row drives its own undo verb.
  */
-export function PlanHistory({ versions }: { versions: PlanVersion[] }) {
+export function PlanHistory({
+  versions,
+  rolls,
+}: {
+  versions: PlanVersion[];
+  rolls: PlanRoll[];
+}) {
   const [revertingId, setRevertingId] = useState<string | null>(null);
   const [pending, startTransition] = useTransition();
 
-  function revert(id: string) {
+  // Merge the two histories (applies keyed by `createdAt`, rolls by `rolledAt`) into one
+  // time-ordered feed. Ids are uuids so a single reverting-id tracks either kind's row.
+  const entries: TimelineEntry[] = [
+    ...versions.map(
+      (v): TimelineEntry => ({ type: "apply", at: v.createdAt, version: v }),
+    ),
+    ...rolls.map((r): TimelineEntry => ({ type: "roll", at: r.rolledAt, roll: r })),
+  ].sort((a, b) => b.at.localeCompare(a.at));
+
+  function revert(id: string, action: (id: string) => Promise<void>) {
     setRevertingId(id);
     startTransition(async () => {
-      await undoPlanVersionAction(id);
+      await action(id);
       setRevertingId(null);
     });
   }
 
   return (
     <ul className="divide-y divide-[var(--color-border)]">
-      {versions.map((v) => {
-        const reverted = v.revertedAt !== null;
-        const showOdds =
-          Number.isFinite(v.oddsBefore) && Number.isFinite(v.oddsAfter);
+      {entries.map((entry) => {
+        const isApply = entry.type === "apply";
+        const id = isApply ? entry.version.id : entry.roll.id;
+        const reverted =
+          (isApply ? entry.version.revertedAt : entry.roll.revertedAt) !== null;
+        const action = isApply ? undoPlanVersionAction : undoPlanRollAction;
         return (
           <li
-            key={v.id}
+            key={`${entry.type}-${id}`}
             className="flex items-center gap-3 px-5 py-3 first:pt-4 last:pb-4"
           >
             <div className="min-w-0 flex-1">
-              <p
-                className={cn(
-                  "truncate text-[13px] text-[var(--color-fg)]",
-                  reverted && "text-[var(--color-fg-subtle)] line-through",
-                )}
-              >
-                {v.reason}
-              </p>
-              <p className="mt-0.5 flex items-center gap-1.5 text-[11px] text-[var(--color-fg-subtle)]">
-                <span>{relativeTime(v.createdAt)}</span>
-                <span aria-hidden>·</span>
-                <span>
-                  {v.moves.length} move{v.moves.length > 1 ? "s" : ""}
-                </span>
-                {showOdds && (
-                  <>
-                    <span aria-hidden>·</span>
-                    <span className="inline-flex items-center gap-1 tabular-nums">
-                      {formatPct(v.oddsBefore)}
-                      <ArrowRight className="size-3" />
-                      {formatPct(v.oddsAfter)}
-                    </span>
-                  </>
-                )}
-                {reverted && (
-                  <span className="ml-0.5 rounded-full bg-[var(--color-surface-raised)] px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-[var(--color-fg-subtle)]">
-                    Reverted
-                  </span>
-                )}
-              </p>
+              {isApply ? (
+                <ApplyRow version={entry.version} reverted={reverted} />
+              ) : (
+                <RollRow roll={entry.roll} reverted={reverted} />
+              )}
             </div>
             {reverted ? (
               <span className="flex shrink-0 items-center gap-1 text-[11px] text-[var(--color-fg-subtle)]">
@@ -89,12 +182,12 @@ export function PlanHistory({ versions }: { versions: PlanVersion[] }) {
               <Button
                 variant="ghost"
                 size="sm"
-                loading={revertingId === v.id}
+                loading={revertingId === id}
                 disabled={pending}
-                onClick={() => revert(v.id)}
+                onClick={() => revert(id, action)}
               >
                 <Undo2 className="size-3.5" />
-                Revert
+                {isApply ? "Revert" : "Undo"}
               </Button>
             )}
           </li>

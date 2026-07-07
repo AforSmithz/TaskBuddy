@@ -4,6 +4,7 @@ import {
   getAutoStrategy,
   getCachedStrategy,
   listAllTasks,
+  listPlanRolls,
   listPlanVersions,
   listWorkSessions,
 } from "@/lib/store";
@@ -23,15 +24,23 @@ import { ReliableHours } from "@/components/strategy/reliable-hours";
 import { PitWallCallout } from "@/components/forecast/pit-wall-callout";
 
 export default async function StrategyPage() {
-  const [dashboard, autoStrategy, cached, tasks, planVersions, workSessions] =
-    await Promise.all([
-      forecastDashboard(),
-      getAutoStrategy(),
-      getCachedStrategy(),
-      listAllTasks(),
-      listPlanVersions(),
-      listWorkSessions(),
-    ]);
+  const [
+    dashboard,
+    autoStrategy,
+    cached,
+    tasks,
+    planVersions,
+    planRolls,
+    workSessions,
+  ] = await Promise.all([
+    forecastDashboard(),
+    getAutoStrategy(),
+    getCachedStrategy(),
+    listAllTasks(),
+    listPlanVersions(),
+    listPlanRolls(),
+    listWorkSessions(),
+  ]);
   const { forecasts, recoveries, pitWall, globalPlan } = dashboard;
   const tasksById = new Map(tasks.map((t) => [t.id, t]));
 
@@ -126,13 +135,13 @@ export default async function StrategyPage() {
         </Reveal>
       )}
 
-      {/* Plan history — every applied bundle, newest first, with whole-bundle
-          undo (vision §1.3). Shown only once there's something to record. */}
-      {planVersions.length > 0 && (
+      {/* Plan history — every applied bundle and every automatic roll, newest first,
+          each with its own undo (vision §1.3). Shown only once there's something to record. */}
+      {(planVersions.length > 0 || planRolls.length > 0) && (
         <Reveal delay={0.25} className="mt-7">
           <Card>
             <CardHeader title="Plan history" icon={<History className="size-4" />} />
-            <PlanHistory versions={planVersions} />
+            <PlanHistory versions={planVersions} rolls={planRolls} />
           </Card>
         </Reveal>
       )}
