@@ -8,6 +8,7 @@ import {
   COMMITTED_PLAN_SCHEMA_VERSION,
   type CommittedPlan,
   type EffectiveOrderEntry,
+  type PlanRollKind,
 } from "./types";
 
 // Rolling-horizon wrapper (OVERHAUL §5a substrate S3c-1) — the *continuity* layer over
@@ -342,4 +343,43 @@ export function rollDecision(ctx: RollContext): RollDecisionResult {
     toPersist: makePlan(reconciled, jCommitted),
     shouldPersist,
   };
+}
+
+// --- Roll-history classification (S3c-2 persist-on-roll) ----------------------
+
+/**
+ * Which history row (if any) a completed roll should append (design/s3c2-passive-roll-
+ * history.md §3). A pure derivation from the decision plus the plan it superseded, so the
+ * store's write path stays a thin persist and the classification is unit-testable next to
+ * the roll cycle. Returns `null` for the STAY-PUT paths — a decision that persisted nothing,
+ * or a sticky freshen (fingerprint / kept-task field refresh) that did NOT advance the
+ * frozen-zone day — so the timeline records genuine plan changes, not every reload.
+ *
+ *   `initial`  — the first-ever commit; no prior arrangement to diff, so `prevJ` is null.
+ *   `material` — adopted a fresh candidate over an existing plan (odds- or gate-driven, or
+ *                a fully-stale reconcile); `prevJ` is the superseded plan's soft score.
+ *   `anchor`   — stayed sticky but the anchor advanced and the near part re-froze.
+ *
+ * `prior` is the committed plan as it was BEFORE this roll (the `ctx.committed` passed to
+ * {@link rollDecision}).
+ */
+export function planRollKind(
+  result: RollDecisionResult,
+  prior: CommittedPlan | null,
+): { kind: PlanRollKind; prevJ: number | null } | null {
+  if (!result.shouldPersist) return null; // nothing moved — no history entry
+
+  if (!result.sticky) {
+    // Adopted the fresh candidate. The only prior-less adopt is the first-ever commit;
+    // every other adopt (stale reconcile, odds override, gate) supersedes a real plan.
+    if (result.reason === "no-committed") return { kind: "initial", prevJ: null };
+    return { kind: "material", prevJ: prior?.j ?? null };
+  }
+
+  // Sticky: only a frozen-zone DAY advance is timeline-worthy. A same-anchor freshen
+  // (the fingerprint moved, or a kept task's fields changed) is stay-put bookkeeping.
+  if (prior && prior.anchor !== result.toPersist.anchor) {
+    return { kind: "anchor", prevJ: prior.j };
+  }
+  return null;
 }
