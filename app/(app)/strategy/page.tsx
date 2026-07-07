@@ -12,6 +12,7 @@ import {
   assessStaleness,
   deterministicStrategyFrom,
 } from "@/lib/portfolio-strategist";
+import { diagnoseRoll } from "@/lib/rolling";
 import { energyWindows, workSessionResidualSamples } from "@/lib/velocity";
 import { isLLMConfigured } from "@/lib/extraction";
 import { PageHeader } from "@/components/ui/page-header";
@@ -43,6 +44,17 @@ export default async function StrategyPage() {
   ]);
   const { forecasts, recoveries, pitWall, globalPlan } = dashboard;
   const tasksById = new Map(tasks.map((t) => [t.id, t]));
+
+  // "Why your plan changed" (S3c-3) — narrate each roll server-side by diffing it against the
+  // roll it superseded (the next-older one; the list is newest-first, so index+1). Pure and
+  // odds-free; the timeline renders the shipped string, computing nothing client-side.
+  const rollCauses: Record<string, string> = {};
+  for (let i = 0; i < planRolls.length; i++) {
+    rollCauses[planRolls[i].id] = diagnoseRoll(
+      planRolls[i],
+      planRolls[i + 1] ?? null,
+    ).summary;
+  }
 
   // "Your reliable hours" (S2 slice C) — per-window velocity over real sessions,
   // calibrated to the same estimation bias the forecast uses. Empty until sessions
@@ -141,7 +153,11 @@ export default async function StrategyPage() {
         <Reveal delay={0.25} className="mt-7">
           <Card>
             <CardHeader title="Plan history" icon={<History className="size-4" />} />
-            <PlanHistory versions={planVersions} rolls={planRolls} />
+            <PlanHistory
+              versions={planVersions}
+              rolls={planRolls}
+              rollCauses={rollCauses}
+            />
           </Card>
         </Reveal>
       )}

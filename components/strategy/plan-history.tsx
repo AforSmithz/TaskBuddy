@@ -25,9 +25,10 @@ type TimelineEntry =
   | { type: "apply"; at: string; version: PlanVersion }
   | { type: "roll"; at: string; roll: PlanRoll };
 
-/** Neutral, structural label per roll kind — WHAT changed, not WHY. The causal
- *  narration ("shifted because the deadline moved in") is S3c-3's `diagnoseRoll`;
- *  this slice ships the raw arrangement only. */
+/** Neutral, structural label per roll kind — WHAT changed, not WHY. The causal line
+ *  ("Pulled Recital forward to protect its deadline") is S3c-3's `diagnoseRoll`, computed
+ *  server-side and passed in as `rollCauses`; this map is the defensive fallback when a
+ *  summary is absent. */
 const ROLL_LABEL: Record<PlanRollKind, string> = {
   material: "Plan reshuffled",
   anchor: "Rolled forward a day",
@@ -85,9 +86,18 @@ function ApplyRow({ version: v, reverted }: { version: PlanVersion; reverted: bo
   );
 }
 
-/** An automatic roll of the committed plan: what kind of shift, and its near-horizon lead.
- *  The leading icon tags it as a roll (vs an apply) without recomputing anything client-side. */
-function RollRow({ roll, reverted }: { roll: PlanRoll; reverted: boolean }) {
+/** An automatic roll of the committed plan: WHY it shifted (the server-diagnosed causal line,
+ *  `summary`, falling back to the neutral structural label) and its near-horizon lead. The
+ *  leading icon tags it as a roll (vs an apply) without recomputing anything client-side. */
+function RollRow({
+  roll,
+  reverted,
+  summary,
+}: {
+  roll: PlanRoll;
+  reverted: boolean;
+  summary?: string;
+}) {
   const lead = leadTask(roll);
   return (
     <>
@@ -98,7 +108,7 @@ function RollRow({ roll, reverted }: { roll: PlanRoll; reverted: boolean }) {
         )}
       >
         <RefreshCw className="size-3.5 shrink-0 text-[var(--color-fg-subtle)]" />
-        <span className="truncate">{ROLL_LABEL[roll.kind]}</span>
+        <span className="truncate">{summary ?? ROLL_LABEL[roll.kind]}</span>
       </p>
       <p className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[11px] text-[var(--color-fg-subtle)]">
         <span className="shrink-0">{relativeTime(roll.rolledAt)}</span>
@@ -129,9 +139,13 @@ function RollRow({ roll, reverted }: { roll: PlanRoll; reverted: boolean }) {
 export function PlanHistory({
   versions,
   rolls,
+  rollCauses = {},
 }: {
   versions: PlanVersion[];
   rolls: PlanRoll[];
+  /** Server-diagnosed "why it changed" line per roll id (S3c-3 `diagnoseRoll`). Optional —
+   *  a roll with no entry falls back to the neutral structural label. */
+  rollCauses?: Record<string, string>;
 }) {
   const [revertingId, setRevertingId] = useState<string | null>(null);
   const [pending, startTransition] = useTransition();
@@ -170,7 +184,11 @@ export function PlanHistory({
               {isApply ? (
                 <ApplyRow version={entry.version} reverted={reverted} />
               ) : (
-                <RollRow roll={entry.roll} reverted={reverted} />
+                <RollRow
+                  roll={entry.roll}
+                  reverted={reverted}
+                  summary={rollCauses[entry.roll.id]}
+                />
               )}
             </div>
             {reverted ? (
