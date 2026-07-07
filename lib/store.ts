@@ -3450,6 +3450,43 @@ export async function undoPlanRoll(id: string): Promise<void> {
   await markPlanRollReverted(id);
 }
 
+/**
+ * S3c-6 — read-side idempotent anchor-roll. On a QUIET new day (a committed plan exists and the
+ * roll decision kept it STICKY, but its frozen-zone `anchor` predates today) advance the stored
+ * anchor to today FROM THE READ PATH, so the persisted frozen zone is fresh without waiting for
+ * the next mutation. v1 already displays correctly regardless (`packGlobal` re-buckets from
+ * `g.today`); this only tightens the stored `anchor` / `fingerprint` so the frozen-zone day is
+ * accurate and the next mutation's fast path can short-circuit. It authors no odds and no new
+ * arrangement — it re-anchors the plan the decision ALREADY chose to keep.
+ *
+ * Two guarantees keep this a safe write from a read (design §7 S3c-6 + the advance-silently call):
+ *   - Gated on `decision.sticky`: a read NEVER persists a *material* re-arrangement. A genuine
+ *     roll still waits for the mutation path (the sole writer of arrangement changes); here we
+ *     only bump the anchor of a plan that stayed sticky.
+ *   - No history row, just the convergent singleton `committed_plan` upsert: a silent day-advance
+ *     is bookkeeping, not a timeline event, so concurrent loads on the same new day converge on
+ *     the same anchor instead of double-logging an "anchor" roll. Best-effort — a write failure
+ *     must never break a render (the displayed sticky plan is already correct), and it must not
+ *     revalidate (we are inside a Server Component render; display already == the persisted order).
+ *
+ * Idempotent: after the write `committed.anchor === today`, so a second load the same day returns
+ * before touching the DB. `decision.toPersist.anchor` is the read's `g.today`, so comparing the
+ * stored anchor against it is the "is the frozen-zone day stale" test.
+ */
+async function advanceAnchorOnQuietDay(
+  committed: CommittedPlan | null,
+  decision: RollDecisionResult,
+): Promise<void> {
+  if (!committed || !decision.sticky) return;
+  if (committed.anchor === decision.toPersist.anchor) return; // anchor already fresh — no-op
+  try {
+    await setCommittedPlan(decision.toPersist);
+  } catch {
+    // Leaving the stale anchor is harmless: the display is unaffected and the next mutation
+    // advances it. A render must never fail on a bookkeeping refresh.
+  }
+}
+
 export async function createJointScorer(): Promise<JointScorer> {
   // The cached strategy is the temporal baseline for cause-diagnosis: the
   // optimizer reads each recovery's `cause` for the step-5 response-class
@@ -3478,6 +3515,8 @@ export async function createJointScorer(): Promise<JointScorer> {
   // (non-empty subsets) still use the fresh arrangement — a strategy move is a re-plan, never a
   // sticky hold. No-regret: no committed row ⇒ the candidate verbatim ⇒ pre-S3c path, bit-for-bit.
   const decision = rollDecision(rollContextFor(g, ctx, bundle, committed));
+  // S3c-6: on a quiet new day, refresh the committed row's frozen-zone anchor from this read.
+  await advanceAnchorOnQuietDay(committed, decision);
   const committedOrder = decision.sticky ? decision.order.map((e) => e.taskId) : null;
   // The joint re-solve context carries the cap + the reorder flag + the thin-buffer set
   // (mirrors how `windowProfile` rides on `g`) plus the sticky committed order; every
@@ -3796,6 +3835,8 @@ export async function forecastDashboard(): Promise<{
   // IS the display order in both cases (== the fresh candidate when not sticky). No committed row
   // ⇒ the candidate verbatim ⇒ the exact pre-S3c dashboard, bit-for-bit.
   const decision = rollDecision(rollContextFor(g, ctx, bundle, committed));
+  // S3c-6: on a quiet new day, refresh the committed row's frozen-zone anchor from this read.
+  await advanceAnchorOnQuietDay(committed, decision);
   // Display == priced: when sticky, reprice the reconciled committed order for the headline +
   // per-project odds; when fresh, reuse the candidate's already-computed joint (no extra MC).
   const priced = decision.sticky
