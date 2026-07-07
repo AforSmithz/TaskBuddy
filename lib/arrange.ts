@@ -185,6 +185,29 @@ function daySegments(
 const COST_EPSILON = 1e-9;
 
 /**
+ * The marginal `J` of placing `e` next, given the day's current project (`current`,
+ * `undefined` before the first pick) and the net velocity multiplier of the window it
+ * starts in (`mult`). The sum of three terms: a context-SWITCH penalty when the project
+ * changes, an ENERGY term rewarding cognitively-hard (impact-weighted) work in a fast
+ * window (penalising it in a slow one), and a BUFFER term giving a thin-buffer project's
+ * work the same fast-window pull independent of difficulty. Both window terms vanish when
+ * `mult === 1` (no learned profile). The single source of the objective — `sequenceDay`
+ * greedily MINIMISES it to choose an order; `arrangementScore` SUMS it to price a given
+ * order — so the chooser and the scorer can never drift. Pure. */
+function marginalJ(
+  e: EffectiveOrderEntry,
+  current: string | null | undefined,
+  mult: number,
+  weights: ArrangeWeights,
+  thinBuffer: ReadonlyMap<string, number>,
+): number {
+  const sw = current !== undefined && (e.projectId ?? null) !== current ? weights.switch : 0;
+  const en = weights.energy * (e.difficulty ?? 0) * impactEnergyBoost(e.impact) * (mult - 1);
+  const bf = weights.buffer * (thinBuffer.get(e.projectId) ?? 0) * (mult - 1);
+  return sw + en + bf;
+}
+
+/**
  * Re-sequence one day's tasks to descend `J` (switches + energy misfit), staying
  * dependency-valid. Greedy, deterministic: among the ready tasks (same-day prereqs
  * emitted), take the one with the lowest marginal cost for the current cursor —
@@ -216,17 +239,9 @@ function sequenceDay(
     let best = pool[0];
     let bestCost = Infinity;
     for (const e of pool) {
-      const sw = current !== undefined && (e.projectId ?? null) !== current ? weights.switch : 0;
-      // Energy: reward cognitively-hard work (`difficulty`) in a fast window (`netMult<1`),
-      // penalise it in a slow one — modulated by impact (S3b Phase 4) so a fast window
-      // prefers work that is hard AND valuable. The gate prices the resulting (reseeded) order.
-      const en = weights.energy * (e.difficulty ?? 0) * impactEnergyBoost(e.impact) * (mult - 1);
-      // Buffer (S3a lever): a thin-buffer (at-risk) project's work gets the SAME fast-window
-      // pull as energy but cognitive-difficulty-INDEPENDENT — protect the thinnest deadline by
-      // giving its work the hours it is most likely to finish in, even when that work is light,
-      // scaled by how thin (`urgency`). Vanishes with no profile (`mult−1=0`) or when not thin.
-      const bf = weights.buffer * (thinBuffer.get(e.projectId) ?? 0) * (mult - 1);
-      const cost = sw + en + bf;
+      // Switch + energy (hard/valuable work into fast windows) + buffer (at-risk work into
+      // fast windows) — the shared objective `arrangementScore` also prices. See `marginalJ`.
+      const cost = marginalJ(e, current, mult, weights, thinBuffer);
       if (
         cost < bestCost - COST_EPSILON ||
         (cost <= bestCost + COST_EPSILON && rank.get(e.taskId)! < rank.get(best.taskId)!)
@@ -308,6 +323,66 @@ export function arrangeOrder(
     i = j;
   }
   return changed ? out : order; // same reference when nothing moved (cheap no-op signal)
+}
+
+/**
+ * The total soft score `J` of an order AS GIVEN (lower is better) — the same objective
+ * `arrangeOrder` minimises, evaluated instead of optimised. Buckets the order into days by
+ * the identical (comfort-capped when a cap is in force) pack, then sums each near-horizon
+ * bucket's per-pick `marginalJ` walking the tasks in the ORDER PASSED (no re-sequencing) —
+ * context-switches + energy/buffer window-placement misfit. Out-of-horizon buckets score 0
+ * (they aren't arranged). With no window profile the energy+buffer terms vanish and `J`
+ * reduces to the context-switch count. Pure + deterministic. This is what the S3c stability
+ * gate weighs: a fresh candidate is adopted over the sticky committed plan only when its `J`
+ * improvement clears the churn-scaled hysteresis margin (`design/s3c-rolling-horizon-wrapper.md`).
+ */
+export function arrangementScore(
+  order: EffectiveOrderEntry[],
+  capacities: DayCapacity[],
+  today: string,
+  opts: ArrangeOrderOptions = {},
+): number {
+  if (order.length === 0) return 0;
+  const horizon = opts.horizonDays ?? ARRANGE_HORIZON_DAYS;
+  const weights = opts.weights ?? ARRANGE_WEIGHTS;
+  const profile = opts.windowProfile ?? null;
+  const cap = opts.comfortCapMinutes ?? null;
+  const thinBuffer = opts.thinBufferUrgency ?? NO_THIN_BUFFER;
+
+  // Identical bucketing to `arrangeOrder` (comfort-capped when a cap is set) so `J` prices
+  // the same day layout the arranger optimises.
+  const durations = order.map((e) => Math.max(0, e.estimatedMinutes));
+  const offsets =
+    cap != null
+      ? packOffsetsComfort(
+          durations,
+          capacities,
+          order.map((e, i) => (e.difficulty ?? 0) * durations[i]),
+          cap,
+        )
+      : packOffsets(durations, capacities);
+
+  let total = 0;
+  let i = 0;
+  while (i < order.length) {
+    let j = i;
+    while (j < order.length && offsets[j] === offsets[i]) j++;
+    const off = offsets[i];
+    if (off < horizon) {
+      const segs = daySegments(capacities[off]?.capacityMinutes ?? 0, profile);
+      let cum = 0;
+      let current: string | null | undefined;
+      for (let k = i; k < j; k++) {
+        const e = order[k];
+        const mult = segs.mult[windowIndexAt(cum, segs.caps)];
+        total += marginalJ(e, current, mult, weights, thinBuffer);
+        cum += Math.max(0, e.estimatedMinutes);
+        current = e.projectId ?? null;
+      }
+    }
+    i = j;
+  }
+  return total;
 }
 
 // --- Pillar 1: the window-capacity model (OVERHAUL S3b Phase 2) --------------
