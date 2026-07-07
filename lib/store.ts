@@ -18,6 +18,7 @@ import type {
   Decision,
   DivergenceReason,
   DraftClassification,
+  EffectiveOrderEntry,
   EntryKind,
   EntryStatus,
   DegradedCriterion,
@@ -32,6 +33,7 @@ import type {
   PitCall,
   PlanVersion,
   PlanRoll,
+  PlanRollKind,
   PortfolioStrategy,
   Goal,
   ProjectForecast,
@@ -112,6 +114,7 @@ import {
 import {
   rollDecision,
   planRollKind,
+  undoRollDecision,
   type RollContext,
   type RollDecisionResult,
 } from "./rolling";
@@ -1433,6 +1436,108 @@ async function prunePlanRolls(supabase: RequestClient): Promise<void> {
         "id",
         stale.map((r) => r.id),
       );
+}
+
+interface PlanRollRow {
+  id: string;
+  rolled_at: string;
+  anchor: string;
+  fingerprint: string;
+  j: number;
+  kind: PlanRollKind;
+  prev_j: number | null;
+  plan_order: EffectiveOrderEntry[];
+  reverted_at: string | null;
+  schema_version: number;
+}
+
+function rowToPlanRoll(r: PlanRollRow): PlanRoll {
+  return {
+    id: r.id,
+    rolledAt: r.rolled_at,
+    anchor: r.anchor,
+    fingerprint: r.fingerprint,
+    j: r.j,
+    kind: r.kind,
+    prevJ: r.prev_j,
+    order: r.plan_order, // `plan_order` column ↔ `order` field (reserved-word remap)
+    revertedAt: r.reverted_at,
+    schemaVersion: r.schema_version,
+  };
+}
+
+/** The passive-roll history, newest-first (capped at `PLAN_ROLL_CAP`). Rows whose
+ *  `schemaVersion` no longer matches the current arrangement shape are dropped — like a
+ *  stale `CommittedPlan` they can't be replayed through reconcile, so they can neither be
+ *  shown nor undone. Mirrors `listPlanVersions`. */
+export async function listPlanRolls(): Promise<PlanRoll[]> {
+  let rolls: PlanRoll[];
+  if (isSupabaseConfigured()) {
+    const supabase = await getRequestClient();
+    const { data } = await supabase
+      .from("plan_rolls")
+      .select("*")
+      .order("rolled_at", { ascending: false })
+      .limit(PLAN_ROLL_CAP);
+    rolls = ((data as PlanRollRow[]) ?? []).map(rowToPlanRoll);
+  } else {
+    await ensureSeeded();
+    rolls = memDB().planRolls;
+  }
+  return rolls.filter((r) => r.schemaVersion === COMMITTED_PLAN_SCHEMA_VERSION);
+}
+
+async function getPlanRoll(id: string): Promise<PlanRoll | null> {
+  let roll: PlanRoll | null;
+  if (isSupabaseConfigured()) {
+    const supabase = await getRequestClient();
+    const { data } = await supabase
+      .from("plan_rolls")
+      .select("*")
+      .eq("id", id)
+      .maybeSingle();
+    roll = data ? rowToPlanRoll(data as PlanRollRow) : null;
+  } else {
+    await ensureSeeded();
+    roll = memDB().planRolls.find((r) => r.id === id) ?? null;
+  }
+  if (roll && roll.schemaVersion !== COMMITTED_PLAN_SCHEMA_VERSION) return null;
+  return roll;
+}
+
+/** The roll immediately BEFORE `roll` by `rolledAt` for this user — the arrangement `roll`
+ *  superseded, hence what its undo restores. Null when `roll` is the earliest retained (it was
+ *  the first-ever commit): undo then falls back to a fresh build (design §4). */
+async function priorPlanRoll(roll: PlanRoll): Promise<PlanRoll | null> {
+  if (isSupabaseConfigured()) {
+    const supabase = await getRequestClient();
+    const { data } = await supabase
+      .from("plan_rolls")
+      .select("*")
+      .lt("rolled_at", roll.rolledAt)
+      .order("rolled_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    return data ? rowToPlanRoll(data as PlanRollRow) : null;
+  }
+  await ensureSeeded();
+  // memDB is newest-first (unshift), so the first entry older than `roll` is its predecessor.
+  return memDB().planRolls.find((r) => r.rolledAt < roll.rolledAt) ?? null;
+}
+
+async function markPlanRollReverted(id: string): Promise<void> {
+  const revertedAt = new Date().toISOString();
+  if (isSupabaseConfigured()) {
+    const supabase = await getRequestClient();
+    await supabase
+      .from("plan_rolls")
+      .update({ reverted_at: revertedAt })
+      .eq("id", id);
+    return;
+  }
+  await ensureSeeded();
+  const r = memDB().planRolls.find((x) => x.id === id);
+  if (r) r.revertedAt = revertedAt;
 }
 
 // --- Plan version history (S1 step 3 / vision §1.3) -------------------------
@@ -3291,6 +3396,58 @@ export async function commitRollingPlan(): Promise<RollDecisionResult | null> {
     }
   }
   return decision;
+}
+
+/**
+ * Undo one automatic roll (design/s3c2-passive-roll-history.md §4) — the ARRANGEMENT
+ * counterpart to `undoPlanVersion`. NOT a row restore: it takes the arrangement `roll`
+ * superseded (the immediately-prior roll's order, or a fresh build if `roll` was the
+ * first-ever commit) and re-commits it, but only after feeding it back through the S3c-1
+ * read path via `undoRollDecision` — reconcile against the current task set (a completed /
+ * deleted-since task is dropped, never resurrected) then re-price, with odds/feasibility
+ * overriding a stale restore. The stored order is a PREFERENCE SEED, not restored truth.
+ *
+ * Re-commits under the CURRENT fingerprint + anchor so the roll `revalidateAll` fires right
+ * after this stays put: the restore holds against the soft stability gate (otherwise the very
+ * gain that caused the roll would re-adopt the candidate and make undo a no-op). Idempotent —
+ * a second undo of an already-reverted roll is a no-op. The undone roll stays in history with
+ * `revertedAt` set (struck-through in the timeline), same as `undoPlanVersion`.
+ */
+export async function undoPlanRoll(id: string): Promise<void> {
+  const roll = await getPlanRoll(id);
+  if (!roll || roll.revertedAt) return; // idempotent — gone, or already reverted
+
+  const prior = await priorPlanRoll(roll);
+  const g = await gatherForecast();
+  const ctx = allocContext(g, g.commitments);
+  const bundle = buildArrangement(g, ctx);
+  const repriceOpts = repriceOptionsFor(g, ctx, bundle);
+
+  const decision = undoRollDecision({
+    // The arrangement `roll` superseded: the immediately-prior roll, or (no prior ⇒ `roll`
+    // was the first-ever commit) no earlier preference at all = a fresh S3b build.
+    restoredOrder: prior ? prior.order : bundle.reorder.order,
+    canonicalOrder: bundle.canonical.order,
+    candidate: {
+      order: bundle.reorder.order,
+      allOnTime: bundle.reorder.joint.allOnTime,
+    },
+    repriceAllOnTime: (order) =>
+      globalForecastJoint(order, ctx.capacities, g.deadlineByProject, g.today, repriceOpts)
+        .allOnTime,
+    scoreJ: (order) => arrangementScore(order, ctx.capacities, g.today, bundle.arrangeOpts),
+  });
+
+  await setCommittedPlan({
+    schemaVersion: COMMITTED_PLAN_SCHEMA_VERSION,
+    order: decision.order,
+    anchor: g.today,
+    fingerprint: rollFingerprint(g, ctx),
+    j: decision.j,
+    committedAt: new Date().toISOString(),
+  });
+
+  await markPlanRollReverted(id);
 }
 
 export async function createJointScorer(): Promise<JointScorer> {
