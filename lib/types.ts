@@ -1289,6 +1289,26 @@ export interface CommittedPlan {
   committedAt: string;
 }
 
+/**
+ * A local instant captured CLIENT-SIDE (OVERHAUL §5a substrate S3c-4,
+ * design/s3c4-intraday-frozen-zone.md). The scheduler is deliberately clock-free
+ * everywhere else (day-granular capacity, no timezone stored — S3b decision #5); the
+ * intra-day frozen zone is the one place a real "now" is needed, and it follows the S2
+ * timezone-gotcha resolution: the client knows its own offset, so it captures its local
+ * time rather than the server deriving it from a UTC instant (which would be wrong by the
+ * user's offset). Passed per request, NEVER stored — no migration, no stored timezone. It
+ * enters ONLY the churn near-weight; absent or ambiguous ⇒ the wrapper is byte-identical to
+ * the date-granular S3c-1 behaviour (no-regret).
+ */
+export interface LocalNow {
+  /** The client's local calendar day, `YYYY-MM-DD`. Compared against the plan's frozen-zone
+   *  anchor; a mismatch (midnight rollover / travel / skew) ⇒ date-granular fallback. */
+  date: string;
+  /** Minutes since local midnight, `0..1439`. How far into today we are — the signal that
+   *  slips the frozen zone forward through the day. */
+  minutesSinceMidnight: number;
+}
+
 // --- Rolling-horizon history (S3c-2) ----------------------------------------
 
 /**
