@@ -118,6 +118,7 @@ import {
   rollDecision,
   planRollKind,
   undoRollDecision,
+  reorderDecision,
   calibrateHysteresis,
   type RollContext,
   type RollDecisionResult,
@@ -3608,6 +3609,89 @@ export async function undoPlanRoll(id: string): Promise<void> {
   });
 
   await markPlanRollReverted(id);
+}
+
+/** What a drag-to-reorder produced, for the client's optimistic UI + warning. */
+export interface ReorderOutcome {
+  /** True ⇒ the honored order cost more than ε of odds — the client shows a "this costs some
+   *  odds" note (design §9.1 honor-with-warning). */
+  oddsCost: boolean;
+  /** True ⇒ an odds-neutral, genuinely-resequencing drag was accrued as a calibration
+   *  observation (a `plan_reorders` row). False ⇒ honored but not taught from. */
+  recorded: boolean;
+}
+
+/**
+ * Honor a drag-to-reorder of TODAY's plan and, when it's odds-neutral, accrue it as a
+ * revealed-preference observation (OVERHAUL §5a substrate S3c-5, design §6). The dragged order is
+ * a PREFERENCE SEED fed through the same reconcile + re-price the roll-undo uses, then committed
+ * under the CURRENT fingerprint so the `revalidateAll` roll that fires right after stays put
+ * (mirrors `undoPlanRoll`). Unlike an undo, a deliberate drag is ALWAYS honored — even one that
+ * costs odds (design decision §9.1); the odds comparison only sets the "costs odds" warning and
+ * gates whether the pair teaches `calibrateArrangeWeights` (S4). The whole decision is the pure
+ * `reorderDecision`; this wraps it with the real pricers + the commit + the accrual.
+ *
+ * `date` is the plan day the drag was for (today, v1); the stored row uses the server's `g.today`
+ * as the authoritative day so a stale client date can't mislabel it. Best-effort on the accrual,
+ * like `insertPlanRoll`: a history-append failure must never lose the honored reorder.
+ */
+export async function reorderToday(
+  date: string,
+  orderedTaskIds: string[],
+): Promise<ReorderOutcome> {
+  const [g, committed, localNow, rolls] = await Promise.all([
+    gatherForecast(),
+    getCommittedPlan(),
+    readClientLocalNow(),
+    listPlanRolls(),
+  ]);
+  const ctx = allocContext(g, g.commitments);
+  const bundle = buildArrangement(g, ctx);
+  // The order the user is following / saw — the same sticky-vs-fresh choice the read path makes,
+  // so the drag's "before" and its priced baseline match what's on screen (no extra Monte Carlo).
+  const decision = rollDecision(
+    rollContextFor(g, ctx, bundle, committed, localNow, calibrateHysteresis(rolls)),
+  );
+  const repriceOpts = repriceOptionsFor(g, ctx, bundle);
+  const result = reorderDecision({
+    followedOrder: decision.order,
+    followedOdds: decision.allOnTime,
+    orderedTaskIds,
+    canonicalOrder: bundle.canonical.order,
+    repriceAllOnTime: (order) =>
+      globalForecastJoint(order, ctx.capacities, g.deadlineByProject, g.today, repriceOpts)
+        .allOnTime,
+    scoreJ: (order) => arrangementScore(order, ctx.capacities, g.today, bundle.arrangeOpts),
+  });
+
+  // Honor unconditionally — commit the dragged order under the current fingerprint (design §9.1).
+  await setCommittedPlan({
+    schemaVersion: COMMITTED_PLAN_SCHEMA_VERSION,
+    order: result.order,
+    anchor: g.today,
+    fingerprint: rollFingerprint(g, ctx),
+    j: result.j,
+    committedAt: new Date().toISOString(),
+  });
+
+  // Accrue only the odds-neutral, genuinely-resequencing drags (design §4b) — the 🔴-tier signal
+  // S4's `calibrateArrangeWeights` learns from.
+  let recorded = false;
+  if (result.record) {
+    await insertPlanReorder({
+      id: crypto.randomUUID(),
+      // The plan day the drag was for. Trust a well-formed client date (the day they were
+      // viewing, matching the LocalNow beacon), else fall back to server `g.today` — never a
+      // malformed value. v1 is today-only, so this is normally just `g.today`.
+      date: /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : g.today,
+      capturedAt: new Date().toISOString(),
+      appOrder: result.record.appOrder,
+      userOrder: result.record.userOrder,
+      schemaVersion: COMMITTED_PLAN_SCHEMA_VERSION,
+    });
+    recorded = true;
+  }
+  return { oddsCost: result.oddsCost, recorded };
 }
 
 /**
