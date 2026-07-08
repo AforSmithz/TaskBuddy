@@ -105,11 +105,13 @@ import {
 } from "./allocate";
 import {
   arrangementScore,
+  calibrateArrangeWeights,
   comfortSmooth,
   gatedReorder,
   windowCapacities,
   windowProfileFromEnergy,
   type ArrangeOrderOptions,
+  type ArrangeWeights,
   type ComfortSmoothResult,
   type GatedReorderResult,
   type WindowProfile,
@@ -2879,6 +2881,11 @@ interface ForecastGather {
   completions: ActivityCompletion[];
   /** The user's value model — importance weights + recovery style (OVERHAUL §5.1). */
   valueModel: ValueModel;
+  /** The drag-to-reorder history (S3c-5, the 🔴-tier signal) — revealed-preference pairs the
+   *  arrangement-weight calibrator learns `ArrangeWeights` from. Empty ⇒ prior weights (no-regret).
+   *  Raw data on the gather; the calibrated weights are derived later in `buildArrangement` (they
+   *  depend on the comfort-cap + thin-buffer that pass also computes). */
+  planReorders: PlanReorder[];
   today: string;
 }
 
@@ -2933,7 +2940,7 @@ function skillAllocWork(
 
 /** Collect deadlined projects, their open tasks, and the time budget. */
 async function gatherForecast(): Promise<ForecastGather> {
-  const [projects, entries, tasks, deps, rawBudget, activities, completions, valueModel, allSkillNodes, allGoalCriteria, workSessions, windowAvailability] =
+  const [projects, entries, tasks, deps, rawBudget, activities, completions, valueModel, allSkillNodes, allGoalCriteria, workSessions, windowAvailability, planReorders] =
     await Promise.all([
       listGoals(),
       listEntries(),
@@ -2947,6 +2954,7 @@ async function gatherForecast(): Promise<ForecastGather> {
       listAllGoalCriteria(),
       listWorkSessions(),
       getWindowAvailability(),
+      listPlanReorders(),
     ]);
   const today = todayISO();
   // Fold the recurring drain into the commitment set the forecast reasons over.
@@ -3073,6 +3081,7 @@ async function gatherForecast(): Promise<ForecastGather> {
     activities,
     completions,
     valueModel,
+    planReorders,
     today,
   };
 }
@@ -3251,6 +3260,7 @@ function buildResolveInput(
   arrangeReorder: boolean,
   thinBuffer: ReadonlyMap<string, number>,
   committedOrder: string[] | null,
+  arrangeWeights: ArrangeWeights,
 ): ResolveInput {
   return {
     tasks: ctx.tasks,
@@ -3272,6 +3282,11 @@ function buildResolveInput(
     // client replays the SAME deterministic `arrangeOrder` on its re-derived order (the
     // reorder reads only inputs already in `ResolveInput`, so parity rides for free).
     arrangeReorder,
+    // S3c-5 (🔴 tier) — ship the calibrated soft-`J` term weights so the client's `arrangeOrder`
+    // replay weights `φ` exactly as the server did (else a learned weight would reshape the
+    // server's order but not the client's, breaking S1 parity). Prior `{1,1,1}` with no drags,
+    // where it's a no-op (== omitting), so no-regret holds.
+    arrangeWeights,
     // S3b Phase 3 `w_buffer` follow-on (graded in Phase 4) — ship the at-risk projects'
     // thin-buffer URGENCY the scorer flagged on the base, as a JSON-safe record. The client
     // rebuilds the Map and feeds the SAME `arrangeOrder`, so the buffer-biased order stays
@@ -3310,8 +3325,12 @@ interface ArrangementBundle {
    *  its priced odds, `.changed` the single boolean the S1 client + probes replay. */
   reorder: GatedReorderResult;
   arrangeReorder: boolean;
-  /** The arrange options the candidate was built under — reused by the churn bucketing +
-   *  the soft-J scorer so the roll measures the same plan the forecast priced. */
+  /** The calibrated arrangement weights (S3c-5 🔴 tier) learned from the drag history — the
+   *  soft-`J` term weights the reorder + scorer used. Prior `{1,1,1}` with no drags (no-regret).
+   *  Shipped to the client so its `arrangeOrder` replay stays bit-identical (S1 parity). */
+  weights: ArrangeWeights;
+  /** The arrange options the candidate was built under (INCLUDING `weights`) — reused by the churn
+   *  bucketing + the soft-J scorer so the roll measures the same plan the forecast priced. */
   arrangeOpts: ArrangeOrderOptions;
 }
 
@@ -3332,6 +3351,17 @@ function buildArrangement(g: ForecastGather, ctx: AllocContext): ArrangementBund
   });
   const comfortCapMinutes = smoothed.comfortCapMinutes;
   const thinBuffer = thinBufferUrgencyMap(g, g.commitments, smoothed.joint.byProject);
+  // S3c-5 (🔴 tier): calibrate the soft `J` term weights from the drag-to-reorder history, priced
+  // under THIS pass's arrange context (window profile + comfort cap + thin buffer) so `φ` is the
+  // same feature vector the reorder scores. Computed AFTER the comfort/thin-buffer decision (the
+  // weights read them) but BEFORE the reorder (which reads the weights) — no circularity, since
+  // neither `comfortSmooth` nor `thinBufferUrgencyMap` reads the weights. No drags ⇒ prior
+  // `{1,1,1}`, so the reorder + every downstream pricing is byte-identical to pre-S3c-5.
+  const weights = calibrateArrangeWeights(g.planReorders, ctx.capacities, g.today, {
+    windowProfile: g.windowProfile,
+    comfortCapMinutes,
+    thinBufferUrgency: thinBuffer,
+  });
   const reorder = gatedReorder(
     canonical.order,
     ctx.capacities,
@@ -3344,12 +3374,14 @@ function buildArrangement(g: ForecastGather, ctx: AllocContext): ArrangementBund
       windowProfile: g.windowProfile,
       comfortCapMinutes,
       thinBufferUrgency: thinBuffer,
+      weights,
     },
   );
   const arrangeOpts: ArrangeOrderOptions = {
     windowProfile: g.windowProfile,
     comfortCapMinutes,
     thinBufferUrgency: thinBuffer,
+    weights,
   };
   return {
     canonical,
@@ -3358,6 +3390,7 @@ function buildArrangement(g: ForecastGather, ctx: AllocContext): ArrangementBund
     comfortCapMinutes,
     reorder,
     arrangeReorder: reorder.changed,
+    weights,
     arrangeOpts,
   };
 }
@@ -3752,7 +3785,7 @@ export async function createJointScorer(): Promise<JointScorer> {
   // optimizer's move probes, the cumulative display, AND the client subset re-solve. No-regret:
   // no cap / no reorder signal ⇒ the exact pre-S3b (windowed) path, bit-for-bit.
   const bundle = buildArrangement(g, ctx);
-  const { comfortCapMinutes, thinBuffer, arrangeReorder } = bundle;
+  const { comfortCapMinutes, thinBuffer, arrangeReorder, weights: arrangeWeights } = bundle;
   // S3c-1 rolling horizon — decide whether to keep committing to the plan the user is already
   // following (sticky) or adopt the fresh candidate. Reads persist NOTHING (the mutation-time
   // roll is the sole writer); this only picks the "before" the strategy page reasons from.
@@ -3773,7 +3806,7 @@ export async function createJointScorer(): Promise<JointScorer> {
   // The joint re-solve context carries the cap + the reorder flag + the thin-buffer set
   // (mirrors how `windowProfile` rides on `g`) plus the sticky committed order; every
   // `jointOddsWithMoves` / `cumulativeJointOdds` below reads them off `jg`.
-  const jg = { ...g, comfortCapMinutes, arrangeReorder, thinBufferUrgency: thinBuffer, committedOrder };
+  const jg = { ...g, comfortCapMinutes, arrangeReorder, arrangeWeights, thinBufferUrgency: thinBuffer, committedOrder };
   const base = jointOddsWithMoves(jg, ctx, []);
   const baseByProject = base.byProject;
 
@@ -3793,7 +3826,7 @@ export async function createJointScorer(): Promise<JointScorer> {
     baseAllOnTime: base.allOnTime,
     score: (moves) => jointOddsWithMoves(jg, ctx, moves, JOINT_PROBE_ITERATIONS),
     cumulative: (ordered) => cumulativeJointOdds(jg, ctx, ordered),
-    resolveInput: buildResolveInput(g, ctx, comfortCapMinutes, arrangeReorder, thinBuffer, committedOrder),
+    resolveInput: buildResolveInput(g, ctx, comfortCapMinutes, arrangeReorder, thinBuffer, committedOrder, arrangeWeights),
   };
 }
 
