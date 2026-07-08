@@ -1,5 +1,6 @@
 import { Sidebar } from "@/components/layout/sidebar";
 import { TopBar } from "@/components/layout/top-bar";
+import { LocalNowBeacon } from "@/components/layout/local-now-beacon";
 import { isSupabaseConfigured } from "@/lib/store";
 import { isLLMConfigured } from "@/lib/extraction";
 import { requireUser, displayName } from "@/lib/auth";
@@ -19,6 +20,7 @@ export default async function AppLayout({
 
   return (
     <>
+      <LocalNowBeacon />
       <Sidebar demoMode={demoMode} userName={name} userEmail={user.email ?? ""} />
       <div className="ml-[var(--spacing-sidebar)] min-h-screen">
         <div className="mx-auto max-w-[1180px] px-8 pt-6">
