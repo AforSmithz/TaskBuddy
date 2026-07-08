@@ -601,6 +601,111 @@ export function undoRollDecision(ctx: UndoRollContext): UndoRollResult {
   };
 }
 
+// --- Drag-to-reorder honor + accrual (S3c-5 §6) -----------------------------
+
+/** A revealed-preference pair `userOrder ≻ appOrder` worth teaching the arranger's weights
+ *  (design/s3c5-shared-calibration-brain.md §4b) — the shape persisted as a {@link PlanReorder}
+ *  and later fed to `calibrateArrangeWeights` (S4). Only accrued for an odds-NEUTRAL drag. */
+export interface ReorderPair {
+  /** The order the arranger showed the user (what they dragged away from) — the `φ(a*)` side. */
+  appOrder: EffectiveOrderEntry[];
+  /** The user's honored order (what they now follow) — the `φ(u)` side. */
+  userOrder: EffectiveOrderEntry[];
+}
+
+export interface ReorderContext {
+  /** The order the user is currently following / was shown (`rollDecision.order`) — the drag's
+   *  "before" and the accrual pair's `appOrder`. */
+  followedOrder: EffectiveOrderEntry[];
+  /** The followed order's already-priced odds (`rollDecision.allOnTime`) — the neutrality
+   *  baseline, so honoring a drag costs no extra Monte-Carlo for the "before". */
+  followedOdds: number;
+  /** The user's dragged TODAY sequence (task ids, top-first) — from the client drop. */
+  orderedTaskIds: string[];
+  /** Fresh canonical order over the CURRENT task set (`buildGlobalPlan(...).order`) — the
+   *  reconcile basis, so a completed/deleted-since task drops instead of resurrecting. */
+  canonicalOrder: EffectiveOrderEntry[];
+  /** Reprice an order's P(all deadlined projects land) under the CURRENT situation (injected so
+   *  this module authors no odds — mirrors {@link RollContext}). */
+  repriceAllOnTime: (order: EffectiveOrderEntry[]) => number;
+  /** Score an order's soft `J` under the current arrange options (`arrangementScore`). */
+  scoreJ: (order: EffectiveOrderEntry[]) => number;
+  /** Odds slack that still counts as "neutral" both ways (default ROLL_ODDS_EPSILON). */
+  oddsEpsilon?: number;
+}
+
+export interface ReorderResult {
+  /** The honored order to commit — the reconciled dragged order (design §9.1: a drag is ALWAYS
+   *  honored, even one that costs odds; only the accrual and the warning are odds-gated). */
+  order: EffectiveOrderEntry[];
+  /** Its soft `J` (for the re-committed plan). */
+  j: number;
+  /** True ⇒ the honored order's odds fell more than ε below the followed order's — the UI shows a
+   *  "this costs some odds" note (honor-with-warning), and the drag does NOT feed calibration. */
+  oddsCost: boolean;
+  /** The revealed-preference pair to accrue, or null when the drag is not odds-neutral, or moved
+   *  nothing after reconcile — only a neutral, genuinely-resequencing drag teaches the dials. */
+  record: ReorderPair | null;
+}
+
+/**
+ * Splice the user's dragged TODAY sequence into the followed cross-project order (S3c-5 §6): the
+ * dragged tasks first, in the user's order, then the rest of the plan (the upcoming-days tail) in
+ * place. Because the arranger packs greedily in order, today's tasks are a prefix of `followed`,
+ * so this yields exactly "[today, user-ordered] ++ [upcoming, unchanged]". Ids no longer present
+ * are skipped; tasks not in the dragged set keep their relative order. Pure.
+ */
+export function applyTodayReorder(
+  followed: EffectiveOrderEntry[],
+  orderedTaskIds: string[],
+): EffectiveOrderEntry[] {
+  const idSet = new Set(orderedTaskIds);
+  const byId = new Map(
+    followed.filter((e) => idSet.has(e.taskId)).map((e) => [e.taskId, e]),
+  );
+  const today: EffectiveOrderEntry[] = [];
+  for (const id of orderedTaskIds) {
+    const e = byId.get(id);
+    if (e) today.push(e);
+  }
+  const rest = followed.filter((e) => !idSet.has(e.taskId));
+  return [...today, ...rest];
+}
+
+/**
+ * Decide what a drag-to-reorder commits and whether it teaches the arrangement weights
+ * (design/s3c5-shared-calibration-brain.md §6). The user's dragged order is a PREFERENCE SEED fed
+ * through the same reconcile the roll-undo uses ({@link reconcileCommitted}) — dropping a
+ * completed/deleted task, folding in new work — then re-priced and committed under the current
+ * fingerprint (the store wraps this). Unlike {@link undoRollDecision}, the honor NEVER yields on
+ * odds: a deliberate drag is always honored (design decision §9.1), even one that costs odds; the
+ * odds comparison only sets a "this costs some odds" warning and gates the calibration accrual.
+ *
+ * An observation is accrued ONLY when the honored order is odds-NEUTRAL vs the followed order
+ * (`|Δodds| ≤ ε`) AND actually resequenced it — so calibration learns pure soft preference, never
+ * an odds tradeoff (design §4b / §9.1). Pure given its injected pricers, so the whole decision is
+ * unit-testable with fakes.
+ */
+export function reorderDecision(ctx: ReorderContext): ReorderResult {
+  const eps = ctx.oddsEpsilon ?? ROLL_ODDS_EPSILON;
+  const seed = applyTodayReorder(ctx.followedOrder, ctx.orderedTaskIds);
+  const { order: honored } = reconcileCommitted(seed, ctx.canonicalOrder);
+  const honoredOdds = ctx.repriceAllOnTime(honored);
+  const j = ctx.scoreJ(honored);
+  const oddsCost = honoredOdds < ctx.followedOdds - eps;
+  const oddsNeutral = Math.abs(honoredOdds - ctx.followedOdds) <= eps;
+  const changed = !sameIds(honored, ctx.followedOrder);
+  return {
+    order: honored,
+    j,
+    oddsCost,
+    record:
+      oddsNeutral && changed
+        ? { appOrder: ctx.followedOrder, userOrder: honored }
+        : null,
+  };
+}
+
 // --- Roll-cause diagnosis (S3c-3: "why your plan changed") -------------------
 
 /**
