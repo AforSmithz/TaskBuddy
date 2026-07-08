@@ -28,7 +28,7 @@ import { dayCapacities, type DayCapacity, type DependencyEdge } from "./schedule
 import { globalForecastJoint, type ForecastOptions } from "./forecast";
 import { buildGlobalPlan, effectiveOrder, effortToDifficulty, type AllocTask } from "./allocate";
 import { activityDrainCommitments, currentWeekOwedDates } from "./recurring";
-import { arrangeOrder, windowCapacities, type WindowProfile } from "./arrange";
+import { arrangeOrder, windowCapacities, type ArrangeWeights, type WindowProfile } from "./arrange";
 
 /** The slice of the server gather a move's pure forecast-patch reads. Only the
  *  skip-move arm touches the gather (to find the activity's owed dates); every
@@ -75,6 +75,11 @@ export interface JointForecastContext extends MovePatchContext {
    *  most). Decided once on the base (like `arrangeReorder`) — it can't be recomputed from
    *  this context's data — and read by `arrangeOrder`; absent ⇒ no buffer bias. */
   thinBufferUrgency?: ReadonlyMap<string, number> | null;
+  /** OVERHAUL S3c-5 (🔴 tier) — the calibrated soft-`J` term weights (`ArrangeWeights`) the
+   *  server's reorder used, learned from the drag-to-reorder history. Fed to `arrangeOrder` so a
+   *  move probe's within-day reorder weights `φ` exactly as the base did. Absent/prior `{1,1,1}`
+   *  ⇒ the default weights, a no-op (no-regret). */
+  arrangeWeights?: ArrangeWeights | null;
   /** OVERHAUL S3c-1 — when the rolling-horizon wrapper is showing a STICKY committed plan, the
    *  committed cross-project order as a task-id sequence (already reconciled to the current
    *  set). The EMPTY (base) move subset prices this order VERBATIM — the server already arranged
@@ -445,6 +450,7 @@ export function jointOddsWithMoves(
             windowProfile: g.windowProfile,
             comfortCapMinutes: g.comfortCapMinutes,
             thinBufferUrgency: g.thinBufferUrgency,
+            weights: g.arrangeWeights ?? undefined,
           })
         : plan.order;
   return globalForecastJoint(order, capacities, state.deadlineByProject, g.today, opts);
@@ -538,6 +544,11 @@ export interface ResolveInput {
    *  buffer math needs the per-project forecast distribution the server holds). Absent ⇒ no
    *  buffer bias. */
   thinBufferUrgency?: Record<string, number>;
+  /** OVERHAUL S3c-5 (🔴 tier) — the calibrated soft-`J` term weights the server's reorder used
+   *  (learned from the drag-to-reorder history). The client feeds them to the SAME `arrangeOrder`
+   *  so its within-day reorder weights `φ` bit-identically to the server's. Prior `{1,1,1}` /
+   *  absent ⇒ the default weights, a no-op (no-regret). */
+  arrangeWeights?: ArrangeWeights;
   /** OVERHAUL S3c-1 — when a STICKY committed plan is shown, its committed order as a task-id
    *  sequence (already reconciled to the current set). The client prices the EMPTY (base) subset
    *  by replaying this sequence VERBATIM over its own re-derived entries (reorder OFF) instead of
@@ -624,6 +635,8 @@ export function resolveSubsetOdds(
             thinBufferUrgency: input.thinBufferUrgency
               ? new Map(Object.entries(input.thinBufferUrgency))
               : null,
+            // Same calibrated weights the server used — replayed so `φ` is weighted identically.
+            weights: input.arrangeWeights ?? undefined,
           })
         : baseOrder;
   const opts: ForecastOptions = {
