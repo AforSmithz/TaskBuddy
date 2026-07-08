@@ -1,5 +1,6 @@
 import "server-only";
 import { createHash } from "crypto";
+import { cookies } from "next/headers";
 import type {
   GoalKind,
   SkillNode,
@@ -30,6 +31,7 @@ import type {
   GoalCriterion,
   OpenQuestion,
   CommittedPlan,
+  LocalNow,
   PitCall,
   PlanVersion,
   PlanRoll,
@@ -3324,15 +3326,48 @@ function repriceOptionsFor(
   return opts;
 }
 
+/** The cookie the client `LocalNowBeacon` stamps with the browser's local day + minute-of-day
+ *  (S3c-4). Read-only server-side; the value the intra-day frozen zone sharpens against. */
+const LOCAL_NOW_COOKIE = "tb_local_now";
+
+/**
+ * Read the client-captured local "now" from the request cookie (S3c-4) — the S2 timezone-gotcha
+ * resolution: the browser stamps its OWN local day/minute (`LocalNowBeacon`), never re-derived
+ * from the server's UTC clock. Returns `undefined` on any absence / malformation / out-of-range
+ * value, so the roll falls back to date-granular churn, byte-identical to S3c-1 (the no-regret
+ * path). Never throws: a bad cookie, or a call outside a request scope, must not break a render —
+ * the anchor-dependent fallbacks (date mismatch, no day-0 capacity) live in `resolveElapsedToday`.
+ * Format is `YYYY-MM-DD|minutesSinceMidnight`; parsed + bounds-checked here.
+ */
+async function readClientLocalNow(): Promise<LocalNow | undefined> {
+  try {
+    const raw = (await cookies()).get(LOCAL_NOW_COOKIE)?.value;
+    if (!raw) return undefined;
+    const [date, minsStr] = raw.split("|");
+    if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return undefined;
+    // Digit-shape guard BEFORE Number(): an empty / non-numeric minutes segment (`"2026-07-08|"`)
+    // would otherwise coerce to 0 and read as midnight. Reject it ⇒ date-granular fallback.
+    if (!minsStr || !/^\d+$/.test(minsStr)) return undefined;
+    const minutesSinceMidnight = Number(minsStr);
+    if (minutesSinceMidnight > 1439) return undefined;
+    return { date, minutesSinceMidnight };
+  } catch {
+    return undefined;
+  }
+}
+
 /** Build the pure `rollDecision` inputs for a gather + its arrangement bundle. The Monte-Carlo
  *  reprice and the soft-`J` scorer are injected as closures over the CURRENT situation, so the
  *  reconciled committed plan is priced apples-to-apples with the candidate (same comfort cap +
- *  window pricing), and the decision module authors no odds itself. */
+ *  window pricing), and the decision module authors no odds itself. `localNow` (S3c-4, the
+ *  client-captured clock; `undefined` ⇒ date-granular) enters ONLY the churn near-weight — never
+ *  odds, the persisted plan, or the fingerprint (a clock tick is not a situation change). */
 function rollContextFor(
   g: ForecastGather,
   ctx: AllocContext,
   bundle: ArrangementBundle,
   committed: CommittedPlan | null,
+  localNow?: LocalNow,
 ): RollContext {
   const repriceOpts = repriceOptionsFor(g, ctx, bundle);
   return {
@@ -3341,6 +3376,7 @@ function rollContextFor(
     candidate: { order: bundle.reorder.order, allOnTime: bundle.reorder.joint.allOnTime },
     anchor: g.today,
     fingerprint: rollFingerprint(g, ctx),
+    localNow,
     repriceAllOnTime: (order) =>
       globalForecastJoint(order, ctx.capacities, g.deadlineByProject, g.today, repriceOpts).allOnTime,
     scoreJ: (order) => arrangementScore(order, ctx.capacities, g.today, bundle.arrangeOpts),
@@ -3371,7 +3407,12 @@ export async function commitRollingPlan(): Promise<RollDecisionResult | null> {
     return null;
   }
   const bundle = buildArrangement(g, ctx);
-  const decision = rollDecision(rollContextFor(g, ctx, bundle, committed));
+  // S3c-4: the client's local "now" sharpens the frozen zone to the imminent part of today. It
+  // rides ONLY the churn near-weight — it is deliberately NOT in `rollFingerprint`, so the fast
+  // path above still short-circuits on a pure clock tick (a tick is not a situation change); it
+  // only refines which sticky arrangement the gate prefers once a real mutation forces the roll.
+  const localNow = await readClientLocalNow();
+  const decision = rollDecision(rollContextFor(g, ctx, bundle, committed, localNow));
   if (decision.shouldPersist) {
     await setCommittedPlan(decision.toPersist);
     // Persist-on-roll (S3c-2): retain a history entry for a GENUINE plan change (a
@@ -3494,10 +3535,11 @@ export async function createJointScorer(): Promise<JointScorer> {
   // added since, or odds that have since dropped). Without it the optimizer's
   // causes would silently collapse to the residual-only classes. Loaded in
   // parallel with the gather so it adds no latency.
-  const [g, cachedStrategy, committed] = await Promise.all([
+  const [g, cachedStrategy, committed, localNow] = await Promise.all([
     gatherForecast(),
     getCachedStrategy(),
     getCommittedPlan(),
+    readClientLocalNow(),
   ]);
   const ctx = allocContext(g, g.commitments);
   // The S3b arrangement pipeline decides the comfort cap, the thin-buffer urgency, and the
@@ -3514,7 +3556,9 @@ export async function createJointScorer(): Promise<JointScorer> {
   // so the S1 client re-solve of the empty (base) subset stays EXACT (decision #5). Move-probes
   // (non-empty subsets) still use the fresh arrangement — a strategy move is a re-plan, never a
   // sticky hold. No-regret: no committed row ⇒ the candidate verbatim ⇒ pre-S3c path, bit-for-bit.
-  const decision = rollDecision(rollContextFor(g, ctx, bundle, committed));
+  // S3c-4: `localNow` sharpens the frozen zone to the imminent part of today (read-only; never
+  // persisted, never in odds or the fingerprint) — `undefined` ⇒ date-granular, exactly S3c-1.
+  const decision = rollDecision(rollContextFor(g, ctx, bundle, committed, localNow));
   // S3c-6: on a quiet new day, refresh the committed row's frozen-zone anchor from this read.
   await advanceAnchorOnQuietDay(committed, decision);
   const committedOrder = decision.sticky ? decision.order.map((e) => e.taskId) : null;
@@ -3812,12 +3856,13 @@ export async function forecastDashboard(): Promise<{
   agendaOrder: GlobalPlan["order"];
   model: EstimationModel;
 }> {
-  const [g, activities, completions, cachedStrategy, committed] = await Promise.all([
+  const [g, activities, completions, cachedStrategy, committed, localNow] = await Promise.all([
     gatherForecast(),
     listRecurringActivities(),
     listActivityCompletions(),
     getCachedStrategy(),
     getCommittedPlan(),
+    readClientLocalNow(),
   ]);
   const ctx = allocContext(g, g.commitments);
   // The S3b arrangement pipeline over all current open work (no triage shedding): the canonical
@@ -3833,8 +3878,10 @@ export async function forecastDashboard(): Promise<{
   // show and persists nothing (the mutation-time roll is the sole writer); a stale anchor on a
   // quiet new day is harmless — `packGlobal` re-buckets from `g.today` regardless. `decision.order`
   // IS the display order in both cases (== the fresh candidate when not sticky). No committed row
-  // ⇒ the candidate verbatim ⇒ the exact pre-S3c dashboard, bit-for-bit.
-  const decision = rollDecision(rollContextFor(g, ctx, bundle, committed));
+  // ⇒ the candidate verbatim ⇒ the exact pre-S3c dashboard, bit-for-bit. S3c-4: `localNow` (the
+  // client clock, read-only) sharpens the frozen zone to the imminent part of today; `undefined`
+  // ⇒ date-granular churn, exactly S3c-1.
+  const decision = rollDecision(rollContextFor(g, ctx, bundle, committed, localNow));
   // S3c-6: on a quiet new day, refresh the committed row's frozen-zone anchor from this read.
   await advanceAnchorOnQuietDay(committed, decision);
   // Display == priced: when sticky, reprice the reconciled committed order for the headline +
