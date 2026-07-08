@@ -37,6 +37,7 @@ import {
   setValueModel,
   setWindowAvailability,
   skipActivity,
+  reorderToday,
   skipActivityForWeek,
   undoPlanRoll,
   undoPlanVersion,
@@ -44,6 +45,7 @@ import {
   updateRecurringActivity,
   updateTask,
   type NewActivityInput,
+  type ReorderOutcome,
 } from "./store";
 import { buildEODSummary, generateFollowUp, type EODSummary } from "./generate";
 import { decomposeLearningGoal } from "./decompose";
@@ -744,6 +746,24 @@ export async function undoPlanRollAction(id: string): Promise<void> {
   await requireUser();
   await undoPlanRoll(id);
   await revalidateAll();
+}
+
+/**
+ * Honor a drag-to-reorder of today's plan (S3c-5 §6): commit the dragged order as a preference
+ * seed (reconcile + re-price under the current fingerprint) and, when it's odds-neutral, accrue it
+ * as a calibration observation. A deliberate drag is always honored (design §9.1) — the returned
+ * `oddsCost` tells the client whether to surface the "this costs some odds" note. `revalidateAll`
+ * then re-rolls under the fresh fingerprint, so the just-committed order stays put and the page
+ * re-renders from it.
+ */
+export async function reorderTodayAction(
+  date: string,
+  orderedTaskIds: string[],
+): Promise<ReorderOutcome> {
+  await requireUser();
+  const outcome = await reorderToday(date, orderedTaskIds);
+  await revalidateAll();
+  return outcome;
 }
 
 /**
