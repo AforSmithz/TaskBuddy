@@ -4,6 +4,7 @@ import {
   type DayCapacity,
 } from "./schedule";
 import { ARRANGE_HORIZON_DAYS, type ArrangeOrderOptions } from "./arrange";
+import { CALIBRATE_KAPPA, clamp, shrinkScalar } from "./calibrate";
 import {
   COMMITTED_PLAN_SCHEMA_VERSION,
   type CommittedPlan,
@@ -269,6 +270,66 @@ export function stabilityGate(
   const margin = opts.stabilityMargin ?? STABILITY_MARGIN;
   const cost = opts.churnCost ?? CHURN_COST;
   return deltaJ >= margin + cost * churnValue;
+}
+
+// --- Hysteresis calibration (S3c-5 §5, the 🟡 tier) -------------------------
+
+/** The material-roll revert rate the default hysteresis constants are tuned for: we tolerate
+ *  up to ~1 in 5 automatic reshuffles being undone before the plan is judged too eager to roll.
+ *  At or below this the calibrator keeps the hand-tuned defaults; above it, it stiffens. */
+export const HYSTERESIS_PRIOR_REVERT_RATE = 0.2;
+
+/** How hard excess roll-regret stiffens the hysteresis, per unit of prior-relative excess.
+ *  Gentle: at the largest observable excess (a 100% revert rate) the factor reaches
+ *  {@link HYSTERESIS_MAX_FACTOR}. */
+export const HYSTERESIS_SENSITIVITY = 0.5;
+
+/** Calibration only ADDS stickiness (floor 1.0) — it never lowers the hand-tuned anti-thrash
+ *  floor on "they seem fine with churn", the conservative asymmetric choice — and is capped so a
+ *  run of undos can't freeze the plan solid. */
+export const HYSTERESIS_MIN_FACTOR = 1.0;
+export const HYSTERESIS_MAX_FACTOR = 3.0;
+
+/** The calibrated hysteresis knobs, ready to drop into {@link RollContext} / {@link stabilityGate}. */
+export interface CalibratedHysteresis {
+  stabilityMargin: number;
+  churnCost: number;
+}
+
+/**
+ * EB-calibrate the hysteresis knobs from the user's own roll-undo history (design
+ * s3c5-shared-calibration-brain.md §4a/§5). The signal is churn REGRET: a `material` roll (an
+ * automatic reshuffle of a real plan) that the user later undid. The revert rate over material
+ * rolls is shrunk toward {@link HYSTERESIS_PRIOR_REVERT_RATE} with the shared seam
+ * ({@link shrinkScalar}, `n` = material-roll count, `κ` = {@link CALIBRATE_KAPPA}), then mapped
+ * monotonically to a single stiffness factor applied to BOTH knobs — one signal identifies one
+ * degree of freedom, so we scale margin and cost together rather than pretend to separate them.
+ *
+ * Only `material` rolls count: `initial` (the first plan can't be regretted) and `anchor` (a
+ * day-advance, not a reshuffle) are excluded. NO-REGRET is structural: no material rolls ⇒ `n = 0`
+ * ⇒ `shrinkScalar` returns the prior ⇒ factor `= 1` ⇒ the exact `STABILITY_MARGIN`/`CHURN_COST`
+ * constants, byte-for-byte. Reverts BELOW the prior rate clamp to the floor (`1.0`), so an
+ * accepting user never loosens the tuned anti-thrash floor; reverts above it stiffen, bounded at
+ * {@link HYSTERESIS_MAX_FACTOR}.
+ */
+export function calibrateHysteresis(
+  rolls: readonly Pick<PlanRoll, "kind" | "revertedAt">[],
+): CalibratedHysteresis {
+  const material = rolls.filter((r) => r.kind === "material");
+  const n = material.length;
+  const reverted = material.filter((r) => r.revertedAt != null).length;
+  const observedRate = n > 0 ? reverted / n : HYSTERESIS_PRIOR_REVERT_RATE;
+  const rate = shrinkScalar(observedRate, HYSTERESIS_PRIOR_REVERT_RATE, n, CALIBRATE_KAPPA);
+  const excess = (rate - HYSTERESIS_PRIOR_REVERT_RATE) / HYSTERESIS_PRIOR_REVERT_RATE;
+  const factor = clamp(
+    1 + HYSTERESIS_SENSITIVITY * excess,
+    HYSTERESIS_MIN_FACTOR,
+    HYSTERESIS_MAX_FACTOR,
+  );
+  return {
+    stabilityMargin: STABILITY_MARGIN * factor,
+    churnCost: CHURN_COST * factor,
+  };
 }
 
 // --- The roll cycle (§4) ----------------------------------------------------
