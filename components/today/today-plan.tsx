@@ -6,6 +6,7 @@ import type { ScheduleDay } from "@/lib/schedule";
 import { Card, CardHeader } from "@/components/ui/card";
 import { EmptyState } from "@/components/ui/empty-state";
 import { ScheduleTimeline } from "@/components/entries/schedule-timeline";
+import { TodayReorder } from "@/components/today/today-reorder";
 import { formatMinutes } from "@/lib/format";
 import { cn } from "@/lib/cn";
 
@@ -53,7 +54,8 @@ export function TodayPlan({
       ) : (
         <>
           {todaySlice ? (
-            <ScheduleTimeline days={[todaySlice]} />
+            // Today's blocks are drag-to-reorderable (S3c-5); upcoming days stay display-only.
+            <TodayReorder day={todaySlice} todayISO={todayISO} />
           ) : (
             <div className="px-5 py-6">
               <p className="flex items-center justify-center gap-2 text-center text-[13px] text-[var(--color-fg-subtle)]">
