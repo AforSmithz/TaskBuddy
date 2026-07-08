@@ -1363,6 +1363,45 @@ export interface PlanRoll {
   schemaVersion: number;
 }
 
+/**
+ * One captured drag-to-reorder of today's plan (OVERHAUL §5a substrate S3c-5,
+ * design/s3c5-shared-calibration-brain.md §6) — the missing signal for the 🔴
+ * calibration tier (`ARRANGE_WEIGHTS.{switch,energy,buffer}`). The arrangement
+ * reorder is applied silently and odds-gated, so nothing normally reveals which dial
+ * the user would have turned; a drag does. We keep it as a revealed-preference PAIR
+ * `userOrder ≻ appOrder` — the user's dragged order versus the solver's own
+ * `a* = argmin J` — recorded ONLY when the drag is odds-neutral vs `a*` (an
+ * odds-worsening drag is honored but never taught from). A SIBLING to
+ * {@link PlanRoll}: dispose-side bookkeeping that authors no odds. The client
+ * records an ORDER, nothing more; the server reconciles, re-prices, gates, and (in
+ * S4) calibrates `ArrangeWeights` by recomputing the feature vector φ from the live
+ * feature functions over these two stored orders. Capped at the most recent per
+ * user (oldest pruned), like `PlanRoll`.
+ */
+export interface PlanReorder {
+  id: string;
+  /** The plan day this reorder applies to (today only, v1), `YYYY-MM-DD`. */
+  date: string;
+  /** ISO timestamp the drag was captured. */
+  capturedAt: string;
+  /**
+   * The solver's arrangement `a* = argmin J` at capture time — the order the user
+   * dragged AWAY from, the `φ(a*)` side of the revealed-preference contrast. Same
+   * shape as {@link CommittedPlan.order} (`EffectiveOrderEntry[]`). Persisted to the
+   * `app_order` jsonb column (not `order`, a reserved word).
+   */
+  appOrder: EffectiveOrderEntry[];
+  /**
+   * The user's dragged arrangement — odds-neutral vs `appOrder` (only odds-neutral
+   * drags are retained as calibration observations), the `φ(u)` side. Persisted to
+   * the `user_order` jsonb column.
+   */
+  userOrder: EffectiveOrderEntry[];
+  /** Reuse {@link COMMITTED_PLAN_SCHEMA_VERSION}: a row whose version doesn't match
+   *  the current order shape is treated as invalid (dropped), like a stale roll. */
+  schemaVersion: number;
+}
+
 // --- §5.6 NL check-in / reflection loop -------------------------------------
 //
 // The interpret → propose → review → commit loop over a free-form activity
