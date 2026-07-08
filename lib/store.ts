@@ -36,6 +36,7 @@ import type {
   PlanVersion,
   PlanRoll,
   PlanRollKind,
+  PlanReorder,
   PortfolioStrategy,
   Goal,
   ProjectForecast,
@@ -221,6 +222,9 @@ interface MemDB {
   /** Retained automatic rolls of the committed plan, newest-first — the passive-roll
    *  history (S3c-2), capped at `PLAN_ROLL_CAP`. */
   planRolls: PlanRoll[];
+  /** Captured drag-to-reorder preference pairs, newest-first — the 🔴-tier calibration
+   *  signal (S3c-5), capped at `PLAN_REORDER_CAP`. */
+  planReorders: PlanReorder[];
   seeded: boolean;
 }
 
@@ -255,6 +259,7 @@ function memDB(): MemDB {
       planVersions: [],
       committedPlan: null,
       planRolls: [],
+      planReorders: [],
       seeded: false,
     };
   }
@@ -1542,6 +1547,109 @@ async function markPlanRollReverted(id: string): Promise<void> {
   await ensureSeeded();
   const r = memDB().planRolls.find((x) => x.id === id);
   if (r) r.revertedAt = revertedAt;
+}
+
+// --- Drag-to-reorder signal (S3c-5, design §6) -----------------------------
+//
+// The 🔴-tier calibration signal: when the user drags today's plan into an order that
+// is odds-neutral vs the solver's own order, we keep both orders as one revealed-
+// preference pair (`user_order ≻ app_order`). S4's `calibrateArrangeWeights` recomputes
+// the feature vector φ from the live feature functions over these two stored orders and
+// nudges `ArrangeWeights`. A SIBLING to the roll history above (mirrors it): dispose-side
+// bookkeeping, authors no odds. The jsonb columns are `app_order`/`user_order` — not a
+// bare `order`, a reserved word that collides with PostgREST's `?order=` sort param.
+
+/** Soft cap on retained reorder observations per user; oldest pruned beyond this
+ *  (mirrors `PLAN_ROLL_CAP`). */
+const PLAN_REORDER_CAP = 50;
+
+/** Append one reorder observation to the history and prune to the cap. Best-effort at
+ *  the call site (S3's `reorderTodayAction` runs the accrual inside the same swallowed
+ *  path as the honoring commit), so a history-append failure can never break the drag. */
+export async function insertPlanReorder(reorder: PlanReorder): Promise<void> {
+  if (isSupabaseConfigured()) {
+    const supabase = await getRequestClient();
+    const user_id = await currentUserId(supabase);
+    const { error } = await supabase.from("plan_reorders").insert({
+      id: reorder.id,
+      user_id,
+      captured_at: reorder.capturedAt,
+      date: reorder.date,
+      app_order: reorder.appOrder,
+      user_order: reorder.userOrder,
+      schema_version: reorder.schemaVersion,
+    });
+    if (error)
+      throw new Error(`Supabase plan_reorders insert failed: ${error.message}`);
+    await prunePlanReorders(supabase);
+    return;
+  }
+  await ensureSeeded();
+  const db = memDB();
+  db.planReorders.unshift(reorder);
+  if (db.planReorders.length > PLAN_REORDER_CAP)
+    db.planReorders.length = PLAN_REORDER_CAP;
+}
+
+/** Delete reorders older than the most recent `PLAN_REORDER_CAP` (soft cap). */
+async function prunePlanReorders(supabase: RequestClient): Promise<void> {
+  const { data } = await supabase
+    .from("plan_reorders")
+    .select("id")
+    .order("captured_at", { ascending: false })
+    .range(PLAN_REORDER_CAP, PLAN_REORDER_CAP + 1000);
+  const stale = (data as { id: string }[] | null) ?? [];
+  if (stale.length)
+    await supabase
+      .from("plan_reorders")
+      .delete()
+      .in(
+        "id",
+        stale.map((r) => r.id),
+      );
+}
+
+interface PlanReorderRow {
+  id: string;
+  captured_at: string;
+  date: string;
+  app_order: EffectiveOrderEntry[];
+  user_order: EffectiveOrderEntry[];
+  schema_version: number;
+}
+
+function rowToPlanReorder(r: PlanReorderRow): PlanReorder {
+  return {
+    id: r.id,
+    capturedAt: r.captured_at,
+    date: r.date,
+    appOrder: r.app_order, // `app_order` column ↔ `appOrder` field (reserved-word remap)
+    userOrder: r.user_order,
+    schemaVersion: r.schema_version,
+  };
+}
+
+/** The drag-to-reorder history, newest-first (capped at `PLAN_REORDER_CAP`). Rows whose
+ *  `schemaVersion` no longer matches the current arrangement shape are dropped — like a
+ *  stale `PlanRoll`, their stored orders can't be re-priced, so the calibrator skips
+ *  them. Mirrors `listPlanRolls`. */
+export async function listPlanReorders(): Promise<PlanReorder[]> {
+  let reorders: PlanReorder[];
+  if (isSupabaseConfigured()) {
+    const supabase = await getRequestClient();
+    const { data } = await supabase
+      .from("plan_reorders")
+      .select("*")
+      .order("captured_at", { ascending: false })
+      .limit(PLAN_REORDER_CAP);
+    reorders = ((data as PlanReorderRow[]) ?? []).map(rowToPlanReorder);
+  } else {
+    await ensureSeeded();
+    reorders = memDB().planReorders;
+  }
+  return reorders.filter(
+    (r) => r.schemaVersion === COMMITTED_PLAN_SCHEMA_VERSION,
+  );
 }
 
 // --- Plan version history (S1 step 3 / vision §1.3) -------------------------
