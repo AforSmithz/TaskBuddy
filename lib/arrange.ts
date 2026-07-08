@@ -7,9 +7,10 @@ import {
   type DependencyEdge,
   type WindowCapacity,
 } from "./schedule";
-import type { EffectiveOrderEntry, EstimationModel } from "./types";
+import type { EffectiveOrderEntry, EstimationModel, PlanReorder } from "./types";
 import { globalForecastJoint, type ForecastOptions } from "./forecast";
 import { ALL_WINDOWS, type EnergyWindow, type TimeWindow } from "./velocity";
+import { fitCalibratedWeights, type PreferencePair } from "./calibrate";
 
 // Local arrangement optimizer (OVERHAUL §5a substrate S3b) — the *arrangement*
 // half of the forecast-as-risk-core / solver-as-arrangement split. The Monte-Carlo
@@ -185,15 +186,32 @@ function daySegments(
 const COST_EPSILON = 1e-9;
 
 /**
- * The marginal `J` of placing `e` next, given the day's current project (`current`,
- * `undefined` before the first pick) and the net velocity multiplier of the window it
- * starts in (`mult`). The sum of three terms: a context-SWITCH penalty when the project
- * changes, an ENERGY term rewarding cognitively-hard (impact-weighted) work in a fast
- * window (penalising it in a slow one), and a BUFFER term giving a thin-buffer project's
- * work the same fast-window pull independent of difficulty. Both window terms vanish when
- * `mult === 1` (no learned profile). The single source of the objective — `sequenceDay`
- * greedily MINIMISES it to choose an order; `arrangementScore` SUMS it to price a given
- * order — so the chooser and the scorer can never drift. Pure. */
+ * The three UNWEIGHTED soft-objective terms of placing `e` next — the per-pick contribution to
+ * the feature vector `φ = (switch, energy, buffer)`. A context-SWITCH is a unit when the project
+ * changes; the ENERGY term is cognitively-hard (impact-weighted) work coupled to the window's net
+ * multiplier; the BUFFER term gives a thin-buffer project's work the same fast-window coupling
+ * independent of difficulty. Both window terms carry `(mult − 1)`, so both vanish when `mult === 1`
+ * (no learned profile) and `φ` reduces to the switch count. The SINGLE source of the term math —
+ * `marginalJ` dots this with the weights (chooser + scorer), `arrangementFeatures` sums it
+ * (calibrator's `φ`) — so the chooser, the scorer, AND the calibrated preference contrast can
+ * never drift apart. Pure. */
+function marginalFeatures(
+  e: EffectiveOrderEntry,
+  current: string | null | undefined,
+  mult: number,
+  thinBuffer: ReadonlyMap<string, number>,
+): [number, number, number] {
+  const sw = current !== undefined && (e.projectId ?? null) !== current ? 1 : 0;
+  const en = (e.difficulty ?? 0) * impactEnergyBoost(e.impact) * (mult - 1);
+  const bf = (thinBuffer.get(e.projectId) ?? 0) * (mult - 1);
+  return [sw, en, bf];
+}
+
+/**
+ * The marginal `J` of placing `e` next: `weights · marginalFeatures(...)` — the switch, energy,
+ * and buffer terms weighted and summed. `sequenceDay` greedily MINIMISES it to choose an order and
+ * `arrangementScore` SUMS it to price one, both through the shared `marginalFeatures`, so the
+ * chooser and the scorer can never drift. Pure. */
 function marginalJ(
   e: EffectiveOrderEntry,
   current: string | null | undefined,
@@ -201,10 +219,8 @@ function marginalJ(
   weights: ArrangeWeights,
   thinBuffer: ReadonlyMap<string, number>,
 ): number {
-  const sw = current !== undefined && (e.projectId ?? null) !== current ? weights.switch : 0;
-  const en = weights.energy * (e.difficulty ?? 0) * impactEnergyBoost(e.impact) * (mult - 1);
-  const bf = weights.buffer * (thinBuffer.get(e.projectId) ?? 0) * (mult - 1);
-  return sw + en + bf;
+  const [sw, en, bf] = marginalFeatures(e, current, mult, thinBuffer);
+  return weights.switch * sw + weights.energy * en + weights.buffer * bf;
 }
 
 /**
@@ -325,31 +341,39 @@ export function arrangeOrder(
   return changed ? out : order; // same reference when nothing moved (cheap no-op signal)
 }
 
+/** The three-component feature vector `φ = (switch, energy, buffer)` of an order — the UNWEIGHTED
+ *  decomposition of `arrangementScore` (`J = weights · φ` exactly). The switch total is the
+ *  context-switch count; the energy total the summed impact-weighted hard-work × window coupling;
+ *  the buffer total the summed thin-buffer × window coupling. */
+export interface ArrangeFeatures {
+  switch: number;
+  energy: number;
+  buffer: number;
+}
+
 /**
- * The total soft score `J` of an order AS GIVEN (lower is better) — the same objective
- * `arrangeOrder` minimises, evaluated instead of optimised. Buckets the order into days by
- * the identical (comfort-capped when a cap is in force) pack, then sums each near-horizon
- * bucket's per-pick `marginalJ` walking the tasks in the ORDER PASSED (no re-sequencing) —
- * context-switches + energy/buffer window-placement misfit. Out-of-horizon buckets score 0
- * (they aren't arranged). With no window profile the energy+buffer terms vanish and `J`
- * reduces to the context-switch count. Pure + deterministic. This is what the S3c stability
- * gate weighs: a fresh candidate is adopted over the sticky committed plan only when its `J`
- * improvement clears the churn-scaled hysteresis margin (`design/s3c-rolling-horizon-wrapper.md`).
- */
-export function arrangementScore(
+ * The feature vector `φ = (switch, energy, buffer)` of an order AS GIVEN — the weight-INDEPENDENT
+ * inputs `arrangementScore` weights and sums. Buckets the order into days by the identical
+ * (comfort-capped when a cap is in force) pack as `arrangeOrder`/`arrangementScore`, then walks
+ * each near-horizon bucket summing `marginalFeatures` (no re-sequencing). Out-of-horizon buckets
+ * contribute 0. With no window profile the energy+buffer components vanish and `φ` reduces to the
+ * context-switch count. This is what the drag-to-reorder calibrator (`calibrateArrangeWeights`)
+ * contrasts between the user's dragged order and the solver's to learn `ArrangeWeights` — because
+ * `φ` is weight-free, a stored preference pair re-prices under the CURRENT feature functions.
+ * Pure + deterministic. */
+export function arrangementFeatures(
   order: EffectiveOrderEntry[],
   capacities: DayCapacity[],
   today: string,
   opts: ArrangeOrderOptions = {},
-): number {
-  if (order.length === 0) return 0;
+): ArrangeFeatures {
+  if (order.length === 0) return { switch: 0, energy: 0, buffer: 0 };
   const horizon = opts.horizonDays ?? ARRANGE_HORIZON_DAYS;
-  const weights = opts.weights ?? ARRANGE_WEIGHTS;
   const profile = opts.windowProfile ?? null;
   const cap = opts.comfortCapMinutes ?? null;
   const thinBuffer = opts.thinBufferUrgency ?? NO_THIN_BUFFER;
 
-  // Identical bucketing to `arrangeOrder` (comfort-capped when a cap is set) so `J` prices
+  // Identical bucketing to `arrangeOrder` (comfort-capped when a cap is set) so `φ` measures
   // the same day layout the arranger optimises.
   const durations = order.map((e) => Math.max(0, e.estimatedMinutes));
   const offsets =
@@ -362,7 +386,9 @@ export function arrangementScore(
         )
       : packOffsets(durations, capacities);
 
-  let total = 0;
+  let sSwitch = 0;
+  let sEnergy = 0;
+  let sBuffer = 0;
   let i = 0;
   while (i < order.length) {
     let j = i;
@@ -375,14 +401,69 @@ export function arrangementScore(
       for (let k = i; k < j; k++) {
         const e = order[k];
         const mult = segs.mult[windowIndexAt(cum, segs.caps)];
-        total += marginalJ(e, current, mult, weights, thinBuffer);
+        const [sw, en, bf] = marginalFeatures(e, current, mult, thinBuffer);
+        sSwitch += sw;
+        sEnergy += en;
+        sBuffer += bf;
         cum += Math.max(0, e.estimatedMinutes);
         current = e.projectId ?? null;
       }
     }
     i = j;
   }
-  return total;
+  return { switch: sSwitch, energy: sEnergy, buffer: sBuffer };
+}
+
+/**
+ * The total soft score `J` of an order AS GIVEN (lower is better) — the same objective
+ * `arrangeOrder` minimises, evaluated instead of optimised: `weights · arrangementFeatures(...)`.
+ * Routing through `arrangementFeatures` guarantees the scorer, the chooser (`marginalJ`), and the
+ * calibrator's `φ` share the exact same term math. With no window profile the energy+buffer terms
+ * vanish and `J` reduces to the context-switch count. Pure + deterministic. This is what the S3c
+ * stability gate weighs: a fresh candidate is adopted over the sticky committed plan only when its
+ * `J` improvement clears the churn-scaled hysteresis margin (`design/s3c-rolling-horizon-wrapper.md`).
+ */
+export function arrangementScore(
+  order: EffectiveOrderEntry[],
+  capacities: DayCapacity[],
+  today: string,
+  opts: ArrangeOrderOptions = {},
+): number {
+  const weights = opts.weights ?? ARRANGE_WEIGHTS;
+  const f = arrangementFeatures(order, capacities, today, opts);
+  return weights.switch * f.switch + weights.energy * f.energy + weights.buffer * f.buffer;
+}
+
+/**
+ * Calibrate the arrangement's soft `ArrangeWeights` from the user's drag-to-reorder history
+ * (design/s3c5-shared-calibration-brain.md §4b/§5 — the 🔴 tier). Each stored pair is a revealed
+ * preference `userOrder ≻ appOrder` captured odds-neutral; we recompute the feature vector
+ * `φ = (switch, energy, buffer)` for BOTH orders under the CURRENT feature functions
+ * (`arrangementFeatures`, so a feature-fn change re-prices history — the single-source choice
+ * `diagnoseRoll` also makes) and hand the contrasts to the shared perceptron+shrink seam
+ * (`fitCalibratedWeights`). The solver picks `argmin w·φ`, so the user's order is the PREFERRED
+ * (should-score-lower) side of each `PreferencePair`.
+ *
+ * NO-REGRET is structural: no drags ⇒ no pairs ⇒ the seam returns the prior ⇒ exactly
+ * `ARRANGE_WEIGHTS`, and a learned weight only reweights the SOFT `J` the odds gate already
+ * dominates (design invariant 2). `φ` is priced under the SAME arrange options the live plan uses
+ * (`windowProfile`/`comfortCapMinutes`/`thinBufferUrgency`), so the energy/buffer components are 0
+ * — hence those weights stay at prior — until a window profile is learned; the switch component is
+ * always live, so grouping preferences teach `switch` first (§4b identifiability). Pure. */
+export function calibrateArrangeWeights(
+  prefs: readonly Pick<PlanReorder, "appOrder" | "userOrder">[],
+  capacities: DayCapacity[],
+  today: string,
+  opts: ArrangeOrderOptions = {},
+): ArrangeWeights {
+  const prior = [ARRANGE_WEIGHTS.switch, ARRANGE_WEIGHTS.energy, ARRANGE_WEIGHTS.buffer];
+  const pairs: PreferencePair[] = prefs.map((p) => {
+    const a = arrangementFeatures(p.appOrder, capacities, today, opts);
+    const u = arrangementFeatures(p.userOrder, capacities, today, opts);
+    return { solver: [a.switch, a.energy, a.buffer], user: [u.switch, u.energy, u.buffer] };
+  });
+  const [sw, en, bf] = fitCalibratedWeights(pairs, prior);
+  return { switch: sw, energy: en, buffer: bf };
 }
 
 // --- Pillar 1: the window-capacity model (OVERHAUL S3b Phase 2) --------------
