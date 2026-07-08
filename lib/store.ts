@@ -117,8 +117,10 @@ import {
   rollDecision,
   planRollKind,
   undoRollDecision,
+  calibrateHysteresis,
   type RollContext,
   type RollDecisionResult,
+  type CalibratedHysteresis,
 } from "./rolling";
 import {
   SAMPLE_ACTIVITIES,
@@ -3368,6 +3370,7 @@ function rollContextFor(
   bundle: ArrangementBundle,
   committed: CommittedPlan | null,
   localNow?: LocalNow,
+  hysteresis?: CalibratedHysteresis,
 ): RollContext {
   const repriceOpts = repriceOptionsFor(g, ctx, bundle);
   return {
@@ -3382,6 +3385,10 @@ function rollContextFor(
     scoreJ: (order) => arrangementScore(order, ctx.capacities, g.today, bundle.arrangeOpts),
     capacities: ctx.capacities,
     arrangeOpts: bundle.arrangeOpts,
+    // S3c-5 (🟡 tier): the hysteresis knobs, EB-calibrated from the user's roll-undo history
+    // (`undefined` ⇒ rollDecision falls back to the documented constants, the no-regret path).
+    stabilityMargin: hysteresis?.stabilityMargin,
+    churnCost: hysteresis?.churnCost,
   };
 }
 
@@ -3411,8 +3418,12 @@ export async function commitRollingPlan(): Promise<RollDecisionResult | null> {
   // rides ONLY the churn near-weight — it is deliberately NOT in `rollFingerprint`, so the fast
   // path above still short-circuits on a pure clock tick (a tick is not a situation change); it
   // only refines which sticky arrangement the gate prefers once a real mutation forces the roll.
-  const localNow = await readClientLocalNow();
-  const decision = rollDecision(rollContextFor(g, ctx, bundle, committed, localNow));
+  // S3c-5 (🟡 tier): calibrate the hysteresis knobs from the roll-undo history. Fetched only
+  // past the fast path (a genuine re-plan), in parallel with the client clock — no rolls ⇒ the
+  // documented constants, so a first-ever roll is byte-identical to pre-S3c-5.
+  const [localNow, rolls] = await Promise.all([readClientLocalNow(), listPlanRolls()]);
+  const hysteresis = calibrateHysteresis(rolls);
+  const decision = rollDecision(rollContextFor(g, ctx, bundle, committed, localNow, hysteresis));
   if (decision.shouldPersist) {
     await setCommittedPlan(decision.toPersist);
     // Persist-on-roll (S3c-2): retain a history entry for a GENUINE plan change (a
@@ -3535,11 +3546,12 @@ export async function createJointScorer(): Promise<JointScorer> {
   // added since, or odds that have since dropped). Without it the optimizer's
   // causes would silently collapse to the residual-only classes. Loaded in
   // parallel with the gather so it adds no latency.
-  const [g, cachedStrategy, committed, localNow] = await Promise.all([
+  const [g, cachedStrategy, committed, localNow, rolls] = await Promise.all([
     gatherForecast(),
     getCachedStrategy(),
     getCommittedPlan(),
     readClientLocalNow(),
+    listPlanRolls(),
   ]);
   const ctx = allocContext(g, g.commitments);
   // The S3b arrangement pipeline decides the comfort cap, the thin-buffer urgency, and the
@@ -3558,7 +3570,11 @@ export async function createJointScorer(): Promise<JointScorer> {
   // sticky hold. No-regret: no committed row ⇒ the candidate verbatim ⇒ pre-S3c path, bit-for-bit.
   // S3c-4: `localNow` sharpens the frozen zone to the imminent part of today (read-only; never
   // persisted, never in odds or the fingerprint) — `undefined` ⇒ date-granular, exactly S3c-1.
-  const decision = rollDecision(rollContextFor(g, ctx, bundle, committed, localNow));
+  // S3c-5 (🟡 tier): the read decides what to SHOW with the same calibrated hysteresis the
+  // write path commits under, so display and persist never disagree on stickiness.
+  const decision = rollDecision(
+    rollContextFor(g, ctx, bundle, committed, localNow, calibrateHysteresis(rolls)),
+  );
   // S3c-6: on a quiet new day, refresh the committed row's frozen-zone anchor from this read.
   await advanceAnchorOnQuietDay(committed, decision);
   const committedOrder = decision.sticky ? decision.order.map((e) => e.taskId) : null;
@@ -3856,13 +3872,14 @@ export async function forecastDashboard(): Promise<{
   agendaOrder: GlobalPlan["order"];
   model: EstimationModel;
 }> {
-  const [g, activities, completions, cachedStrategy, committed, localNow] = await Promise.all([
+  const [g, activities, completions, cachedStrategy, committed, localNow, rolls] = await Promise.all([
     gatherForecast(),
     listRecurringActivities(),
     listActivityCompletions(),
     getCachedStrategy(),
     getCommittedPlan(),
     readClientLocalNow(),
+    listPlanRolls(),
   ]);
   const ctx = allocContext(g, g.commitments);
   // The S3b arrangement pipeline over all current open work (no triage shedding): the canonical
@@ -3881,7 +3898,11 @@ export async function forecastDashboard(): Promise<{
   // ⇒ the candidate verbatim ⇒ the exact pre-S3c dashboard, bit-for-bit. S3c-4: `localNow` (the
   // client clock, read-only) sharpens the frozen zone to the imminent part of today; `undefined`
   // ⇒ date-granular churn, exactly S3c-1.
-  const decision = rollDecision(rollContextFor(g, ctx, bundle, committed, localNow));
+  // S3c-5 (🟡 tier): same calibrated hysteresis as the write path, so the dashboard's sticky/roll
+  // choice matches what the mutation-time roll would persist.
+  const decision = rollDecision(
+    rollContextFor(g, ctx, bundle, committed, localNow, calibrateHysteresis(rolls)),
+  );
   // S3c-6: on a quiet new day, refresh the committed row's frozen-zone anchor from this read.
   await advanceAnchorOnQuietDay(committed, decision);
   // Display == priced: when sticky, reprice the reconciled committed order for the headline +
