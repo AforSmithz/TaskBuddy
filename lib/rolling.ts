@@ -8,6 +8,7 @@ import {
   COMMITTED_PLAN_SCHEMA_VERSION,
   type CommittedPlan,
   type EffectiveOrderEntry,
+  type LocalNow,
   type PlanRoll,
   type PlanRollKind,
 } from "./types";
@@ -47,6 +48,39 @@ export const STABILITY_MARGIN = 1.0;
  *  disrupting the imminent day costs more than tidying a far one. Standard receding-horizon
  *  hysteresis; a knob (S3c-5 EB-calibrates it against the user's accept/override behaviour). */
 export const CHURN_COST = 2.0;
+
+/** Nominal start of the active day, in minutes since local midnight (08:00). The intra-day
+ *  frozen zone (S3c-4) measures "how much of today's deployable effort is behind us" from
+ *  here; the only new clock knob, documented + defensively bounded, EB-calibratable later
+ *  (the S3c-5 lineage). See `design/s3c4-intraday-frozen-zone.md` §2. */
+export const DAY_START_MIN = 8 * 60;
+
+/**
+ * How many of TODAY's deployable effort-minutes are already behind us, or `null` to disable
+ * the intra-day split (⇒ date-granular S3c-1 behaviour). Pure; the single place the
+ * client-captured `LocalNow` is turned into the intra-day frozen-zone offset, so every
+ * defensive fallback (design/s3c4 §2 decision #4) lives here and is unit-testable:
+ *
+ *   - no `localNow`                     → null  (no clock ⇒ date-granular, the no-regret path)
+ *   - `localNow.date !== anchor`        → null  (client's local day ≠ the plan's frozen-zone
+ *                                                 day: midnight rollover / travel / skew)
+ *   - `cap0 <= 0`                       → null  (no deployable time today ⇒ no day-0 queue to split)
+ *
+ * Otherwise `clamp(minutesSinceMidnight − DAY_START_MIN, 0, cap0)`: before the day starts ⇒ 0
+ * (whole day ahead); past the day's whole budget ⇒ `cap0` (everything today is behind ⇒ frozen).
+ * `cap0` is today's deployable minutes (`capacities[0].capacityMinutes`).
+ */
+export function resolveElapsedToday(
+  localNow: LocalNow | undefined,
+  anchor: string,
+  cap0: number,
+): number | null {
+  if (!localNow) return null;
+  if (localNow.date !== anchor) return null;
+  if (cap0 <= 0) return null;
+  const raw = localNow.minutesSinceMidnight - DAY_START_MIN;
+  return Math.min(cap0, Math.max(0, raw));
+}
 
 // --- Reconcile the committed order to the current task set (§4 step 2) -------
 
@@ -103,14 +137,16 @@ export function reconcileCommitted(
 
 // --- Churn: how much adopting the candidate would disturb the committed plan -
 
-/** Per-task `(day, rank)` under the same bucketing the arranger uses (comfort-capped when a
- *  cap is in force): day = the pack offset, rank = the position within that day's contiguous
- *  run. The two coordinates a churn comparison keys on. */
+/** Per-task `(day, rank, startMin)` under the same bucketing the arranger uses (comfort-capped
+ *  when a cap is in force): day = the pack offset, rank = the position within that day's
+ *  contiguous run, startMin = the effort-minutes into that day the task begins (the running
+ *  sum of same-day durations before it). The coordinates a churn comparison keys on; `startMin`
+ *  is what the intra-day frozen zone (S3c-4) splits day-0 by. */
 function bucketPositions(
   order: EffectiveOrderEntry[],
   capacities: DayCapacity[],
   opts: ArrangeOrderOptions,
-): Map<string, { day: number; rank: number }> {
+): Map<string, { day: number; rank: number; startMin: number }> {
   const durations = order.map((e) => Math.max(0, e.estimatedMinutes));
   const cap = opts.comfortCapMinutes ?? null;
   const offsets =
@@ -122,21 +158,43 @@ function bucketPositions(
           cap,
         )
       : packOffsets(durations, capacities);
-  const out = new Map<string, { day: number; rank: number }>();
+  const out = new Map<string, { day: number; rank: number; startMin: number }>();
   let rank = 0;
+  let startMin = 0; // effort-minutes used on the current day before this task
   for (let k = 0; k < order.length; k++) {
-    if (k > 0 && offsets[k] !== offsets[k - 1]) rank = 0;
-    out.set(order[k].taskId, { day: offsets[k], rank });
+    if (k > 0 && offsets[k] !== offsets[k - 1]) {
+      rank = 0;
+      startMin = 0;
+    }
+    out.set(order[k].taskId, { day: offsets[k], rank, startMin });
+    startMin += durations[k];
     rank++;
   }
   return out;
 }
 
-/** Near-weight of a change landing on day `d`: a shift on TODAY (d=0) costs a full 1, day-1
- *  half, day-13 ≈ 0.07 — so disrupting the imminent day dominates the metric while tidying a
- *  far day is nearly free. Matches the "freeze today hardest" intent. */
-function nearWeight(d: number): number {
-  return 1 / (1 + d);
+/**
+ * Near-weight of a change landing at position `(day, startMin)` — how much disturbing it counts
+ * in the churn metric. Generalizes the S3c-1 day-index step `1/(1+day)` to a CONTINUOUS
+ * *imminence* `1/(1 + day + f)` where `f ∈ [0,1)` is today's elapsed fraction (S3c-4): the
+ * imminent part of today keeps weight ≈ 1 (frozen), while the later part relaxes smoothly toward
+ * `1/2` — exactly `nearWeight` at day-1 — as the day slips, so re-planning the evening is cheap
+ * but reshuffling the next task is not. `f` is 0 for every future day and whenever the intra-day
+ * split is disabled (`elapsedToday == null`), so the whole metric is byte-identical to S3c-1
+ * when no clock is supplied (no-regret). `cap0` is today's deployable minutes (the split's
+ * denominator); `elapsedToday` is `resolveElapsedToday(...)`.
+ */
+function nearWeight(
+  day: number,
+  startMin: number,
+  elapsedToday: number | null,
+  cap0: number,
+): number {
+  let f = 0;
+  if (day === 0 && elapsedToday != null && cap0 > 0) {
+    f = Math.min(1, Math.max(0, (startMin - elapsedToday) / cap0));
+  }
+  return 1 / (1 + day + f);
 }
 
 /**
@@ -146,6 +204,12 @@ function nearWeight(d: number): number {
  * shared tasks are fully displaced, with a today-swap weighing far more than a day-13 swap.
  * Tasks only in one order (new / removed work) are handled by reconciliation (§4 step 2), not
  * counted here — a material set change also moves the fingerprint and generally rolls anyway.
+ *
+ * `elapsedToday` (S3c-4, from {@link resolveElapsedToday}; `null` ⇒ off) sharpens the frozen zone
+ * WITHIN today: the moved-mass numerator discounts a later-today reshuffle (it disturbs less
+ * still-frozen work as the day slips) while the imminent prefix stays full-weight, all against a
+ * stable date-granular denominator so day≥1 work is untouched. `null` ⇒ byte-identical to S3c-1.
+ *
  * Pure + deterministic. `capacities`/`opts` must match what the arranger buckets by so the
  * `(day, rank)` coordinates line up with the priced plan.
  */
@@ -154,21 +218,34 @@ export function churn(
   candidate: EffectiveOrderEntry[],
   capacities: DayCapacity[],
   opts: ArrangeOrderOptions = {},
+  elapsedToday: number | null = null,
 ): number {
   const horizon = opts.horizonDays ?? ARRANGE_HORIZON_DAYS;
   const posC = bucketPositions(committed, capacities, opts);
   const posK = bucketPositions(candidate, capacities, opts);
+  const cap0 = capacities[0]?.capacityMinutes ?? 0;
 
   let weightSum = 0;
   let movedSum = 0;
   for (const [taskId, c] of posC) {
     const k = posK.get(taskId);
     if (!k) continue; // not shared — reconciliation's concern, not churn's
-    const day = Math.min(c.day, k.day);
-    if (day >= horizon) continue; // beyond the arranged horizon — not disturbed
-    const w = nearWeight(day);
-    weightSum += w;
-    if (c.day !== k.day || c.rank !== k.rank) movedSum += w;
+    // Weigh the task at its NEARER (most imminent) placement across the two orders — the
+    // conservative "at least this imminent" reading, generalizing the S3c-1 `min(c.day, k.day)`
+    // to also break day-0 ties by the earlier within-day start (the more imminent, higher-weight).
+    const nearer =
+      c.day < k.day || (c.day === k.day && c.startMin <= k.startMin) ? c : k;
+    if (nearer.day >= horizon) continue; // beyond the arranged horizon — not disturbed
+    // Denominator: the STABLE date-granular near-weight (`elapsedToday = null` ⇒ `f = 0`), the
+    // total near-term mass at stake — clock-independent, so day≥1 work and the imminent prefix
+    // are weighed exactly as S3c-1. Numerator (moved tasks only): the intra-day-DISCOUNTED
+    // weight, so a later-today reshuffle disturbs less frozen mass as the day slips, while the
+    // imminent prefix (`f ≈ 0`) still costs full weight. Decoupling the two keeps S3c-4's effect
+    // confined to *within today*: `elapsedToday = null` ⇒ numerator == denominator ⇒ S3c-1 exact.
+    weightSum += nearWeight(nearer.day, nearer.startMin, null, cap0);
+    if (c.day !== k.day || c.rank !== k.rank) {
+      movedSum += nearWeight(nearer.day, nearer.startMin, elapsedToday, cap0);
+    }
   }
   return weightSum > 0 ? movedSum / weightSum : 0;
 }
@@ -225,6 +302,11 @@ export interface RollContext {
   /** Arrange options (window profile / comfort cap / thin buffer / horizon / weights) —
    *  the churn bucketing reads the comfort cap + horizon from here. */
   arrangeOpts?: ArrangeOrderOptions;
+  /** Client-captured local "now" (S3c-4). Refines the churn near-weight so the imminent part
+   *  of TODAY stays frozen while the later part re-plans as the day slips. Absent (or its date
+   *  ≠ `anchor`, or no day-0 capacity) ⇒ date-granular churn, byte-identical to S3c-1. Enters
+   *  ONLY the churn weight — never odds, the persisted plan, or the client re-solve. */
+  localNow?: LocalNow;
   /** Odds slack before feasibility overrides stability (default ROLL_ODDS_EPSILON). */
   oddsEpsilon?: number;
   /** Flat hysteresis margin (default STABILITY_MARGIN). */
@@ -314,11 +396,16 @@ export function rollDecision(ctx: RollContext): RollDecisionResult {
   const jCommitted = ctx.scoreJ(reconciled);
   const jCandidate = ctx.scoreJ(ctx.candidate.order);
   const deltaJ = jCommitted - jCandidate; // positive ⇒ candidate better
+  // S3c-4: resolve the client "now" into today's elapsed effort-minutes (null ⇒ date-granular),
+  // so the churn near-weight sharpens the frozen zone to the imminent part of today.
+  const cap0 = ctx.capacities[0]?.capacityMinutes ?? 0;
+  const elapsedToday = resolveElapsedToday(ctx.localNow, ctx.anchor, cap0);
   const churnValue = churn(
     reconciled,
     ctx.candidate.order,
     ctx.capacities,
     ctx.arrangeOpts ?? {},
+    elapsedToday,
   );
   if (
     stabilityGate(deltaJ, churnValue, {
