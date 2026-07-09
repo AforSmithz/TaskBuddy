@@ -10,6 +10,7 @@ import type {
   CheckinReview,
   CheckinScope,
   ResolvedCheckinIntent,
+  SkillTaskLink,
   StrategyMove,
   StrategyMovePayload,
   SuggestedTask,
@@ -464,6 +465,21 @@ export interface CheckinProposeContext {
    *  resolved/completed intent's move by the bound task's DAG role (blocker →
    *  resolve_blocker + cascade; plain dependent → unblock). Empty when unavailable. */
   deps?: DependencyEdge[];
+  /** CONFIRMED skill-node ↔ task links — the explicit edges linked spillover reads.
+   *  Suggested/dismissed links never reach here. Empty ⇒ the feature is inert. */
+  links?: SkillTaskLink[];
+  /** The full resolve candidate set. Linked spillover looks up the FAR side of an edge
+   *  by id; membership here is also the open/unattained gate (the set is built from the
+   *  forecast's open work, so a done task or attained node simply isn't in it). */
+  candidates?: CheckinCandidate[];
+  /**
+   * The unlocked skill frontier across every learning goal — unattained nodes whose
+   * prerequisites are all attained (`skillProgress().unlocked`). **Only these may be
+   * attained by INFERENCE** (either spillover tier), because inference walks the
+   * prerequisite graph one node at a time; a stated `skill_gained` is an assertion and
+   * jumps freely. Omitted ⇒ no gate (pure callers/tests); production always supplies it.
+   */
+  unlockedNodeIds?: ReadonlySet<string>;
 }
 
 function addDays(isoDate: string, days: number): string {
@@ -709,6 +725,7 @@ const SPILLOVER_COVERAGE = 0.85;
 export function detectSpilloverMoves(
   resolved: ResolvedCheckinIntent[],
   allSkillNodes: CheckinCandidate[],
+  unlockedNodeIds?: ReadonlySet<string>,
 ): { move: StrategyMove; source: ResolvedCheckinIntent; target: CheckinCandidate }[] {
   const out: { move: StrategyMove; source: ResolvedCheckinIntent; target: CheckinCandidate }[] = [];
   const claimed = new Set<string>(); // node ids already attained directly or via spillover
@@ -727,6 +744,8 @@ export function detectSpilloverMoves(
       if (node.type !== "skill_node") continue;
       if (node.goalId === source.goalId) continue; // same goal isn't spillover
       if (claimed.has(node.id)) continue;
+      // Inference may only credit the frontier — never a node behind unmet prerequisites.
+      if (unlockedNodeIds && !unlockedNodeIds.has(node.id)) continue;
       const fwd = coverage(source.title, node.title);
       const back = coverage(node.title, source.title);
       if (fwd < SPILLOVER_COVERAGE || back < SPILLOVER_COVERAGE) continue;
@@ -751,6 +770,124 @@ export function detectSpilloverMoves(
           },
         },
       });
+    }
+  }
+  return out;
+}
+
+/** Ids already spoken for this check-in — a directly-resolved entity, or a target some
+ *  earlier spillover pass already claimed. Prevents two rows proposing the same flip. */
+function claimedIds(
+  resolved: ResolvedCheckinIntent[],
+  priorTargets: CheckinCandidate[],
+): Set<string> {
+  const claimed = new Set<string>();
+  for (const r of resolved) {
+    if (r.status === "resolved" && r.match) claimed.add(r.match.id);
+  }
+  for (const t of priorTargets) claimed.add(t.id);
+  return claimed;
+}
+
+/**
+ * Spillover, full tier: credit the FAR side of a confirmed `skill_task_links` edge.
+ *
+ * Unlike v1 (which infers node↔node overlap from title similarity), this reads an
+ * explicit, user-confirmed edge — so it is a lookup, not a guess. That is precisely
+ * what licenses the riskier direction: closing a real task off an inferred signal is
+ * only defensible because a human already asserted the two are the same work.
+ *
+ * Both directions, symmetric:
+ *   task completed  → attain the linked skill node   (`attain_skill`)
+ *   skill attained  → close the linked task          (`mark_done` + `resolved_by`)
+ *
+ * Every move is `inferred` and proposed UNCHECKED by the caller (an opt-in, never a
+ * silent write). Membership in `candidates` gates both sides: that set is built from
+ * the forecast's OPEN work, so an already-done task or attained node is absent and
+ * cannot be re-proposed. Pure.
+ */
+export function detectLinkedSpillover(
+  resolved: ResolvedCheckinIntent[],
+  links: SkillTaskLink[],
+  candidates: CheckinCandidate[],
+  claimed: Set<string>,
+  unlockedNodeIds?: ReadonlySet<string>,
+): { move: StrategyMove; source: ResolvedCheckinIntent; target: CheckinCandidate }[] {
+  if (links.length === 0) return [];
+  const out: { move: StrategyMove; source: ResolvedCheckinIntent; target: CheckinCandidate }[] = [];
+  const nodeById = new Map(candidates.filter((c) => c.type === "skill_node").map((c) => [c.id, c]));
+  const taskById = new Map(candidates.filter((c) => c.type === "task").map((c) => [c.id, c]));
+
+  const why = (source: string, rationale: string | null) =>
+    `Spillover from "${source}"${rationale ? `: ${rationale}` : " — you linked these as the same work."}`;
+
+  for (const r of resolved) {
+    if (r.status !== "resolved" || !r.match) continue;
+    const source = r.match;
+
+    // Direction 1 — a completed (or resolved-blocker) task credits its linked skills.
+    if (r.intent.kind === "completed" || r.intent.kind === "resolved") {
+      for (const link of links) {
+        if (link.task_id !== source.id) continue;
+        const node = nodeById.get(link.skill_node_id);
+        if (!node || claimed.has(node.id)) continue;
+        // The frontier moves as work lands, so re-check it HERE, not just when the link
+        // was authored: a link confirmed months ago must not credit a node that is
+        // currently behind unmet prerequisites.
+        if (unlockedNodeIds && !unlockedNodeIds.has(node.id)) continue;
+        claimed.add(node.id);
+        out.push({
+          source: r,
+          target: node,
+          move: {
+            kind: "attain_skill",
+            projectId: node.goalId,
+            projectName: node.goalName,
+            probabilityAfter: 0,
+            portfolioProbabilityAfter: 0,
+            rationale: why(source.title, link.rationale),
+            payload: {
+              kind: "attain_skill",
+              goalId: node.goalId,
+              nodeId: node.id,
+              title: node.title,
+              confidence: "inferred",
+              viaSpilloverFrom: source.id,
+            },
+          },
+        });
+      }
+    }
+
+    // Direction 2 — an attained skill closes its linked tasks. The free-text provenance
+    // lands in `tasks.resolved_by`, the same column slice 6b writes for a resolution.
+    if (r.intent.kind === "skill_gained") {
+      for (const link of links) {
+        if (link.skill_node_id !== source.id) continue;
+        const task = taskById.get(link.task_id);
+        if (!task || claimed.has(task.id)) continue;
+        claimed.add(task.id);
+        out.push({
+          source: r,
+          target: task,
+          move: {
+            kind: "mark_done",
+            projectId: task.goalId,
+            projectName: task.goalName,
+            probabilityAfter: 0,
+            portfolioProbabilityAfter: 0,
+            rationale: why(source.title, link.rationale),
+            payload: {
+              kind: "mark_done",
+              taskId: task.id,
+              title: task.title,
+              confidence: "inferred",
+              viaSpilloverFrom: source.id,
+              resolvedBy: `Credited via spillover from "${source.title}"`,
+            },
+          },
+        });
+      }
     }
   }
   return out;
@@ -820,10 +957,24 @@ export function proposeFromCheckin(
     chips.push(r);
   }
 
-  // Spillover (slice 4): infer cross-goal skill attainments from the directly
-  // attained nodes. Inferred ⇒ always proposed UNCHECKED (an opt-in, not a silent
-  // write) regardless of the source intent's confidence.
-  for (const s of detectSpilloverMoves(resolved, allSkillNodes)) {
+  // Spillover, both tiers. v1 (slice 4) infers cross-goal node↔node overlap from title
+  // similarity; the full tier reads confirmed `skill_task_links` edges in BOTH
+  // directions. v1 runs first and its targets are claimed, so an edge can't re-propose
+  // a node v1 already took. Inferred ⇒ always proposed UNCHECKED (an opt-in, not a
+  // silent write) regardless of the source intent's confidence.
+  const v1Spillover = detectSpilloverMoves(resolved, allSkillNodes, ctx.unlockedNodeIds);
+  const claimed = claimedIds(
+    resolved,
+    v1Spillover.map((s) => s.target),
+  );
+  const linkedSpillover = detectLinkedSpillover(
+    resolved,
+    ctx.links ?? [],
+    ctx.candidates ?? [],
+    claimed,
+    ctx.unlockedNodeIds,
+  );
+  for (const s of [...v1Spillover, ...linkedSpillover]) {
     pending.push({
       family: "A",
       // Same source quote (provenance), but the row points at the inferred target.
