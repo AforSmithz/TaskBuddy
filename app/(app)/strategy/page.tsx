@@ -22,6 +22,7 @@ import { StrategyCard } from "@/components/strategy/strategy-card";
 import { PlanHistory } from "@/components/strategy/plan-history";
 import { ProjectDisclosure } from "@/components/strategy/project-disclosure";
 import { ReliableHours } from "@/components/strategy/reliable-hours";
+import { PlanTuningCard } from "@/components/strategy/plan-tuning";
 import { PitWallCallout } from "@/components/forecast/pit-wall-callout";
 
 export default async function StrategyPage() {
@@ -42,7 +43,7 @@ export default async function StrategyPage() {
     listPlanRolls(),
     listWorkSessions(),
   ]);
-  const { forecasts, recoveries, pitWall, globalPlan } = dashboard;
+  const { forecasts, recoveries, pitWall, globalPlan, tuning } = dashboard;
   const tasksById = new Map(tasks.map((t) => [t.id, t]));
 
   // "Why your plan changed" (S3c-3) — narrate each roll server-side by diffing it against the
@@ -144,6 +145,15 @@ export default async function StrategyPage() {
       {totalSessions > 0 && (
         <Reveal delay={0.2} className="mt-7">
           <ReliableHours windows={energy} />
+        </Reveal>
+      )}
+
+      {/* How your plan is tuned to you (S3c-5 §5a) — the calibrated arrangement dials +
+          plan stickiness, learned from your drags and roll-undos. Shown once either tier
+          has any signal; each section shows its own still-learning state otherwise. */}
+      {(tuning.arrange.samples > 0 || tuning.stability.materialRolls > 0) && (
+        <Reveal delay={0.22} className="mt-7">
+          <PlanTuningCard tuning={tuning} />
         </Reveal>
       )}
 
