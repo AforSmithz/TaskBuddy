@@ -4,6 +4,8 @@ import { cookies } from "next/headers";
 import type {
   GoalKind,
   SkillNode,
+  SkillTaskLink,
+  SkillTaskLinkStatus,
   ExtractedSkill,
   ActivityCadencePeriod,
   ActivityCompletion,
@@ -200,6 +202,7 @@ interface MemDB {
   goalCriteria: GoalCriterion[];
   /** Skill-graph nodes for learning goals, keyed by goal_id on each row. */
   skillNodes: SkillNode[];
+  skillTaskLinks: SkillTaskLink[];
   entries: Entry[];
   decisions: Decision[];
   questions: OpenQuestion[];
@@ -249,6 +252,7 @@ function memDB(): MemDB {
       projects: [],
       goalCriteria: [],
       skillNodes: [],
+      skillTaskLinks: [],
       entries: [],
       decisions: [],
       questions: [],
@@ -698,6 +702,81 @@ export async function listAllSkillNodes(): Promise<SkillNode[]> {
   }
   await ensureSeeded();
   return [...memDB().skillNodes].sort((a, b) => a.sort_index - b.sort_index);
+}
+
+// --- Skill-node ↔ task links (spillover's explicit edge) --------------------
+
+/** Every link touching a goal's skill nodes, in any status — the confirm surface
+ *  shows suggested + confirmed, and needs dismissed ones to avoid re-proposing. */
+export async function listSkillTaskLinksForGoal(goalId: string): Promise<SkillTaskLink[]> {
+  const nodes = await listSkillNodes(goalId);
+  const nodeIds = new Set(nodes.map((n) => n.id));
+  if (nodeIds.size === 0) return [];
+  if (isSupabaseConfigured()) {
+    const supabase = await getRequestClient();
+    const { data } = await supabase
+      .from("skill_task_links")
+      .select("*")
+      .in("skill_node_id", [...nodeIds])
+      .order("created_at", { ascending: true });
+    return (data as SkillTaskLink[]) ?? [];
+  }
+  await ensureSeeded();
+  return memDB().skillTaskLinks.filter((l) => nodeIds.has(l.skill_node_id));
+}
+
+/** Only the confirmed links, across every goal — the set spillover is allowed to
+ *  act on. Suggested links are inert until the user says yes; dismissed stay dead. */
+export async function listConfirmedSkillTaskLinks(): Promise<SkillTaskLink[]> {
+  if (isSupabaseConfigured()) {
+    const supabase = await getRequestClient();
+    const { data } = await supabase
+      .from("skill_task_links")
+      .select("*")
+      .eq("status", "confirmed");
+    return (data as SkillTaskLink[]) ?? [];
+  }
+  await ensureSeeded();
+  return memDB().skillTaskLinks.filter((l) => l.status === "confirmed");
+}
+
+/** Insert freshly proposed links as `suggested`. Pairs that already exist in ANY
+ *  status are skipped by the caller, so this never resurrects a dismissed pair. */
+export async function insertSuggestedLinks(
+  rows: { skill_node_id: string; task_id: string; rationale: string }[],
+): Promise<SkillTaskLink[]> {
+  if (rows.length === 0) return [];
+  const created: SkillTaskLink[] = rows.map((r) => ({
+    id: crypto.randomUUID(),
+    skill_node_id: r.skill_node_id,
+    task_id: r.task_id,
+    status: "suggested" as const,
+    rationale: r.rationale,
+    created_at: new Date().toISOString(),
+  }));
+  if (isSupabaseConfigured()) {
+    const supabase = await getRequestClient();
+    const { data } = await supabase.from("skill_task_links").insert(created).select();
+    return (data as SkillTaskLink[]) ?? [];
+  }
+  await ensureSeeded();
+  memDB().skillTaskLinks.push(...created);
+  return created;
+}
+
+/** Confirm or dismiss one proposed link. */
+export async function setSkillTaskLinkStatus(
+  linkId: string,
+  status: SkillTaskLinkStatus,
+): Promise<void> {
+  if (isSupabaseConfigured()) {
+    const supabase = await getRequestClient();
+    await supabase.from("skill_task_links").update({ status }).eq("id", linkId);
+    return;
+  }
+  await ensureSeeded();
+  const link = memDB().skillTaskLinks.find((l) => l.id === linkId);
+  if (link) link.status = status;
 }
 
 /**
@@ -1883,7 +1962,7 @@ const MOVE_SPECS: { [K in StrategyMoveKind]: MoveSpec<K> } = {
     snapshot: async (p) => ({
       tasks: await snapshotTaskFields(
         [p.taskId],
-        ["status", "completion_confidence", "completed_at"],
+        ["status", "completion_confidence", "completed_at", "resolved_by"],
       ),
       goals: [],
     }),
@@ -1894,6 +1973,9 @@ const MOVE_SPECS: { [K in StrategyMoveKind]: MoveSpec<K> } = {
         // `self_assessed`; the strategist's own inference omits it → `inferred`.
         completion_confidence: p.confidence ?? "inferred",
         completed_at: new Date().toISOString(),
+        // Only a linked-spillover completion carries free text; a plain mark_done
+        // leaves any existing `resolved_by` untouched.
+        ...(p.resolvedBy !== undefined && { resolved_by: p.resolvedBy }),
       });
       return {};
     },
