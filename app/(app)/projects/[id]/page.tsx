@@ -16,6 +16,7 @@ import {
   listEntries,
   listGoalCriteria,
   listSkillNodes,
+  listSkillTaskLinksForGoal,
 } from "@/lib/store";
 import { Card, CardHeader, CardBody } from "@/components/ui/card";
 import { Pill } from "@/components/ui/badge";
@@ -29,6 +30,7 @@ import { DeferredTasks } from "@/components/forecast/deferred-tasks";
 import { DefinitionOfDone } from "@/components/goals/definition-of-done";
 import { GoalKindEditor } from "@/components/goals/goal-kind-badge";
 import { SkillPlan } from "@/components/goals/skill-plan";
+import { SkillLinks } from "@/components/goals/skill-links";
 import { CaptureBar } from "@/components/today/capture-bar";
 
 export default async function ProjectPage({
@@ -37,16 +39,37 @@ export default async function ProjectPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
-  const [project, entries, tasks, criteria, skillNodes, fr] = await Promise.all([
+  const [project, entries, tasks, criteria, skillNodes, links, fr] = await Promise.all([
     getGoal(id),
     listEntries(),
     listAllTasks(),
     listGoalCriteria(id),
     listSkillNodes(id),
+    listSkillTaskLinksForGoal(id),
     forecastProjectWithRecovery(id),
   ]);
   if (!project) notFound();
   const { forecast, recovery, model } = fr;
+
+  // Hydrate each link with the titles of the two rows it joins. Dismissed links are
+  // dropped from the view but kept on record, so the linker won't re-propose them.
+  const nodeTitles = new Map(skillNodes.map((n) => [n.id, n.title]));
+  const taskById = new Map(tasks.map((t) => [t.id, t]));
+  const hydratedLinks = links
+    .filter((l) => l.status !== "dismissed")
+    .flatMap((l) => {
+      const nodeTitle = nodeTitles.get(l.skill_node_id);
+      const task = taskById.get(l.task_id);
+      if (!nodeTitle || !task) return [];
+      return [
+        {
+          ...l,
+          nodeTitle,
+          taskTitle: task.title,
+          taskGoalName: task.goal_id === id ? project.name : "",
+        },
+      ];
+    });
 
   const projectEntries = entries.filter((m) => m.goal_id === id);
   // Tasks belong to the goal directly now (the spine) — no longer derived
@@ -150,6 +173,13 @@ export default async function ProjectPage({
       {project.kind === "learning" && (
         <div className="mt-5">
           <SkillPlan goalId={project.id} nodes={skillNodes} />
+        </div>
+      )}
+
+      {/* Linked work — the confirmed skill↔task edges spillover credits across. */}
+      {project.kind === "learning" && skillNodes.length > 0 && (
+        <div className="mt-5">
+          <SkillLinks goalId={project.id} links={hydratedLinks} />
         </div>
       )}
 
