@@ -1,6 +1,7 @@
 import type {
   ActivityCompletion,
   Commitment,
+  EffectiveOrderEntry,
   FactorScores,
   RecurringActivity,
   RecurringState,
@@ -463,6 +464,56 @@ export function recurringAllocTasksForToday(
       impact: activity.impact,
       risk: activity.risk,
     });
+  }
+  return out;
+}
+
+/**
+ * Weave today's due recurring instances into the order the user is actually following
+ * (OVERHAUL S3c-7). Two authorities, on orthogonal axes:
+ *
+ *   - `union` (the canonical plan over real work + today's routines, routines ranked by an
+ *     ordering-only `today` deadline) decides **where a routine sits** — its ordinal position
+ *     among real work. A routine with `k` real tasks ahead of it stays the `k+1`-th thing.
+ *   - `followed` (the arranged, comfort-capped, odds-gated, roll-sticky order over real work
+ *     alone) decides **how real work is sequenced**. Its sequence is reproduced EXACTLY, so the
+ *     agenda and the plan card can never disagree about what to do next.
+ *
+ * Ranks are renumbered by position: `arrangeOrder` permutes entries but carries each one's
+ * canonical `rank` verbatim, and the agenda sorts by `rank`, so a splice that didn't renumber
+ * would silently discard the arrangement.
+ *
+ * Routine minutes are already drained into capacity, so they never enter `followed`, the
+ * schedule, or the forecast (locked invariant #1) — this is a display overlay, not a re-plan.
+ */
+export function spliceRecurringIntoOrder(
+  followed: EffectiveOrderEntry[],
+  union: EffectiveOrderEntry[],
+): EffectiveOrderEntry[] {
+  const isLane = (e: EffectiveOrderEntry) => e.projectId === RECURRING_LANE_ID;
+
+  // Where each routine sits, as "the number of real tasks ahead of it" in the union order.
+  const afterNReal = new Map<number, EffectiveOrderEntry[]>();
+  let realSeen = 0;
+  for (const e of union) {
+    if (!isLane(e)) {
+      realSeen++;
+      continue;
+    }
+    const at = afterNReal.get(realSeen);
+    if (at) at.push(e);
+    else afterNReal.set(realSeen, [e]);
+  }
+  if (afterNReal.size === 0) {
+    return followed.map((e, rank) => (e.rank === rank ? e : { ...e, rank }));
+  }
+
+  const out: EffectiveOrderEntry[] = [];
+  const emit = (e: EffectiveOrderEntry) =>
+    out.push(e.rank === out.length ? e : { ...e, rank: out.length });
+  for (let i = 0; i <= followed.length; i++) {
+    for (const r of afterNReal.get(i) ?? []) emit(r);
+    if (i < followed.length) emit(followed[i]);
   }
   return out;
 }
