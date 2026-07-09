@@ -6,6 +6,9 @@ import type { ResolveInput } from "./portfolio-state";
 // Type-only (same erased-cycle reason): the arrangement soft-weight shape, defined
 // beside its calibrator in `arrange`; the tuning view contract reports it.
 import type { ArrangeWeights } from "./arrange";
+// Type-only (same erased-cycle reason): the recovery lean lives beside the Value
+// Model that owns it; the offered-vs-kept row stores which one was in force.
+import type { RecoveryStyle } from "./value-model";
 
 export type Confidence = "High" | "Medium" | "Low";
 
@@ -1199,6 +1202,15 @@ export interface StrategyMove {
    * the same detailed task rows used on the project page — priority, due, scores.
    */
   defers?: Task[];
+  /**
+   * The diagnosed cause(s) this move served, baked in by `optimizeJointPlan` at
+   * generation time — calibration bookkeeping, never displayed. Carried on the move
+   * so that when the user applies a bundle we can record the offer-time φ inputs
+   * (see {@link OfferedMove}) without re-running a whole Monte-Carlo scorer just to
+   * log. Absent on moves the optimizer didn't author (the deterministic fallback,
+   * check-in proposals) ⇒ a zero cause term, exactly as an unknown cause reads.
+   */
+  causes?: CauseWeight[];
   /** The literal args the mapped apply action needs, discriminated by kind. */
   payload: StrategyMovePayload;
 }
@@ -1465,6 +1477,65 @@ export interface PlanReorder {
   userOrder: EffectiveOrderEntry[];
   /** Reuse {@link COMMITTED_PLAN_SCHEMA_VERSION}: a row whose version doesn't match
    *  the current order shape is treated as invalid (dropped), like a stale roll. */
+  schemaVersion: number;
+}
+
+// --- Offered-vs-kept move signal (step 5 slice 4 follow-on, limitation #3) ---
+
+/** Bumped when {@link OfferedMove} changes shape, so a stale row is dropped rather
+ *  than mis-read. Mirrors `COMMITTED_PLAN_SCHEMA_VERSION`'s role for orders. */
+export const MOVE_CHOICE_SCHEMA_VERSION = 1;
+
+/**
+ * One move the strategist put on the table, and whether it survived the user's
+ * checkboxes. Stores the INPUTS to the preference feature vector φ — the move kind,
+ * and the diagnosed cause(s) of the goal(s) it serves — never φ itself, so editing
+ * `CAUSE_MOVE_PREFERENCES` or `RECOVERY_STYLE_PREFERENCES` re-prices the whole
+ * history (the same single-source-of-truth choice `PlanReorder` makes by storing
+ * orders rather than feature vectors).
+ */
+/**
+ * A diagnosed cause and the `goalValue × risk` weight its goal carried. A single-goal
+ * move has exactly one entry (a one-entry weighted mean IS the direct lookup, so the
+ * weight is then irrelevant); a portfolio-wide move carries one per diagnosed goal, so
+ * `aggregateCauseMovePref` replays the offer-time aggregation exactly.
+ */
+export interface CauseWeight {
+  cause: DivergenceCause | null;
+  weight: number;
+}
+
+export interface OfferedMove {
+  kind: StrategyMoveKind;
+  /** The owning goal, or `""` for a portfolio-wide move (triage, activity skip). */
+  projectId: string;
+  /** The cause(s) this move served at offer time. Empty ⇒ a zero cause term. */
+  causes: CauseWeight[];
+  /** Did the user leave this move checked when they applied the bundle? */
+  kept: boolean;
+}
+
+/**
+ * One applied strategist bundle, retained as a revealed preference over move
+ * FAMILIES: the moves the user kept are preferred to the moves they declined. The
+ * 🟠 tier of the calibration cohort (`STYLE_PREF_WEIGHT` / `CAUSE_PREF_WEIGHT`),
+ * whose 1:1 ratio nothing previously revealed. A SIBLING to {@link PlanReorder}:
+ * dispose-side bookkeeping that authors no odds, capped and pruned the same way.
+ *
+ * Only the strategist's own review surface writes these. The §5.6 check-in review
+ * commits bundles too, but its moves are user-asserted facts with no diagnosed
+ * cause, so they carry no taste signal.
+ */
+export interface MoveChoice {
+  id: string;
+  /** ISO timestamp the bundle was applied. */
+  capturedAt: string;
+  /** The recovery style in force when the bundle was offered — an INPUT to φ, so it
+   *  is stored rather than read live (the offer was made under this lean). */
+  recoveryStyle: RecoveryStyle;
+  /** Every move that was on the table, flagged kept or declined. */
+  offered: OfferedMove[];
+  /** See {@link MOVE_CHOICE_SCHEMA_VERSION}. */
   schemaVersion: number;
 }
 
