@@ -6,6 +6,8 @@ import type {
   GoalCriterion,
   GoalCutCost,
   GoalKind,
+  MoveChoice,
+  OfferedMove,
   SkillNode,
   StrategyMoveKind,
   Task,
@@ -18,7 +20,17 @@ import {
   type ResidualSample,
   type VelocityModel,
 } from "./velocity";
-import { shrinkScalar } from "./calibrate";
+import {
+  fitCalibratedWeights,
+  shrinkScalar,
+  type PreferencePair,
+} from "./calibrate";
+import {
+  DEFAULT_VALUE_MODEL,
+  movePref,
+  type RecoveryStyle,
+  type ValueModel,
+} from "./value-model";
 import { goalCompletion } from "./goal";
 import { skillProgress } from "./skill";
 
@@ -376,6 +388,113 @@ export function aggregateCauseMovePref(
     acc += w * causeMovePref(e.cause, kind);
   }
   return weightSum > 0 ? acc / weightSum : 0;
+}
+
+// --- The `prefFor` tiebreak weights (step 5 slice 4, limitation #3) ---------
+//
+// `optimizeJointPlan` breaks a sub-epsilon odds tie with two nudges: the user's
+// recovery STYLE (`movePref`) and the diagnosed CAUSE's preferred move family
+// (`causeMovePref`). They were summed 1:1 — an unexamined assumption about which
+// should win. These are the named knobs for that ratio; both default to 1.0 (the
+// historical behaviour) and are LEARNED off the offered-vs-kept history by
+// `calibrateMovePrefWeights` below. They apply only within `PREF_TIE_EPS`, so the
+// forecast always decides first.
+//
+// The calibrator lives HERE, not in the strategist that consumes it: it needs this
+// module's preference tables as its feature extractor, exactly as
+// `calibrateArrangeWeights` lives in `arrange.ts` beside its φ and
+// `calibrateHysteresis` in `rolling.ts` beside its rolls. `grounding.ts` also
+// carries no `server-only`, so the whole seam stays unit-testable.
+
+export const STYLE_PREF_WEIGHT = 1;
+export const CAUSE_PREF_WEIGHT = 1;
+
+/** The prior `[style, cause]` the calibrator shrinks toward — today's co-equal sum. */
+export const MOVE_PREF_PRIOR: readonly number[] = [
+  STYLE_PREF_WEIGHT,
+  CAUSE_PREF_WEIGHT,
+];
+
+/** The learned `prefFor` weights. `samples` is the number of *decisions* that revealed
+ *  anything (a bundle where the user kept everything, or nothing, reveals no contrast). */
+export interface MovePrefWeights {
+  style: number;
+  cause: number;
+  samples: number;
+}
+
+/**
+ * φ for one offered move, priced under the recovery style in force when it was
+ * offered. The preference TABLES are read live (a table edit re-prices history);
+ * only their INPUTS — kind, cause, style — come off the stored row.
+ *
+ * The components are NEGATED, and that is the entire adaptation of the shared seam
+ * to this consumer: `fitCalibratedWeights` fits an argMIN objective (the preferred
+ * item must score LOWER, since its arrange consumer picks `argmin w·φ`), whereas
+ * `prefFor` is an argMAX (the preferred move scores HIGHER). Negating both terms
+ * makes "kept ≻ declined" mean the same thing to the perceptron. The deployed
+ * weights stay positive-clamped in `[WEIGHT_MIN, WEIGHT_MAX]`, so a learned weight
+ * can rescale a nudge but never invert its meaning.
+ */
+function movePrefFeatures(m: OfferedMove, style: RecoveryStyle): number[] {
+  const vm: ValueModel = { ...DEFAULT_VALUE_MODEL, recoveryStyle: style };
+  // A single-goal move stores one cause entry, and a one-entry weighted mean IS the
+  // direct lookup — so both move shapes price through the same call.
+  return [-movePref(vm, m.kind), -aggregateCauseMovePref(m.causes, m.kind)];
+}
+
+/** Component-wise mean of a non-empty list of feature vectors. */
+function centroid(vectors: number[][]): number[] {
+  const out = [0, 0];
+  for (const v of vectors) {
+    out[0] += v[0];
+    out[1] += v[1];
+  }
+  return [out[0] / vectors.length, out[1] / vectors.length];
+}
+
+/**
+ * Learn the STYLE-vs-CAUSE ratio from the user's own accept/decline behaviour — the
+ * 🟠 tier of the calibration cohort (design/step5 → limitation #3, "calibrate from
+ * live data"). Each applied bundle contributes ONE revealed preference: the centroid
+ * of the moves the user kept is preferred to the centroid of the moves they declined.
+ *
+ * Why a centroid and not every `kept × declined` pair: κ counts *observations*, and a
+ * bundle with 3 kept and 3 declined moves is ONE decision, not 9 independent ones.
+ * Feeding the cross product would let a single click blow through the shrinkage.
+ *
+ * Why no odds-tie gate (unlike `plan_reorders`, which only records odds-NEUTRAL drags):
+ * a drag that worsens the odds is the user overriding the forecast, a different kind of
+ * statement worth excluding. Declining a *recommendation* is never that — and these two
+ * weights only ever scale nudges that `PREF_TIE_EPS` already confines to genuine odds
+ * ties. A mis-learned weight therefore cannot override a real gain; the structural
+ * invariant that licenses `prefFor` at all is the same one that makes this safe to
+ * learn from every decline.
+ *
+ * NO-REGRET: no rows (or no row with both a kept and a declined move) ⇒ no pairs ⇒
+ * `fitCalibratedWeights` returns the prior ⇒ exactly today's co-equal `1.0 / 1.0`.
+ *
+ * Scale-invariance caveat (the trap `calibrate.ts` documents): under the `balanced`
+ * recovery style every `movePref` is 0, so φ[0] ≡ 0, Δ[0] ≡ 0, and `style` never moves
+ * off its prior. That is correct — with no style there is no style-vs-cause ratio to
+ * learn — but it means the 🟠 tier only sharpens for users who picked a lean.
+ */
+export function calibrateMovePrefWeights(
+  choices: readonly MoveChoice[],
+): MovePrefWeights {
+  const pairs: PreferencePair[] = [];
+  for (const c of choices) {
+    const kept: number[][] = [];
+    const declined: number[][] = [];
+    for (const m of c.offered) {
+      (m.kept ? kept : declined).push(movePrefFeatures(m, c.recoveryStyle));
+    }
+    // Kept everything, or declined everything ⇒ no contrast ⇒ nothing revealed.
+    if (kept.length === 0 || declined.length === 0) continue;
+    pairs.push({ user: centroid(kept), solver: centroid(declined) });
+  }
+  const [style, cause] = fitCalibratedWeights(pairs, MOVE_PREF_PRIOR);
+  return { style, cause, samples: pairs.length };
 }
 
 // Step 5 (§5 / vision §4.3) — the grounding gate's "cost to the goal" check.
