@@ -141,6 +141,7 @@ import {
   currentWeekOwedDates,
   recurringAllocTasksForToday,
   recurringStateFor,
+  spliceRecurringIntoOrder,
   RECURRING_LANE_ID,
 } from "./recurring";
 import {
@@ -4093,10 +4094,11 @@ export async function forecastDashboard(): Promise<{
   /** The single global allocation the Today views derive from (order + unified schedule). */
   globalPlan: GlobalPlan;
   /**
-   * The agenda's ranking: the global order PLUS today's due recurring instances,
-   * floated up via an ordering-only `today` deadline. Recurring rides this order
-   * for display only — its time is already drained into capacity, so it never
-   * enters the forecast (`globalPlan`/`jointOdds` stay over real project work).
+   * The agenda's ranking (S3c-7): the FOLLOWED order — the arranged, roll-sticky plan the
+   * `globalPlan.days` buckets pack, so the agenda and the plan card agree on what's next —
+   * PLUS today's due recurring instances, floated up via an ordering-only `today` deadline.
+   * Recurring rides this order for display only: its time is already drained into capacity,
+   * so it never enters the forecast (`globalPlan`/`jointOdds` stay over real project work).
    */
   agendaOrder: GlobalPlan["order"];
   model: EstimationModel;
@@ -4163,12 +4165,18 @@ export async function forecastDashboard(): Promise<{
     order: bundle.canonical.order,
     days: packGlobal(decision.order, ctx.budget, g.today, bundle.comfortCapMinutes),
   };
-  // The agenda order: same plan plus today's due recurring instances, ranked as
-  // if due today (ordering-only) so a due routine/goal surfaces near the top.
+  // The agenda order (S3c-7): the FOLLOWED plan — arranged, comfort-capped, odds-gated and
+  // roll-sticky, exactly what `TodayPlan` shows — plus today's due recurring instances, ranked
+  // as if due today (ordering-only) so a due routine/goal surfaces near the top. The union plan
+  // below is built solely to place the routines; `spliceRecurringIntoOrder` reproduces
+  // `decision.order`'s real-task sequence verbatim, so the agenda's ranking and the plan card
+  // can't disagree about what to do next, and the agenda inherits the roll's stickiness for free
+  // (no second committed row / roll cycle to keep in lockstep). Routine minutes stay OUT of
+  // `ctx.tasks`, the schedule and the forecast — they're already drained into capacity.
   const recurringTasks = recurringAllocTasksForToday(activities, completions, g.today);
   const orderingDeadlines = new Map(g.deadlineByProject);
   orderingDeadlines.set(RECURRING_LANE_ID, g.today);
-  const agendaOrder = buildGlobalPlan({
+  const unionOrder = buildGlobalPlan({
     tasks: [...ctx.tasks, ...recurringTasks],
     deps: ctx.deps,
     deadlineByProject: g.deadlineByProject,
@@ -4176,6 +4184,7 @@ export async function forecastDashboard(): Promise<{
     budget: ctx.budget,
     today: g.today,
   }).order;
+  const agendaOrder = spliceRecurringIntoOrder(decision.order, unionOrder);
   // S3c-5 S5 — the "how your plan is tuned to you" read: the SAME calibrated knobs the plan was
   // just built under (arrange weights off `bundle`, hysteresis off `rolls`) plus the sample counts
   // behind them. Server-computed and shipped whole; the surface renders, computing nothing.
