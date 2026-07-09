@@ -3,6 +3,9 @@
 // Type-only (erased at runtime → no import cycle): the serialized re-solve inputs
 // the review screen ships to the client live beside the consumer in `portfolio-state`.
 import type { ResolveInput } from "./portfolio-state";
+// Type-only (same erased-cycle reason): the arrangement soft-weight shape, defined
+// beside its calibrator in `arrange`; the tuning view contract reports it.
+import type { ArrangeWeights } from "./arrange";
 
 export type Confidence = "High" | "Medium" | "Low";
 
@@ -1400,6 +1403,42 @@ export interface PlanReorder {
   /** Reuse {@link COMMITTED_PLAN_SCHEMA_VERSION}: a row whose version doesn't match
    *  the current order shape is treated as invalid (dropped), like a stale roll. */
   schemaVersion: number;
+}
+
+/**
+ * A read-only view of how the calibration seam (OVERHAUL §5a substrate S3c-5) has
+ * tuned the plan's SOFT knobs to the user's own behaviour — the "how your plan is
+ * tuned to you" surface (design/s3c5-shared-calibration-brain.md §7, S5). Every value
+ * is computed SERVER-side (the client renders, computes nothing — Hard Rule §2.8 /
+ * invariant 3). Both tiers start at their documented default and only sharpen off real
+ * evidence, so a fresh account shows defaults everywhere (no-regret, honestly labelled).
+ */
+export interface PlanTuning {
+  /** The 🔴-tier arrangement dials, learned from the drag-to-reorder history. */
+  arrange: {
+    /** The calibrated soft-`J` term weights the plan is currently arranged under. */
+    weights: ArrangeWeights;
+    /** The default (no-data) weights `{1,1,1}` — the baseline "how far it moved" reads against. */
+    prior: ArrangeWeights;
+    /** How many odds-neutral drag observations the weights were learned from. */
+    samples: number;
+    /** Whether a time-of-day window profile is learned. The energy + buffer dials CANNOT move
+     *  without one (their feature terms are identically 0), so the surface says so honestly. */
+    windowLearned: boolean;
+  };
+  /** The 🟡-tier stability (anti-thrash) knobs, learned from roll-undos. */
+  stability: {
+    /** Calibrated flat hysteresis margin + churn penalty (both scaled by one stiffness factor). */
+    stabilityMargin: number;
+    churnCost: number;
+    /** The documented defaults, for the "× stiffer than default" read. */
+    priorMargin: number;
+    priorCost: number;
+    /** Automatic reshuffles considered (the calibration denominator). */
+    materialRolls: number;
+    /** How many of those you undid — the churn-regret signal that stiffens the knobs. */
+    reverts: number;
+  };
 }
 
 // --- §5.6 NL check-in / reflection loop -------------------------------------
