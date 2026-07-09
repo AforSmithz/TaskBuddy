@@ -480,3 +480,23 @@ alter table window_availability enable row level security;
 drop policy if exists window_availability_owner on window_availability;
 create policy window_availability_owner on window_availability
   for all using (user_id = auth.uid()) with check (user_id = auth.uid());
+
+-- Offered-vs-kept move slates — the revealed preference `kept ≻ declined` that
+-- calibrates the STYLE/CAUSE tiebreak weights. Sibling to plan_reorders; written only
+-- by the strategist card's whole-slate Apply. See the migration for the full rationale.
+create table if not exists move_choices (
+  id             uuid primary key default gen_random_uuid(),
+  user_id        uuid not null references auth.users(id) on delete cascade,
+  captured_at    timestamptz not null default now(),
+  recovery_style text not null,
+  offered        jsonb not null,
+  schema_version integer not null
+);
+
+create index if not exists move_choices_user_captured_idx
+  on move_choices (user_id, captured_at desc);
+
+alter table move_choices enable row level security;
+drop policy if exists move_choices_owner on move_choices;
+create policy move_choices_owner on move_choices
+  for all using (user_id = auth.uid()) with check (user_id = auth.uid());
