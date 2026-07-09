@@ -40,6 +40,8 @@ import type {
   PlanTuning,
   PlanRollKind,
   PlanReorder,
+  MoveChoice,
+  OfferedMove,
   PortfolioStrategy,
   Goal,
   ProjectForecast,
@@ -60,7 +62,12 @@ import type {
   TaskStatus,
   TriageMove,
 } from "./types";
-import { COMMITTED_PLAN_SCHEMA_VERSION, ON_TRACK_PROBABILITY, isOnTrack } from "./types";
+import {
+  COMMITTED_PLAN_SCHEMA_VERSION,
+  MOVE_CHOICE_SCHEMA_VERSION,
+  ON_TRACK_PROBABILITY,
+  isOnTrack,
+} from "./types";
 import { extractEntry } from "./extraction";
 import { estimationModel } from "./generate";
 import {
@@ -73,7 +80,13 @@ import {
   type VelocityModel,
 } from "./velocity";
 import { goalCompletion } from "./goal";
-import { diagnoseCause, goalCutCost, type CauseBaseline } from "./grounding";
+import {
+  calibrateMovePrefWeights,
+  diagnoseCause,
+  goalCutCost,
+  type CauseBaseline,
+  type MovePrefWeights,
+} from "./grounding";
 import { bufferUrgency, isBufferLow } from "./buffer";
 import { formatMinutes } from "./format";
 import { computePriority } from "./priority";
@@ -150,6 +163,7 @@ import {
   areaWeight,
   normalizeValueModel,
   DEFAULT_VALUE_MODEL,
+  type RecoveryStyle,
   type ValueModel,
 } from "./value-model";
 import {
@@ -236,6 +250,9 @@ interface MemDB {
   /** Captured drag-to-reorder preference pairs, newest-first — the 🔴-tier calibration
    *  signal (S3c-5), capped at `PLAN_REORDER_CAP`. */
   planReorders: PlanReorder[];
+  /** Captured offered-vs-kept move slates, newest-first — the 🟠-tier calibration
+   *  signal (STYLE/CAUSE pref weights), capped at `MOVE_CHOICE_CAP`. */
+  moveChoices: MoveChoice[];
   seeded: boolean;
 }
 
@@ -272,6 +289,7 @@ function memDB(): MemDB {
       committedPlan: null,
       planRolls: [],
       planReorders: [],
+      moveChoices: [],
       seeded: false,
     };
   }
@@ -1737,6 +1755,100 @@ export async function listPlanReorders(): Promise<PlanReorder[]> {
   return reorders.filter(
     (r) => r.schemaVersion === COMMITTED_PLAN_SCHEMA_VERSION,
   );
+}
+
+// --- Offered-vs-kept move signal (step 5 slice 4 follow-on, limitation #3) ---
+//
+// The 🟠 tier of the calibration cohort. `prefFor` sums a STYLE nudge and a CAUSE
+// nudge 1:1; nothing revealed whether that ratio is right, because `plan_versions`
+// keeps only the moves the user COMMITTED. Each row here keeps the whole slate the
+// strategist offered, flagged kept/declined, so `calibrateMovePrefWeights` can read
+// `kept ≻ declined` as a revealed preference over move families. A SIBLING to
+// `plan_reorders`: dispose-side bookkeeping, authors no odds, same cap and pruning.
+
+/** Soft cap on retained choice observations per user (mirrors `PLAN_REORDER_CAP`). */
+const MOVE_CHOICE_CAP = 50;
+
+/** Append one offered-vs-kept observation and prune to the cap. Best-effort at the call
+ *  site: an accrual failure must never break the bundle the user just applied. */
+export async function insertMoveChoice(choice: MoveChoice): Promise<void> {
+  if (isSupabaseConfigured()) {
+    const supabase = await getRequestClient();
+    const user_id = await currentUserId(supabase);
+    const { error } = await supabase.from("move_choices").insert({
+      id: choice.id,
+      user_id,
+      captured_at: choice.capturedAt,
+      recovery_style: choice.recoveryStyle,
+      offered: choice.offered,
+      schema_version: choice.schemaVersion,
+    });
+    if (error)
+      throw new Error(`Supabase move_choices insert failed: ${error.message}`);
+    await pruneMoveChoices(supabase);
+    return;
+  }
+  await ensureSeeded();
+  const db = memDB();
+  db.moveChoices.unshift(choice);
+  if (db.moveChoices.length > MOVE_CHOICE_CAP)
+    db.moveChoices.length = MOVE_CHOICE_CAP;
+}
+
+/** Delete choices older than the most recent `MOVE_CHOICE_CAP` (soft cap). */
+async function pruneMoveChoices(supabase: RequestClient): Promise<void> {
+  const { data } = await supabase
+    .from("move_choices")
+    .select("id")
+    .order("captured_at", { ascending: false })
+    .range(MOVE_CHOICE_CAP, MOVE_CHOICE_CAP + 1000);
+  const stale = (data as { id: string }[] | null) ?? [];
+  if (stale.length)
+    await supabase
+      .from("move_choices")
+      .delete()
+      .in(
+        "id",
+        stale.map((r) => r.id),
+      );
+}
+
+interface MoveChoiceRow {
+  id: string;
+  captured_at: string;
+  recovery_style: RecoveryStyle;
+  offered: OfferedMove[];
+  schema_version: number;
+}
+
+function rowToMoveChoice(r: MoveChoiceRow): MoveChoice {
+  return {
+    id: r.id,
+    capturedAt: r.captured_at,
+    recoveryStyle: r.recovery_style,
+    offered: r.offered,
+    schemaVersion: r.schema_version,
+  };
+}
+
+/** The offered-vs-kept history, newest-first (capped). Rows whose `schemaVersion` no
+ *  longer matches the current `OfferedMove` shape are dropped — their stored inputs
+ *  can't be re-priced, so the calibrator skips them. Mirrors `listPlanReorders`. */
+export async function listMoveChoices(): Promise<MoveChoice[]> {
+  let choices: MoveChoice[];
+  if (isSupabaseConfigured()) {
+    const supabase = await getRequestClient();
+    const { data } = await supabase
+      .from("move_choices")
+      .select("*")
+      .order("captured_at", { ascending: false })
+      .limit(MOVE_CHOICE_CAP);
+    choices = ((data as MoveChoiceRow[]) ?? []).map(rowToMoveChoice);
+  } else {
+    await ensureSeeded();
+    choices = memDB().moveChoices;
+  }
+  return choices.filter((c) => c.schemaVersion === MOVE_CHOICE_SCHEMA_VERSION);
 }
 
 // --- Plan version history (S1 step 3 / vision §1.3) -------------------------
@@ -3295,6 +3407,9 @@ export interface JointScorer {
   activities: RecurringActivity[];
   /** The user's value model — the optimizer reads its recovery-style move prefs. */
   valueModel: ValueModel;
+  /** Calibrated relative weights of the two odds-tie nudges (style vs diagnosed
+   *  cause), learned from the offered-vs-kept history. Prior `{1, 1}` when unlearned. */
+  movePrefWeights: MovePrefWeights;
   /** Current joint odds per deadlined project, no moves applied. */
   baseByProject: Map<string, number>;
   /** Current portfolio conjunction (P(all land)), no moves applied. */
@@ -3858,12 +3973,13 @@ export async function createJointScorer(): Promise<JointScorer> {
   // added since, or odds that have since dropped). Without it the optimizer's
   // causes would silently collapse to the residual-only classes. Loaded in
   // parallel with the gather so it adds no latency.
-  const [g, cachedStrategy, committed, localNow, rolls] = await Promise.all([
+  const [g, cachedStrategy, committed, localNow, rolls, moveChoices] = await Promise.all([
     gatherForecast(),
     getCachedStrategy(),
     getCommittedPlan(),
     readClientLocalNow(),
     listPlanRolls(),
+    listMoveChoices(),
   ]);
   const ctx = allocContext(g, g.commitments);
   // The S3b arrangement pipeline decides the comfort cap, the thin-buffer urgency, and the
@@ -3909,6 +4025,9 @@ export async function createJointScorer(): Promise<JointScorer> {
     pitWall,
     activities: g.activities.filter((a) => a.active),
     valueModel: g.valueModel,
+    // 🟠 tier: the style-vs-cause tiebreak ratio, learned off the offered-vs-kept
+    // history. No rows ⇒ the co-equal 1.0/1.0 prior, bit-identically.
+    movePrefWeights: calibrateMovePrefWeights(moveChoices),
     baseByProject,
     baseAllOnTime: base.allOnTime,
     score: (moves) => jointOddsWithMoves(jg, ctx, moves, JOINT_PROBE_ITERATIONS),
