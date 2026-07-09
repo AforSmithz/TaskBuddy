@@ -9,6 +9,8 @@ import {
   applyTaskModifications,
   commitRollingPlan,
   commitStrategyBundle,
+  getValueModel,
+  insertMoveChoice,
   createJointScorer,
   type JointScorer,
   confirmDraft,
@@ -80,6 +82,7 @@ import type {
   EntryKind,
   GoalKind,
   ModificationSuggestion,
+  OfferedMove,
   PitCall,
   PlanVersion,
   PortfolioStrategy,
@@ -93,6 +96,7 @@ import type {
   TaskStatus,
   WorkSessionLocal,
 } from "./types";
+import { MOVE_CHOICE_SCHEMA_VERSION } from "./types";
 
 // Server Actions — the single mutation layer for TaskBuddy.
 
@@ -629,6 +633,14 @@ export async function commitStrategyBundleAction(
   oddsBefore: number,
   oddsAfter: number,
   reason: string,
+  /**
+   * The moves that were on the table and the user UNCHECKED — the other half of the
+   * revealed preference `kept ≻ declined` (see `MoveChoice`). Passed ONLY by the
+   * strategist card's whole-slate Apply, where declining is a real decision. Omitted
+   * by the per-row Apply (applying one move is not a rejection of the rest) and by the
+   * §5.6 check-in review (its moves are user-asserted facts, not recovery taste).
+   */
+  declined?: StrategyMove[],
 ): Promise<PlanVersion> {
   await requireUser();
   const version = await commitStrategyBundle(moves, {
@@ -636,8 +648,54 @@ export async function commitStrategyBundleAction(
     oddsAfter,
     reason,
   });
+  if (declined !== undefined) await recordMoveChoice(moves, declined);
   await revalidateAll();
   return version;
+}
+
+/**
+ * Retain one offered-vs-kept observation for the 🟠-tier calibration of
+ * `STYLE_PREF_WEIGHT` / `CAUSE_PREF_WEIGHT`. The φ INPUTS come off each move's
+ * `causes` (baked in by `optimizeJointPlan` at generation time, so this costs no
+ * scorer) and the value model's current lean.
+ *
+ * Best-effort by design: a bookkeeping failure must never surface on a bundle the
+ * user already applied and that already committed successfully. Mirrors how
+ * `reorderTodayAction` accrues `plan_reorders` inside its swallowed path.
+ */
+async function recordMoveChoice(
+  kept: StrategyMove[],
+  declined: StrategyMove[],
+): Promise<void> {
+  // No contrast ⇒ nothing revealed ⇒ don't write a row the calibrator would skip.
+  if (kept.length === 0 || declined.length === 0) return;
+  try {
+    const vm = await getValueModel();
+    const offered: OfferedMove[] = [
+      ...kept.map((m) => toOfferedMove(m, true)),
+      ...declined.map((m) => toOfferedMove(m, false)),
+    ];
+    await insertMoveChoice({
+      id: crypto.randomUUID(),
+      capturedAt: new Date().toISOString(),
+      recoveryStyle: vm.recoveryStyle,
+      offered,
+      schemaVersion: MOVE_CHOICE_SCHEMA_VERSION,
+    });
+  } catch {
+    // swallowed: calibration is a nicety, the applied bundle is the contract
+  }
+}
+
+function toOfferedMove(m: StrategyMove, kept: boolean): OfferedMove {
+  return {
+    kind: m.kind,
+    projectId: m.projectId,
+    // Absent on moves the optimizer didn't author ⇒ [] ⇒ a zero cause term, which
+    // is exactly how an unknown cause already prices.
+    causes: m.causes ?? [],
+    kept,
+  };
 }
 
 // --- §5.6 NL check-in / reflection loop -------------------------------------

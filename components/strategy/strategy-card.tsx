@@ -388,6 +388,14 @@ function MoveTier({
   function commit(
     entries: { move: StrategyMove; index: number }[],
     busyKey: number | "all",
+    /**
+     * The moves still on the table that the user unchecked. Only the whole-slate
+     * Apply passes this — that click is a decision about every offered move, so
+     * `kept ≻ declined` is a real revealed preference. Applying a single row says
+     * nothing about the rows left alone, so `applyOne` passes nothing and the
+     * server records no observation.
+     */
+    declined?: StrategyMove[],
   ) {
     if (entries.length === 0) return;
     const movesToApply = entries.map((e) => e.move);
@@ -404,6 +412,7 @@ function MoveTier({
         before,
         after,
         reason,
+        declined,
       );
       setApplied((s) => {
         const next = new Set(s);
@@ -421,10 +430,16 @@ function MoveTier({
 
   function applyAll() {
     // Recompute from current state: included & not-yet-applied, in recommended order.
-    const entries = moves
+    const open = moves
       .map((move, index) => ({ move, index }))
-      .filter(({ index }) => !applied.has(index) && included.has(index));
-    commit(entries, "all");
+      .filter(({ index }) => !applied.has(index));
+    const entries = open.filter(({ index }) => included.has(index));
+    // Everything still on the table that the user unchecked — the other half of the
+    // preference pair. Already-applied rows are excluded: they weren't declined.
+    const declined = open
+      .filter(({ index }) => !included.has(index))
+      .map(({ move }) => move);
+    commit(entries, "all", declined);
   }
 
   // Revert the whole last bundle (§8.2): one snapshot restore, then bring its rows
