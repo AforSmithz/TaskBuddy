@@ -12,7 +12,13 @@ import type {
   TimeWindow,
 } from "./types";
 import { MIN_ESTIMATION_SAMPLES } from "./types";
-import { WINDOW_LABELS, type ResidualSample, type VelocityModel } from "./velocity";
+import {
+  SHRINKAGE_STRENGTH,
+  WINDOW_LABELS,
+  type ResidualSample,
+  type VelocityModel,
+} from "./velocity";
+import { shrinkScalar } from "./calibrate";
 import { goalCompletion } from "./goal";
 import { skillProgress } from "./skill";
 
@@ -181,34 +187,46 @@ export function diagnoseCause(input: CauseInput): CauseDiagnosis {
     }
   }
 
-  // 2) chronic_velocity — a systematic over-run, for this goal or globally. The
-  //    per-goal read needs its own sample (≥ MIN_ESTIMATION_SAMPLES); below that
-  //    the global model is the only trustworthy signal.
-  const goalMean = n >= MIN_ESTIMATION_SAMPLES ? mean(residuals) : null;
-  const goalChronic = goalMean !== null && goalMean >= LN_CHRONIC_OVERRUN;
-  const globalChronic =
-    model.sampleSize >= MIN_ESTIMATION_SAMPLES &&
-    model.meanLog >= LN_CHRONIC_OVERRUN;
-  if (goalChronic || globalChronic) {
+  // 2) chronic_velocity — a systematic over-run, for this goal or globally.
+  //
+  //    The goal's own residual mean is SHRUNK toward the global bias (empirical
+  //    Bayes, κ = SHRINKAGE_STRENGTH) rather than SWITCHED to it at a hard
+  //    `n ≥ MIN_ESTIMATION_SAMPLES` cutoff. One blended read replaces the old
+  //    `goalChronic || globalChronic` disjunction, and it is strictly better at both
+  //    ends: a goal with 4 damning samples is no longer silently ignored, and a goal
+  //    with 10 clean ones is no longer condemned by a chronic global average it
+  //    doesn't share. This is the per-goal-cause sharpening S2's hierarchical
+  //    shrinkage was built to supply (`fitVelocityModel` uses the identical B).
+  //
+  //    NO-REGRET at the anchor: `n = 0 ⇒ B = 0 ⇒ bias = model.meanLog`, i.e. exactly
+  //    the old `globalChronic` test. The global trust gate mirrors `fitVelocityModel`
+  //    — below MIN_ESTIMATION_SAMPLES the global model is the unbiased *default*, not
+  //    evidence, so there is nothing to shrink toward and nothing to diagnose. (The
+  //    goal's sample is a subset of the global pool — `goalResiduals` shares
+  //    `estimationModel`'s gate — so this can never mask a goal that used to fire.)
+  const chronicBias =
+    model.sampleSize >= MIN_ESTIMATION_SAMPLES
+      ? shrinkScalar(mean(residuals), model.meanLog, n, SHRINKAGE_STRENGTH)
+      : null;
+  if (chronicBias !== null && chronicBias >= LN_CHRONIC_OVERRUN) {
     // 2a) timing_placement (S2) — before blaming the estimates, check whether THIS
     //     goal's overrun is just the low-energy windows it was worked in. If net of
     //     the windows the pace is fine, it's a placement problem (reschedule into
-    //     better hours), not an estimation one. Only demotes the goal's own chronic
-    //     read — a purely global bias is genuinely chronic_velocity.
-    if (goalChronic) {
-      const placement = placementExplains(
-        input.windowedResiduals ?? [],
-        input.windowVelocity,
-      );
-      if (placement) {
-        return {
-          cause: "timing_placement",
-          detail: `The overruns here line up with your ${WINDOW_LABELS[placement.window]} sessions (~${placement.slowerPct}% slower than your norm), not your estimates — move this work into stronger hours rather than re-estimating or cutting scope.`,
-        };
-      }
+    //     better hours), not an estimation one. Called unconditionally: it self-gates
+    //     to the goal's own chronic read (it returns null unless the goal's RAW mean
+    //     clears the threshold), so a purely global bias is still genuinely
+    //     chronic_velocity and can't be demoted by one goal's window history.
+    const placement = placementExplains(
+      input.windowedResiduals ?? [],
+      input.windowVelocity,
+    );
+    if (placement) {
+      return {
+        cause: "timing_placement",
+        detail: `The overruns here line up with your ${WINDOW_LABELS[placement.window]} sessions (~${placement.slowerPct}% slower than your norm), not your estimates — move this work into stronger hours rather than re-estimating or cutting scope.`,
+      };
     }
-    const logBias = goalChronic ? (goalMean as number) : model.meanLog;
-    const pct = Math.round((Math.exp(logBias) - 1) * 100);
+    const pct = Math.round((Math.exp(chronicBias) - 1) * 100);
     return {
       cause: "chronic_velocity",
       detail: `Estimates here are running ~${pct}% over — a pattern, not a one-off. The estimates need adjusting, not just the plan.`,
