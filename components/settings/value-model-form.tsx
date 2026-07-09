@@ -47,13 +47,32 @@ const RECOVERY_OPTIONS: {
  * Weights default to Normal; only non-neutral ones are persisted. The save action
  * re-normalizes server-side, so the form just sends its current view.
  */
+/** A goal the user can weight individually. */
+export interface WeightableGoal {
+  id: string;
+  name: string;
+}
+
+/** Sentinel for "no explicit weight — derive this goal's value from its areas". */
+const DERIVED = "derived";
+type GoalWeight = number | typeof DERIVED;
+
+/** The area presets, plus the "defer to my area weights" default that leads them. */
+const GOAL_WEIGHT_OPTIONS: { label: string; value: GoalWeight }[] = [
+  { label: "From areas", value: DERIVED },
+  ...WEIGHT_OPTIONS,
+];
+
 export function ValueModelForm({
   model,
   areas,
+  goals,
   weightsActive,
 }: {
   model: ValueModel;
   areas: string[];
+  /** Open goals, offered a per-goal importance override. */
+  goals: WeightableGoal[];
   /**
    * Whether the saved area weights currently reorder the plan (server-computed).
    * When false, they're inert (enough slack that work follows deadlines) and we
@@ -69,9 +88,19 @@ export function ValueModelForm({
       areas.map((a) => [a, model.areaWeights[a] ?? NEUTRAL_AREA_WEIGHT]),
     ),
   );
+  // `DERIVED` (not a number) when unset, so an explicit "Normal" is distinguishable
+  // from "unset" — the former overrides the area-derived value, the latter defers
+  // to it. `goalValue()` depends on exactly that distinction.
+  const [goalWeights, setGoalWeights] = useState<Record<string, GoalWeight>>(() =>
+    Object.fromEntries(goals.map((g) => [g.id, model.projectWeights[g.id] ?? DERIVED])),
+  );
 
   function setWeight(area: string, value: number) {
     setWeights((w) => ({ ...w, [area]: value }));
+    setSaved(false);
+  }
+  function setGoalWeight(goalId: string, value: GoalWeight) {
+    setGoalWeights((w) => ({ ...w, [goalId]: value }));
     setSaved(false);
   }
   function pickStyle(next: RecoveryStyle) {
@@ -85,11 +114,17 @@ export function ValueModelForm({
     for (const [area, value] of Object.entries(weights)) {
       if (value !== NEUTRAL_AREA_WEIGHT) areaWeights[area] = value;
     }
+    // An explicit neutral IS persisted here (unlike an area) — see `goalValue`.
+    const projectWeights: Record<string, number> = {};
+    for (const [goalId, value] of Object.entries(goalWeights)) {
+      if (value !== DERIVED) projectWeights[goalId] = value;
+    }
     startTransition(async () => {
       await updateValueModelAction({
         version: VALUE_MODEL_VERSION,
         areaWeights,
         recoveryStyle: style,
+        projectWeights,
       });
       setSaved(true);
     });
@@ -189,6 +224,58 @@ export function ValueModelForm({
           </p>
         )}
       </fieldset>
+
+      {/* Per-goal importance */}
+      {goals.length > 0 && (
+        <fieldset className="space-y-3">
+          <legend className="text-[14px] font-semibold text-[var(--color-fg)]">
+            Individual goals
+          </legend>
+          <p className="text-[13px] text-[var(--color-fg-muted)]">
+            By default a goal is worth as much as the areas its work sits in. Override
+            one here and the strategist weights it that way when it has to choose which
+            goals a single recovery should serve.
+          </p>
+          <div className="space-y-2.5">
+            {goals.map((goal) => (
+              <div
+                key={goal.id}
+                className="flex flex-wrap items-center justify-between gap-3 rounded-[14px] border border-[var(--color-border)] px-3.5 py-3"
+              >
+                <span className="text-[13.5px] font-medium text-[var(--color-fg)]">
+                  {goal.name}
+                </span>
+                <div className="flex overflow-hidden rounded-[11px] border border-[var(--color-border)]">
+                  {GOAL_WEIGHT_OPTIONS.map((opt) => (
+                    <button
+                      key={String(opt.value)}
+                      type="button"
+                      aria-pressed={goalWeights[goal.id] === opt.value}
+                      onClick={() => setGoalWeight(goal.id, opt.value)}
+                      className={cn(
+                        "px-3 py-1.5 text-[12.5px] font-medium transition-colors",
+                        goalWeights[goal.id] === opt.value
+                          ? "bg-[var(--color-accent-subtle)] text-[var(--color-accent-fg)]"
+                          : "text-[var(--color-fg-muted)] hover:text-[var(--color-fg)]",
+                      )}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+          <p className="flex items-start gap-2 rounded-[12px] border border-[var(--color-border)] px-3 py-2.5 text-[12px] leading-relaxed text-[var(--color-fg-muted)]">
+            <Info className="mt-0.5 size-3.5 shrink-0" aria-hidden />
+            <span>
+              Unlike area weights, a goal&apos;s importance doesn&apos;t reorder your
+              plan. It decides whose problem a shared recovery is solving when one move
+              touches several goals at once.
+            </span>
+          </p>
+        </fieldset>
+      )}
 
       <div className="flex items-center gap-3">
         <Button type="button" variant="primary" onClick={save} loading={pending}>

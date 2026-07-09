@@ -3,6 +3,7 @@ import {
   getValueModel,
   getWindowAvailability,
   listAllTasks,
+  listGoals,
   listRecurringActivities,
   valueWeightsAffectPlan,
 } from "@/lib/store";
@@ -19,11 +20,12 @@ import { WindowAvailabilityForm } from "@/components/settings/window-availabilit
  * exactly the buckets their work falls into.
  */
 export default async function SettingsPage() {
-  const [model, windowAvailability, tasks, activities, weightsActive] =
+  const [model, windowAvailability, tasks, goals, activities, weightsActive] =
     await Promise.all([
       getValueModel(),
       getWindowAvailability(),
       listAllTasks(),
+      listGoals(),
       listRecurringActivities(),
       valueWeightsAffectPlan(),
     ]);
@@ -49,7 +51,12 @@ export default async function SettingsPage() {
 
       <Reveal delay={0.05} className="mt-7">
         <Card className="rounded-[22px] p-6 shadow-[var(--shadow-md)]">
-          <ValueModelForm model={model} areas={areas} weightsActive={weightsActive} />
+          <ValueModelForm
+            model={model}
+            areas={areas}
+            goals={goals.map((g) => ({ id: g.id, name: g.name }))}
+            weightsActive={weightsActive}
+          />
         </Card>
       </Reveal>
 
