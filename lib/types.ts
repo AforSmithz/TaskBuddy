@@ -192,6 +192,63 @@ export interface SkillNode {
   created_at: string;
 }
 
+/** Lifecycle of a proposed skill-node ↔ task link. Only `confirmed` drives a
+ *  spillover move; `dismissed` is remembered so the linker stops re-proposing it. */
+export type SkillTaskLinkStatus = "suggested" | "confirmed" | "dismissed";
+
+/**
+ * An explicit "these two are the same work" edge between a skill node (a
+ * capability) and a task (an action). The pair that motivates it — "Set up the
+ * auth provider" and "Set up authentication with a provider" — shares almost no
+ * words, so title similarity structurally cannot find it (measured: 0 of 81 real
+ * pairs clear the matcher's bar). The edge is therefore LLM-proposed and
+ * user-confirmed, and spillover reads it as a deterministic lookup rather than a
+ * guess — which is what makes it safe enough to close a task, not just credit a skill.
+ */
+export interface SkillTaskLink {
+  id: string;
+  skill_node_id: string;
+  task_id: string;
+  status: SkillTaskLinkStatus;
+  /** The model's one-line why, shown verbatim on the confirm surface. */
+  rationale: string | null;
+  created_at: string;
+}
+
+/** One link the LLM proposes, by the handles it was shown (`N1`, `T3`). `task_key` is
+ *  absent in the preferred task-keyed response shape (the map key carries it). */
+export interface ExtractedLink {
+  node_key: string;
+  task_key?: string;
+  rationale: string;
+}
+
+/**
+ * The linker's raw JSON response, before key resolution + sanitization.
+ *
+ * The prompt asks for the **task-keyed map**: unique JSON keys make "one skill per task"
+ * structurally unrepresentable rather than merely discouraged. Asked for a flat array,
+ * the model fans out — observed live attaching all 8 skills of a graph to one weekly
+ * lesson. The legacy array shape is still accepted (a model that ignores the schema
+ * shouldn't kill the feature); `normalizeLinks` collapses it with a principled tiebreak.
+ */
+export type LinkSuggestion =
+  | { links: Record<string, ExtractedLink | null> }
+  | { links: ExtractedLink[] };
+
+/**
+ * The second-pass verdict on ONE proposed pair, judged in isolation.
+ *
+ * Shown a menu of skills and asked to assign them, the model distributes *all* of them —
+ * observed twice: 8 skills onto 1 task, then 3 skills onto 3 tasks, one each, inventing a
+ * rationale wherever each landed. The bias is toward using up the menu, not toward truth.
+ * Judging a single pair with no menu in context removes the pressure that causes it.
+ */
+export interface LinkVerdict {
+  demonstrates: boolean;
+  why?: string;
+}
+
 /**
  * A learning goal's derived progress (computed in `lib/skill.ts`). The crux of
  * §5.3b: *effort* progress (minutes attained / total) and *skill* progress
@@ -1061,6 +1118,12 @@ export type StrategyMovePayload =
        *  move came from). A check-in "I finished X" → `self_assessed`; omitted by the
        *  strategist's own inference → defaults to `inferred` in persist. */
       confidence?: CompletionConfidence;
+      /** Set when this completion was INFERRED from attaining a LINKED skill node
+       *  (`skill_task_links`) — the id of that node. Mirrors `attain_skill`'s field. */
+      viaSpilloverFrom?: string;
+      /** Free-text provenance written to `tasks.resolved_by` ("Credited via spillover
+       *  from …"). Absent on a plain mark_done, which must not clear the column. */
+      resolvedBy?: string;
     }
   | {
       // §5.6 — the user attained a skill node (drops its synthetic forecast task).
