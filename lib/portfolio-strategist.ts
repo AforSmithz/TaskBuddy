@@ -17,7 +17,8 @@ import type {
 } from "./types";
 import { isOnTrack } from "./types";
 import { causeMovePref, aggregateCauseMovePref } from "./grounding";
-import { movePref, type ValueModel } from "./value-model";
+import { goalValue, movePref, type ValueModel } from "./value-model";
+import type { AllocTask } from "./allocate";
 import type { ChatMessage } from "./openrouter";
 import { isLLMConfigured } from "./extraction";
 import {
@@ -1050,19 +1051,33 @@ function optimizeJointPlan(
   // Step 5 slice 4: each project's diagnosed cause picks which move *family* fits,
   // applied alongside the value model's recovery-style taste in the odds-tie
   // tiebreak below. A cross-project move (projectId "" — portfolio-wide triage,
-  // activity skip) has no single owning goal, so its cause bias is the risk-
-  // weighted mean over every diagnosed goal (the goals it actually serves; the
-  // most at-risk dominate). Risk = 1 − currentProbability is the v1 weight until
-  // per-goal value lands in the Value Model.
+  // activity skip) has no single owning goal, so its cause bias is the weighted
+  // mean over every diagnosed goal (the goals it actually serves).
+  //
+  // The weight is `goalValue × risk` (step-5 follow-on, VM v2). Both terms are
+  // needed and neither suffices:
+  //   · risk  = 1 − currentProbability — a portfolio move is *about* the goals it
+  //     is actually rescuing, so the most endangered should dominate.
+  //   · value = the Value Model's per-goal importance (explicit, else derived from
+  //     the area weights of its open work) — a doomed errand should not outvote a
+  //     salvageable goal that matters.
+  // NO-REGRET: with no project weights and no area weights every goalValue is 1, so
+  // this reduces bit-identically to the risk-only v1 weighting.
+  const openWorkByProject = new Map<string, AllocTask[]>();
+  for (const t of scorer.resolveInput.tasks) {
+    const bucket = openWorkByProject.get(t.projectId);
+    if (bucket) bucket.push(t);
+    else openWorkByProject.set(t.projectId, [t]);
+  }
+
   const causeByProject = new Map<string, DivergenceCause>();
   const crossProjectCauses: { cause: DivergenceCause | null; weight: number }[] = [];
   for (const r of scorer.recoveries) {
     if (r.cause) {
       causeByProject.set(r.projectId, r.cause.cause);
-      crossProjectCauses.push({
-        cause: r.cause.cause,
-        weight: Math.max(1 - r.currentProbability, 0),
-      });
+      const risk = Math.max(1 - r.currentProbability, 0);
+      const value = goalValue(vm, r.projectId, openWorkByProject.get(r.projectId) ?? []);
+      crossProjectCauses.push({ cause: r.cause.cause, weight: value * risk });
     }
   }
   const causePrefFor = (m: StrategyMove): number =>
