@@ -35,6 +35,7 @@ import type {
   PitCall,
   PlanVersion,
   PlanRoll,
+  PlanTuning,
   PlanRollKind,
   PlanReorder,
   PortfolioStrategy,
@@ -104,6 +105,7 @@ import {
   type GlobalPlan,
 } from "./allocate";
 import {
+  ARRANGE_WEIGHTS,
   arrangementScore,
   calibrateArrangeWeights,
   comfortSmooth,
@@ -122,6 +124,8 @@ import {
   undoRollDecision,
   reorderDecision,
   calibrateHysteresis,
+  STABILITY_MARGIN,
+  CHURN_COST,
   type RollContext,
   type RollDecisionResult,
   type CalibratedHysteresis,
@@ -4096,6 +4100,9 @@ export async function forecastDashboard(): Promise<{
    */
   agendaOrder: GlobalPlan["order"];
   model: EstimationModel;
+  /** How the calibration seam (S3c-5) has tuned the plan's soft knobs to the user — the
+   *  read-only "how your plan is tuned to you" surface. Defaults everywhere until evidence. */
+  tuning: PlanTuning;
 }> {
   const [g, activities, completions, cachedStrategy, committed, localNow, rolls] = await Promise.all([
     gatherForecast(),
@@ -4125,8 +4132,9 @@ export async function forecastDashboard(): Promise<{
   // ⇒ date-granular churn, exactly S3c-1.
   // S3c-5 (🟡 tier): same calibrated hysteresis as the write path, so the dashboard's sticky/roll
   // choice matches what the mutation-time roll would persist.
+  const hysteresis = calibrateHysteresis(rolls);
   const decision = rollDecision(
-    rollContextFor(g, ctx, bundle, committed, localNow, calibrateHysteresis(rolls)),
+    rollContextFor(g, ctx, bundle, committed, localNow, hysteresis),
   );
   // S3c-6: on a quiet new day, refresh the committed row's frozen-zone anchor from this read.
   await advanceAnchorOnQuietDay(committed, decision);
@@ -4168,7 +4176,27 @@ export async function forecastDashboard(): Promise<{
     budget: ctx.budget,
     today: g.today,
   }).order;
-  return { forecasts, recoveries, pitWall, globalPlan, agendaOrder, model: g.model };
+  // S3c-5 S5 — the "how your plan is tuned to you" read: the SAME calibrated knobs the plan was
+  // just built under (arrange weights off `bundle`, hysteresis off `rolls`) plus the sample counts
+  // behind them. Server-computed and shipped whole; the surface renders, computing nothing.
+  const materialRolls = rolls.filter((r) => r.kind === "material");
+  const tuning: PlanTuning = {
+    arrange: {
+      weights: bundle.weights,
+      prior: ARRANGE_WEIGHTS,
+      samples: g.planReorders.length,
+      windowLearned: g.windowProfile !== null,
+    },
+    stability: {
+      stabilityMargin: hysteresis.stabilityMargin,
+      churnCost: hysteresis.churnCost,
+      priorMargin: STABILITY_MARGIN,
+      priorCost: CHURN_COST,
+      materialRolls: materialRolls.length,
+      reverts: materialRolls.filter((r) => r.revertedAt != null).length,
+    },
+  };
+  return { forecasts, recoveries, pitWall, globalPlan, agendaOrder, model: g.model, tuning };
 }
 
 /**
