@@ -2,6 +2,7 @@ import "server-only";
 
 import { createHash } from "crypto";
 import type {
+  CauseWeight,
   DivergenceCause,
   FactorScores,
   ModificationKind,
@@ -16,7 +17,7 @@ import type {
   TaskModification,
 } from "./types";
 import { isOnTrack } from "./types";
-import { causeMovePref, aggregateCauseMovePref } from "./grounding";
+import { aggregateCauseMovePref } from "./grounding";
 import { goalValue, movePref, type ValueModel } from "./value-model";
 import type { AllocTask } from "./allocate";
 import type { ChatMessage } from "./openrouter";
@@ -84,17 +85,6 @@ const JOINT_MOVE_CAP = 6;
  * gain). Decision: keep the math primary, let the model shape close calls.
  */
 const PREF_TIE_EPS = 0.02;
-
-/**
- * Relative weights of the two odds-tie nudges: the user's recovery *style*
- * (`movePref`) and the diagnosed *cause*'s preferred move family (`causeMovePref`).
- * Both default to 1.0 (co-equal — the historical behaviour), but they are named
- * knobs rather than an implicit 1:1 sum so the ratio can be tuned — or learned —
- * once S2's live data exists (design/step5 → "Comprehensive remediation plan").
- * Both still apply only within `PREF_TIE_EPS`, so the forecast always decides first.
- */
-const STYLE_PREF_WEIGHT = 1;
-const CAUSE_PREF_WEIGHT = 1;
 
 // --- C. Fingerprint ---------------------------------------------------------
 
@@ -1080,12 +1070,20 @@ function optimizeJointPlan(
       crossProjectCauses.push({ cause: r.cause.cause, weight: value * risk });
     }
   }
-  const causePrefFor = (m: StrategyMove): number =>
+  /** The cause entries a move is priced against — one per goal it serves. */
+  const causesFor = (m: StrategyMove): CauseWeight[] =>
     m.projectId === ""
-      ? aggregateCauseMovePref(crossProjectCauses, m.kind)
-      : causeMovePref(causeByProject.get(m.projectId) ?? null, m.kind);
+      ? crossProjectCauses
+      : [{ cause: causeByProject.get(m.projectId) ?? null, weight: 1 }];
+
+  const causePrefFor = (m: StrategyMove): number =>
+    aggregateCauseMovePref(causesFor(m), m.kind);
+  // The style:cause ratio is LEARNED from the user's own accept/decline history
+  // (`calibrateMovePrefWeights`), falling back bit-identically to the co-equal
+  // 1.0/1.0 prior when nothing has been revealed yet.
+  const w = scorer.movePrefWeights;
   const prefFor = (m: StrategyMove): number =>
-    STYLE_PREF_WEIGHT * movePref(vm, m.kind) + CAUSE_PREF_WEIGHT * causePrefFor(m);
+    w.style * movePref(vm, m.kind) + w.cause * causePrefFor(m);
 
   while (picked.length < JOINT_MOVE_CAP && remaining.length > 0) {
     // Everyone deadlined is already on track — nothing left worth doing.
@@ -1138,6 +1136,11 @@ function optimizeJointPlan(
   const moves = picked.map((m, i) => ({
     ...m,
     portfolioProbabilityAfter: afterEach[i] ?? m.probabilityAfter,
+    // Bake the offer-time cause inputs onto the move so that if the user applies
+    // this bundle we can record the revealed preference (`OfferedMove`) without
+    // rebuilding a scorer. A single-goal move gets its one cause at weight 1 —
+    // a one-entry weighted mean is the direct lookup, so the weight is inert.
+    causes: causesFor(m),
   }));
   return { moves, afterEach, combined };
 }
