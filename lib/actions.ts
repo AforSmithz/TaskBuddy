@@ -23,6 +23,12 @@ import {
   setGoalCriterionMet,
   setGoalKind,
   setSkillNodeAttained,
+  listSkillNodes,
+  listAllSkillNodes,
+  listSkillTaskLinksForGoal,
+  listConfirmedSkillTaskLinks,
+  insertSuggestedLinks,
+  setSkillTaskLinkStatus,
   getCachedStrategy,
   getEntry,
   listAllTasks,
@@ -49,6 +55,8 @@ import {
 } from "./store";
 import { buildEODSummary, generateFollowUp, type EODSummary } from "./generate";
 import { decomposeLearningGoal } from "./decompose";
+import { pairKey, suggestSkillTaskLinks } from "./skill-links";
+import { skillProgress } from "./skill";
 import {
   generateCorrectiveTasks,
   generateReroute,
@@ -65,6 +73,8 @@ import type {
   CheckinReview,
   CheckinScope,
   CompletionConfidence,
+  SkillNode,
+  SkillTaskLinkStatus,
   DegradedCriterion,
   DraftClassification,
   EntryKind,
@@ -294,6 +304,41 @@ export async function decomposeGoalAction(goalId: string): Promise<void> {
   if (!goal || goal.kind !== "learning") return;
   const skills = await decomposeLearningGoal(goal.name, goal.description);
   await replaceSkillNodes(goalId, skills);
+  await revalidateAll();
+}
+
+/**
+ * Propose skill-node ↔ task links for a learning goal (the LLM-proposes half). Every
+ * proposal lands as `suggested` and does nothing until confirmed — spillover reads only
+ * confirmed edges. Pairs already on record in ANY status are excluded before the call,
+ * so a dismissed link is never re-proposed.
+ */
+export async function suggestSkillLinksAction(goalId: string): Promise<number> {
+  await requireUser();
+  const goal = await getGoal(goalId);
+  if (!goal || goal.kind !== "learning") return 0;
+
+  const [nodes, tasks, existing] = await Promise.all([
+    listSkillNodes(goalId),
+    listAllTasks(),
+    listSkillTaskLinksForGoal(goalId),
+  ]);
+  const existingPairs = new Set(existing.map((l) => pairKey(l.skill_node_id, l.task_id)));
+
+  const proposed = await suggestSkillTaskLinks(nodes, tasks, existingPairs);
+  const created = await insertSuggestedLinks(proposed);
+  await revalidateAll();
+  return created.length;
+}
+
+/** Confirm a proposed link (it starts driving spillover) or dismiss it (never
+ *  re-proposed). Reversible: the row survives either way. */
+export async function setSkillLinkStatusAction(
+  linkId: string,
+  status: SkillTaskLinkStatus,
+): Promise<void> {
+  await requireUser();
+  await setSkillTaskLinkStatus(linkId, status);
   await revalidateAll();
 }
 
@@ -665,6 +710,26 @@ function checkinCandidates(scorer: JointScorer): {
   return { candidates, skillNodes };
 }
 
+/**
+ * The unlocked frontier across every learning goal: unattained nodes whose prerequisites
+ * are all attained. `skillProgress` reasons about ONE goal's graph (its `attainedIds` set
+ * is goal-local), so group first — a flat call would let one goal's attainments unlock
+ * another goal's nodes. This is the set that INFERRED attainment is confined to.
+ */
+function unlockedFrontier(allNodes: SkillNode[]): ReadonlySet<string> {
+  const byGoal = new Map<string, SkillNode[]>();
+  for (const n of allNodes) {
+    const list = byGoal.get(n.goal_id);
+    if (list) list.push(n);
+    else byGoal.set(n.goal_id, [n]);
+  }
+  const unlocked = new Set<string>();
+  for (const nodes of byGoal.values()) {
+    for (const id of skillProgress(nodes).unlocked) unlocked.add(id);
+  }
+  return unlocked;
+}
+
 /** Order the prompt candidate set so the scoped goal's own entities come first
  *  before the cap — the scope is the disambiguation. Resolution still runs against
  *  the FULL set (an off-scope reference still resolves), so this only biases what
@@ -696,8 +761,15 @@ export async function runCheckinAction(
 ): Promise<CheckinRunResult> {
   await requireUser();
   const report = rawReport.trim();
-  const [scorer, tasks] = await Promise.all([createJointScorer(), listAllTasks()]);
+  const [scorer, tasks, links, allNodes] = await Promise.all([
+    createJointScorer(),
+    listAllTasks(),
+    // Only CONFIRMED edges — a suggested link is inert until the user says yes.
+    listConfirmedSkillTaskLinks(),
+    listAllSkillNodes(),
+  ]);
   const { candidates, skillNodes } = checkinCandidates(scorer);
+  const unlockedNodeIds = unlockedFrontier(allNodes);
 
   const { result, source } = await interpretCheckin(
     report,
@@ -715,6 +787,12 @@ export async function runCheckinAction(
       // §5.6 6b — the live structural DAG, so a completed/resolved intent on a blocker
       // promotes to a cascade (chosen by graph role, not the model).
       deps: scorer.resolveInput.deps,
+      // Confirmed skill↔task edges + the candidate set, so linked spillover can credit
+      // the far side of an edge in either direction.
+      links,
+      candidates,
+      // Inference may only credit the unlocked frontier (both spillover tiers).
+      unlockedNodeIds,
     },
     skillNodes,
   );
