@@ -298,20 +298,23 @@ export function diagnoseCause(input: CauseInput): CauseDiagnosis {
 //   constraint_change → reroute / reschedule / triage (re-plan around the change)
 //   scope_structural  → triage / reroute (shed genuine over-commitment)
 //
-// NOTE — no `hold` entry: nothing enumerates a `hold` candidate for the optimizer
-// to choose, so a `hold` bias would be inert. "Do nothing" is already expressed
-// by `JOINT_MIN_GAIN` (a move that fails the gain gate means "wait"). The blip
-// intent is carried entirely by the *negative* biases on reshape/reroute/triage,
-// which steer one_off_slip away from cutting scope. Promoting hold to a first-
-// class candidate that records a "chose to wait" decision rides with substrate S1
-// (see design/step5 → "Comprehensive remediation plan").
+// `hold` IS enumerable now (step 5 slice 4 follow-on, limitation #2). It is not a
+// competitor to the real moves: `optimizeJointPlan` never lets a zero-gain move win
+// the accept gate. It is offered only at the moment the optimizer gives up — when
+// nothing left on the table clears `JOINT_MIN_GAIN` and a goal is still off track.
+// That state already MEANT "wait"; a `hold` candidate just says so out loud and
+// records the decision in the S1 plan-version history, which is the natural home for
+// it (a hold is a real decision). Only a cause that positively prefers holding can
+// surface one — hence the single entry below.
 
 export const CAUSE_MOVE_PREFERENCES: Record<
   DivergenceCause,
   Partial<Record<StrategyMoveKind, number>>
 > = {
-  // A blip — make the smallest reschedule; never cut scope for it.
+  // A blip — make the smallest reschedule; never cut scope for it. And when nothing
+  // is worth doing, saying "wait, this recovers" is the RIGHT answer, not a shrug.
   one_off_slip: {
+    hold: 1,
     defer: 0.5,
     reschedule_task: 0.5,
     reschedule_deadline: 0.25,
