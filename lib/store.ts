@@ -84,6 +84,8 @@ import {
   calibrateMovePrefWeights,
   diagnoseCause,
   goalCutCost,
+  CAUSE_PREF_WEIGHT,
+  STYLE_PREF_WEIGHT,
   type CauseBaseline,
   type MovePrefWeights,
 } from "./grounding";
@@ -4307,15 +4309,17 @@ export async function forecastDashboard(): Promise<{
    *  read-only "how your plan is tuned to you" surface. Defaults everywhere until evidence. */
   tuning: PlanTuning;
 }> {
-  const [g, activities, completions, cachedStrategy, committed, localNow, rolls] = await Promise.all([
-    gatherForecast(),
-    listRecurringActivities(),
-    listActivityCompletions(),
-    getCachedStrategy(),
-    getCommittedPlan(),
-    readClientLocalNow(),
-    listPlanRolls(),
-  ]);
+  const [g, activities, completions, cachedStrategy, committed, localNow, rolls, moveChoices] =
+    await Promise.all([
+      gatherForecast(),
+      listRecurringActivities(),
+      listActivityCompletions(),
+      getCachedStrategy(),
+      getCommittedPlan(),
+      readClientLocalNow(),
+      listPlanRolls(),
+      listMoveChoices(),
+    ]);
   const ctx = allocContext(g, g.commitments);
   // The S3b arrangement pipeline over all current open work (no triage shedding): the canonical
   // cross-project order, the comfort-cap decision (spread HARD work across days within slack),
@@ -4389,7 +4393,13 @@ export async function forecastDashboard(): Promise<{
   // S3c-5 S5 — the "how your plan is tuned to you" read: the SAME calibrated knobs the plan was
   // just built under (arrange weights off `bundle`, hysteresis off `rolls`) plus the sample counts
   // behind them. Server-computed and shipped whole; the surface renders, computing nothing.
+  //
+  // The 🟠 move-pref tier joins them here rather than on the strategist's own surface: it is the
+  // third knob the same calibration seam learns, and it belongs beside the two the plan already
+  // exposes. `calibrateMovePrefWeights` is the SAME call `createJointScorer` makes, over the same
+  // rows, so the dials show exactly the weights the next strategist run will arbitrate ties with.
   const materialRolls = rolls.filter((r) => r.kind === "material");
+  const movePrefs = calibrateMovePrefWeights(moveChoices);
   const tuning: PlanTuning = {
     arrange: {
       weights: bundle.weights,
@@ -4404,6 +4414,16 @@ export async function forecastDashboard(): Promise<{
       priorCost: CHURN_COST,
       materialRolls: materialRolls.length,
       reverts: materialRolls.filter((r) => r.revertedAt != null).length,
+    },
+    movePrefs: {
+      style: movePrefs.style,
+      cause: movePrefs.cause,
+      priorStyle: STYLE_PREF_WEIGHT,
+      priorCause: CAUSE_PREF_WEIGHT,
+      samples: movePrefs.samples,
+      // `balanced` zeroes every style preference ⇒ φ[0] ≡ 0 ⇒ the style weight is pinned to
+      // its prior no matter how many bundles are recorded. Report that, don't render a dial.
+      styleLearnable: g.valueModel.recoveryStyle !== "balanced",
     },
   };
   return { forecasts, recoveries, pitWall, globalPlan, agendaOrder, model: g.model, tuning };
