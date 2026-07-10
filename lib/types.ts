@@ -1573,6 +1573,25 @@ export interface PlanTuning {
     /** How many of those you undid — the churn-regret signal that stiffens the knobs. */
     reverts: number;
   };
+  /** The 🟠-tier recovery-taste weights, learned from the offered-vs-kept move history:
+   *  how much the user's recovery STYLE vs the diagnosed CAUSE arbitrates a sub-epsilon
+   *  odds tie between two recovery moves. These never override real odds. */
+  movePrefs: {
+    /** Calibrated `[style, cause]` tiebreak weights the strategist currently uses. */
+    style: number;
+    cause: number;
+    /** The co-equal `1.0 / 1.0` prior both shrink toward — the "how far it moved" baseline. */
+    priorStyle: number;
+    priorCause: number;
+    /** Bundles that revealed a contrast (kept some, declined some). Keep-all / decline-all
+     *  reveals nothing, so it is not counted. */
+    samples: number;
+    /** Under the `balanced` recovery style every `movePref` is 0, so φ[0] ≡ 0 and the STYLE
+     *  weight can NEVER move off its prior (the scale-invariance trap `calibrate.ts` names).
+     *  False ⇒ the surface renders that dial inert and says why, rather than showing a frozen
+     *  number as if it were a reading. */
+    styleLearnable: boolean;
+  };
 }
 
 // --- §5.6 NL check-in / reflection loop -------------------------------------
