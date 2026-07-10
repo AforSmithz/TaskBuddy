@@ -17,7 +17,7 @@ import type {
   TaskModification,
 } from "./types";
 import { isOnTrack } from "./types";
-import { aggregateCauseMovePref } from "./grounding";
+import { aggregateCauseMovePref, causeMovePref } from "./grounding";
 import { goalValue, movePref, type ValueModel } from "./value-model";
 import type { AllocTask } from "./allocate";
 import type { ChatMessage } from "./openrouter";
@@ -1018,6 +1018,63 @@ function onTrackCount(byProject: Map<string, number>): number {
 }
 
 /**
+ * The goals whose right answer is "wait" — surfaced only once the greedy loop has
+ * concluded nothing on the table is worth doing (step 5 slice 4 follow-on, #2).
+ *
+ * A goal qualifies when ALL of:
+ *   · it is still off track after everything the optimizer picked, and
+ *   · no picked move names it (a goal something was actually done for isn't "held"),
+ *   · its diagnosed cause positively prefers holding — today only `one_off_slip`,
+ *     whose whole meaning is "the pace is fine, this recovers on its own".
+ *
+ * A cross-project move (`projectId ""`) names no goal, so it never suppresses a hold:
+ * a portfolio triage that failed to save this goal has not addressed it.
+ *
+ * Ordered most-at-risk first, and bounded by the same `JOINT_MOVE_CAP` as real moves
+ * so a bundle can't balloon. Zero gain by construction: `applyMoveToAlloc`'s `hold`
+ * arm returns the state unchanged, so `cumulative()` re-scores it as a no-op and the
+ * displayed odds are unaffected. Committing one persists nothing (its `MOVE_SPECS`
+ * entry is a no-op) — it exists to be *recorded*: a plan version whose reason is
+ * "chose to wait", which is exactly the decision history S1 was built to model.
+ */
+function holdMoves(
+  current: { byProject: Map<string, number>; allOnTime: number },
+  picked: StrategyMove[],
+  causeByProject: Map<string, DivergenceCause>,
+  scorer: JointScorer,
+): StrategyMove[] {
+  const room = JOINT_MOVE_CAP - picked.length;
+  if (room <= 0) return [];
+  const addressed = new Set(picked.map((m) => m.projectId));
+
+  return scorer.recoveries
+    .filter((r) => {
+      const odds = current.byProject.get(r.projectId);
+      if (odds === undefined || isOnTrack(odds)) return false; // recovered ⇒ nothing to wait on
+      if (addressed.has(r.projectId)) return false; // something was done for it
+      const cause = causeByProject.get(r.projectId) ?? null;
+      return causeMovePref(cause, "hold") > 0;
+    })
+    .sort(
+      (a, b) =>
+        (current.byProject.get(a.projectId) ?? 1) -
+        (current.byProject.get(b.projectId) ?? 1),
+    )
+    .slice(0, room)
+    .map((r) => ({
+      kind: "hold" as const,
+      projectId: r.projectId,
+      projectName: r.projectName,
+      // The cause's own words — nothing invented, nothing promised.
+      rationale: `Hold — ${r.cause?.detail ?? "no move improves the odds right now."}`,
+      probabilityAfter: r.currentProbability,
+      portfolioProbabilityAfter: current.allOnTime,
+      causes: [{ cause: causeByProject.get(r.projectId) ?? null, weight: 1 }],
+      payload: { kind: "hold" as const },
+    }));
+}
+
+/**
  * Sequential greedy plan, scored jointly (decision #3). From the base state, each
  * round joint-scores every not-yet-picked candidate against the accumulated
  * picks, keeps the one that best improves the lexicographic objective —
@@ -1130,6 +1187,18 @@ function optimizeJointPlan(
     remaining.splice(best.idx, 1);
     current = best.result;
   }
+
+  // "Hold / do nothing" as a first-class DECISION (step 5 slice 4 follow-on,
+  // limitation #2). We arrive here having concluded that nothing left on the table
+  // is worth doing. For a goal whose diagnosed cause says the slip is a blip that
+  // recovers on its own, that conclusion is a *choice to wait* — and it deserves to
+  // be said, and recorded in the plan-version history, rather than left as the
+  // silent absence of a recommendation.
+  //
+  // The accept gate above is UNTOUCHED: a hold has zero gain and can never win a
+  // round against a real move. It is appended only after the loop has already
+  // given up, so it cannot displace anything or shorten the plan.
+  picked.push(...holdMoves(current, picked, causeByProject, scorer));
 
   // Re-score the final ordered set once at full iterations for the display.
   const { afterEach, combined } = scorer.cumulative(picked);
