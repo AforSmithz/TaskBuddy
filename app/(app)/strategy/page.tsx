@@ -148,10 +148,13 @@ export default async function StrategyPage() {
         </Reveal>
       )}
 
-      {/* How your plan is tuned to you (S3c-5 §5a) — the calibrated arrangement dials +
-          plan stickiness, learned from your drags and roll-undos. Shown once either tier
-          has any signal; each section shows its own still-learning state otherwise. */}
-      {(tuning.arrange.samples > 0 || tuning.stability.materialRolls > 0) && (
+      {/* How your plan is tuned to you (S3c-5 §5a) — the calibrated arrangement dials, plan
+          stickiness, and recovery taste, learned from your drags, roll-undos, and the moves
+          you keep vs decline. Shown once ANY tier has signal; each section shows its own
+          still-learning state otherwise. */}
+      {(tuning.arrange.samples > 0 ||
+        tuning.stability.materialRolls > 0 ||
+        tuning.movePrefs.samples > 0) && (
         <Reveal delay={0.22} className="mt-7">
           <PlanTuningCard tuning={tuning} />
         </Reveal>
