@@ -647,6 +647,11 @@ export function StrategyCard({
   }, [canUseLLM, refreshed, stale, strategy.usedLLM, startRefresh]);
 
   const calm = current.onTrack || current.moves.length === 0;
+  // Every move is a `hold` ⇒ the strategist looked and concluded that waiting IS the
+  // move. That is neither `calm` (something is genuinely off track) nor a plan to act
+  // on, so it gets its own honest headline rather than borrowing either one.
+  const holdOnly =
+    !calm && current.moves.length > 0 && current.moves.every((m) => m.kind === "hold");
   const primaryLabel = current.usedLLM ? "Am I on track?" : "Get AI strategy";
   // Remount the tiers when the strategy changes so applied state resets.
   const tierKey = `${current.generatedAt}:${current.usedLLM}`;
@@ -671,12 +676,16 @@ export function StrategyCard({
   const eyebrow = current.usedLLM ? "Recommended strategy" : "Strategy draft";
   const heroCaption = calm
     ? "you're on track right now"
-    : "chance everything lands with this plan";
+    : holdOnly
+      ? "chance everything lands if you hold course"
+      : "chance everything lands with this plan";
   const headline = escalated
     ? "A deadline needs your attention"
     : calm
       ? "You're on track"
-      : "Here's how to keep everything on track";
+      : holdOnly
+        ? "Nothing worth changing yet"
+        : "Here's how to keep everything on track";
 
   return (
     <Card
