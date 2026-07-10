@@ -5,11 +5,12 @@ import { cn } from "@/lib/cn";
 
 // "How your plan is tuned to you" (OVERHAUL S3c-5, design §7 / S5) — a read-only
 // surface that shows how the calibration seam has adjusted the plan's SOFT knobs to
-// the user's own behaviour: the arrangement dials it learns from drag-to-reorder, and
-// the plan stickiness it learns from roll-undos. Pure (no "use client") — every value
-// is computed server-side and shipped whole; this renders, computing nothing (Hard Rule
-// §2.8 / invariant 3). Mirrors `reliable-hours.tsx` (the same S2/S3c "here's what the
-// app learned about you" pattern), so it sits beside it on the Strategy page.
+// the user's own behaviour: the arrangement dials it learns from drag-to-reorder, the
+// plan stickiness it learns from roll-undos, and the recovery taste it learns from the
+// moves you keep vs decline. Pure (no "use client") — every value is computed
+// server-side and shipped whole; this renders, computing nothing (Hard Rule §2.8 /
+// invariant 3). Mirrors `reliable-hours.tsx` (the same S2/S3c "here's what the app
+// learned about you" pattern), so it sits beside it on the Strategy page.
 //
 // Honest under sparse data: both tiers start at their documented default and only move
 // off it on real, repeated evidence (the κ=12 shrinkage), so most dials read "default"
@@ -41,6 +42,17 @@ const DIALS: Record<
     down: "gentler fast-window claim for at-risk work",
     needsWindow: true,
   },
+};
+
+/** The two 🟠-tier tiebreak nudges. Both scale the SAME sub-epsilon tie, so "more" for one
+ *  is only meaningful against the other — the copy says which voice gets the casting vote. */
+const STYLE_DIAL = {
+  up: "your saved style settles more close calls",
+  down: "your saved style settles fewer close calls",
+};
+const CAUSE_DIAL = {
+  up: "the diagnosed cause settles more close calls",
+  down: "the diagnosed cause settles fewer close calls",
 };
 
 function DialRow({
@@ -79,7 +91,7 @@ function DialRow({
  * state when only the other tier has evidence.
  */
 export function PlanTuningCard({ tuning }: { tuning: PlanTuning }) {
-  const { arrange, stability } = tuning;
+  const { arrange, stability, movePrefs } = tuning;
   // The stickiness stiffness factor: both knobs scale by one factor off the same defaults,
   // so their ratio is the single "how much steadier than default" number (display-only, a
   // formatting transform over two shipped knobs — no knob is derived here).
@@ -160,6 +172,46 @@ export function PlanTuningCard({ tuning }: { tuning: PlanTuning }) {
               </span>
             </div>
           )}
+        </section>
+
+        {/* Recovery taste — learned from which recommended moves you keep vs decline. */}
+        <section className="px-5 py-4">
+          <div className="mb-3 flex items-baseline justify-between">
+            <h3 className="text-[12px] font-semibold uppercase tracking-wide text-[var(--color-fg-muted)]">
+              Recovery taste
+            </h3>
+            <span className="text-[11px] tabular-nums text-[var(--color-fg-subtle)]">
+              {movePrefs.samples === 0
+                ? "no decisions yet"
+                : `${movePrefs.samples} decision${movePrefs.samples > 1 ? "s" : ""} learned`}
+            </span>
+          </div>
+          {movePrefs.samples === 0 ? (
+            <p className="text-[13px] text-[var(--color-fg-muted)]">
+              When TaskBuddy recommends several ways to recover and you apply only some of
+              them, it learns what should settle the next close call. Nothing learned yet.
+            </p>
+          ) : (
+            <div className="space-y-2.5">
+              <DialRow
+                name="Your recovery style"
+                weight={movePrefs.style}
+                meaning={STYLE_DIAL}
+                inert={!movePrefs.styleLearnable}
+              />
+              <DialRow name="Why the goal slipped" weight={movePrefs.cause} meaning={CAUSE_DIAL} inert={false} />
+              {!movePrefs.styleLearnable && (
+                <p className="pt-1 text-[11px] text-[var(--color-fg-subtle)]">
+                  Your recovery style is Balanced, which expresses no preference, so there is
+                  nothing for this dial to learn. Pick a style in Settings to teach it.
+                </p>
+              )}
+            </div>
+          )}
+          <p className="pt-2.5 text-[11px] text-[var(--color-fg-subtle)]">
+            These only settle ties the forecast can&apos;t. A move with better odds always
+            wins, whatever the dials say.
+          </p>
         </section>
       </div>
     </Card>
