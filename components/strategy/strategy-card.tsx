@@ -649,7 +649,12 @@ export function StrategyCard({
   const calm = current.onTrack || current.moves.length === 0;
   // Every move is a `hold` ⇒ the strategist looked and concluded that waiting IS the
   // move. That is neither `calm` (something is genuinely off track) nor a plan to act
-  // on, so it gets its own honest headline rather than borrowing either one.
+  // on, so the hero caption says "hold course" instead of promising a plan.
+  //
+  // Caption only, deliberately: a hold needs an off-track goal, and `detectDivergence`
+  // tags `at_risk` critical whether the deadline is near or far — so such a goal all but
+  // always raises the escalated banner, which owns the headline. A "nothing worth
+  // changing" headline lost that race every time and would only ever have been dead code.
   const holdOnly =
     !calm && current.moves.length > 0 && current.moves.every((m) => m.kind === "hold");
   const primaryLabel = current.usedLLM ? "Am I on track?" : "Get AI strategy";
@@ -683,9 +688,7 @@ export function StrategyCard({
     ? "A deadline needs your attention"
     : calm
       ? "You're on track"
-      : holdOnly
-        ? "Nothing worth changing yet"
-        : "Here's how to keep everything on track";
+      : "Here's how to keep everything on track";
 
   return (
     <Card
