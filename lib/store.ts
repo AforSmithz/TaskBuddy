@@ -210,6 +210,98 @@ async function currentUserId(supabase: RequestClient): Promise<string> {
   return user.id;
 }
 
+// --- Unwrapping a Supabase result -------------------------------------------
+//
+// Every query in this file — read or write — is unwrapped through `mustOk` /
+// `mustRows` / `mustOne`, all of which throw on `error`. Nothing here reaches for
+// `data` on its own, because taking the whole response as the argument is what
+// makes dropping `error` unrepresentable rather than merely discouraged.
+//
+// This matters more here than it would elsewhere. The calibration layer is built
+// so that NO DATA means FALL BACK TO THE PRIOR, bit-identically. That no-regret
+// property is deliberate, but it also means a failed query and an honestly empty
+// table produce the same dials. A read that swallowed its error was therefore
+// indistinguishable from a table with nothing in it yet: the query fails, the
+// caller sees `[]`, the weights sit at their documented defaults, and the UI says
+// a confident "no decisions yet". `move_choices` shipped exactly that way — the
+// table did not exist in the live database, and nothing anywhere looked wrong.
+//
+// So the DEFAULT is: a read failure is an exception, never an empty list. Two
+// narrow cases degrade instead, and both do it OUT LOUD (they log; the original
+// bug was silence), never by swallowing:
+//
+//   1. Soft-cap pruning (`bestEffortPrune`) — the row the caller just appended is
+//      the contract, and the cap is re-enforced on the next append.
+//   2. Terminal-display reads (`bestEffortRows`) — a read whose result is only
+//      rendered and never flows back into a forecast, strategy, calibration dial,
+//      undo/restore, or a gated write. The test is exactly that: if an empty result
+//      would corrupt a NUMBER or a DECISION, it throws; if it would only thin a
+//      panel, it degrades. This is what lets one pathological table (the
+//      `move_choices` scenario: broken while its neighbours are fine) drop a single
+//      audit panel instead of felling a whole decision page. A real outage still
+//      takes the decision reads — and with them the page — down, which is correct.
+
+/** A settled PostgREST response: `.select()`, `.insert()`, `.update()`, `.delete()`. */
+interface PostgrestResult {
+  data: unknown;
+  error: { message: string } | null;
+}
+
+/** Throw if the query failed. All a write with no returning rows needs. */
+function mustOk(res: Pick<PostgrestResult, "error">, what: string): void {
+  if (res.error) throw new Error(`Supabase ${what} failed: ${res.error.message}`);
+}
+
+/** Rows from a read, or throw. An empty list means the table really was empty. */
+function mustRows<T>(res: PostgrestResult, what: string): T[] {
+  mustOk(res, what);
+  return (res.data as T[] | null) ?? [];
+}
+
+/** The row from a `.maybeSingle()` read, or throw. `null` means genuinely absent —
+ *  the one place a nullish `data` is a fact about the table and not about the query. */
+function mustOne<T>(res: PostgrestResult, what: string): T | null {
+  mustOk(res, what);
+  return (res.data as T | null) ?? null;
+}
+
+/**
+ * Rows from a TERMINAL-DISPLAY read: on error, log and fall back to empty rather
+ * than throw. Use this ONLY for a read whose result is purely rendered — never fed
+ * to a forecast, strategy, calibration dial, undo/restore, or a gated write. For
+ * anything decision-bearing use `mustRows`; degrading those is the silent-revert
+ * bug this whole file exists to kill. The log is mandatory: degrade, but never
+ * silently — an operator must still see that the read failed.
+ */
+function bestEffortRows<T>(res: PostgrestResult, what: string): T[] {
+  if (res.error) {
+    console.error(`${what} read failed (degraded to empty, display-only):`, res.error.message);
+    return [];
+  }
+  return (res.data as T[] | null) ?? [];
+}
+
+/**
+ * Run a soft-cap prune, logging and swallowing any failure. Deliberate, like
+ * `bestEffortRows`: the row the caller just appended is the contract, the cap is
+ * re-enforced on the next append, and a transient prune failure must never surface
+ * on the user's action.
+ *
+ * The contrast with the reads is the whole point. There, swallowing turned a table
+ * that did not exist into a table that looked empty. Here, nothing downstream can
+ * observe the difference between a pruned and an unpruned history.
+ */
+async function bestEffortPrune(
+  table: string,
+  prune: () => Promise<void>,
+): Promise<void> {
+  try {
+    await prune();
+  } catch (e) {
+    console.error(`${table} prune failed (skipped, retried on next append):`, e);
+  }
+}
+
 // --- In-memory store (survives HMR via globalThis) --------------------------
 
 interface MemDB {
