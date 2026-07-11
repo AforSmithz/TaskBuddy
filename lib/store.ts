@@ -108,6 +108,7 @@ import {
   globalForecast,
   globalForecastJoint,
   recoveryMoves,
+  skillRecoveryMoves,
   type CandidateTask,
   type ForecastOptions,
 } from "./forecast";
@@ -925,6 +926,8 @@ export async function replaceSkillNodes(
     attained: false,
     attained_confidence: null,
     attained_at: null,
+    deferred: false,
+    deferred_at: null,
     sort_index: i,
     created_at: createdAt,
   }));
@@ -964,6 +967,32 @@ export async function setSkillNodeAttained(
     attained,
     attained_confidence: attained ? confidence : null,
     attained_at: attained ? new Date().toISOString() : null,
+  };
+  if (isSupabaseConfigured()) {
+    const supabase = await getRequestClient();
+    mustOk(
+      await supabase.from("skill_nodes").update(patch).eq("id", id),
+      "skill_nodes update",
+    );
+    return;
+  }
+  await ensureSeeded();
+  const row = memDB().skillNodes.find((n) => n.id === id);
+  if (row) Object.assign(row, patch);
+}
+
+/**
+ * Park a skill node out of the current deadline push, or restore it (the
+ * `defer_skill` recovery move + its Undo). Reversible — mirrors task deferral;
+ * clearing it also clears the timestamp.
+ */
+export async function setSkillNodeDeferred(
+  id: string,
+  deferred: boolean,
+): Promise<void> {
+  const patch = {
+    deferred,
+    deferred_at: deferred ? new Date().toISOString() : null,
   };
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
@@ -2084,6 +2113,27 @@ async function snapshotSkillNodeAttainment(
   return [snap];
 }
 
+/** Read a skill node's current deferral fields — the pre-image a `defer_skill`
+ *  move snapshots so undo can un-park it. */
+async function snapshotSkillNodeDeferral(
+  id: string,
+): Promise<(Partial<SkillNode> & { id: string })[]> {
+  let row: SkillNode | undefined;
+  if (isSupabaseConfigured()) {
+    const supabase = await getRequestClient();
+    row =
+      mustOne<SkillNode>(
+        await supabase.from("skill_nodes").select("*").eq("id", id).maybeSingle(),
+        "skill_node read",
+      ) ?? undefined;
+  } else {
+    await ensureSeeded();
+    row = memDB().skillNodes.find((n) => n.id === id);
+  }
+  if (!row) return [];
+  return [{ id, deferred: row.deferred, deferred_at: row.deferred_at }];
+}
+
 /** The FULL dependency rows where a task is the PREREQ (`depends_on_task_id ===
  *  blockerId`) — the edges a `resolve_blocker` cascade frees (§5.6 6b). Read from
  *  the LIVE active DAG (`listAllDependencies`) so the snapshot pre-image and the
@@ -2270,6 +2320,17 @@ const MOVE_SPECS: { [K in StrategyMoveKind]: MoveSpec<K> } = {
     }),
     persist: async (p) => {
       await setSkillNodeAttained(p.nodeId, true, p.confidence);
+      return {};
+    },
+  },
+  defer_skill: {
+    snapshot: async (p) => ({
+      tasks: [],
+      goals: [],
+      skillNodes: await snapshotSkillNodeDeferral(p.nodeId),
+    }),
+    persist: async (p) => {
+      await setSkillNodeDeferred(p.nodeId, true);
       return {};
     },
   },
@@ -2562,10 +2623,12 @@ export async function undoPlanVersion(id: string): Promise<void> {
   for (const goal of restore.goals) {
     if ("deadline" in goal) await setProjectDeadline(goal.id, goal.deadline ?? null);
   }
-  // Restore prior skill-node attainment (§5.6) — revert an attained skill back to
-  // whatever it was (typically unattained at its prior null confidence).
+  // Restore prior skill-node attainment (§5.6) / deferral (defer_skill) — each
+  // move snapshots only the fields it touched, so revert only those (an
+  // attain_skill snapshot carries `attained`, a defer_skill one carries `deferred`).
   for (const n of restore.skillNodes ?? []) {
-    await setSkillNodeAttained(n.id, n.attained ?? false, n.attained_confidence ?? null);
+    if ("attained" in n) await setSkillNodeAttained(n.id, n.attained ?? false, n.attained_confidence ?? null);
+    if ("deferred" in n) await setSkillNodeDeferred(n.id, n.deferred ?? false);
   }
   // Re-insert the dependency edges a resolve_blocker cascade deleted (§5.6 6b) — the
   // ORIGINAL rows, so the DAG is byte-identical. `?? []` for bundles persisted before
@@ -3329,15 +3392,16 @@ interface SkillWork {
 
 /**
  * Turn a learning goal's skill nodes into work the joint forecast can reason
- * over. Attained skills are "done" — dropped, exactly like done tasks; only the
- * unattained frontier consumes budget and carries prerequisite ordering. Pure.
+ * over. Attained skills are "done" and deferred skills are "parked" — both dropped,
+ * exactly like done/deferred tasks; only the unattained, un-parked frontier consumes
+ * budget and carries prerequisite ordering. Pure.
  */
 function skillAllocWork(
   nodes: SkillNode[],
   projectId: string,
   projectName: string,
 ): SkillWork {
-  const open = nodes.filter((n) => !n.attained);
+  const open = nodes.filter((n) => !n.attained && !n.deferred);
   const openIds = new Set(open.map((n) => n.id));
   const tasks = open.map((n) =>
     syntheticAllocTask(SKILL_TASK_PREFIX + n.id, projectId, projectName, n.title, n.estimated_minutes, {
@@ -4989,6 +5053,18 @@ function buildRecoveryPlan(
   // Defer lowest-priority work first (best probability recovery first).
   const defer = offTrack ? recoveryMoves(candidates, deployable, opts) : [];
 
+  // Learning goals: which non-checkpoint skill nodes, if parked out of the current
+  // push, recover odds. Empty for project goals (no skill nodes) and when nothing
+  // sheds usefully; measured against the same real-work + skill-effort pool.
+  const deferSkill = offTrack
+    ? skillRecoveryMoves(
+        g.skillNodesByProject.get(projectId) ?? [],
+        candidates.map((t) => t.estimated_minutes),
+        deployable,
+        opts,
+      )
+    : [];
+
   // Re-date only when the current deadline can't already clear the target, and
   // only ever suggest a *later* date (pulling it earlier never helps).
   let reschedule: RecoveryPlan["reschedule"] = null;
@@ -5074,6 +5150,7 @@ function buildRecoveryPlan(
     cause,
     goalCost,
     defer,
+    deferSkill,
     reschedule,
     sequence,
     overdue,
