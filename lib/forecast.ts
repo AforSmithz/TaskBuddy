@@ -5,6 +5,8 @@ import type {
   ForecastResult,
   RecoveryMove,
   SegmentModel,
+  SkillNode,
+  SkillRecoveryMove,
 } from "./types";
 import {
   flowFinishOffsets,
@@ -471,6 +473,71 @@ export function recoveryMoves(
         title: task.title,
         probabilityAfter: after,
       });
+    }
+  }
+
+  return moves
+    .sort((a, b) => b.probabilityAfter - a.probabilityAfter)
+    .slice(0, limit);
+}
+
+/**
+ * Per-skill recovery for a learning goal: which non-checkpoint skill nodes, if
+ * parked out of the current push, recover probability. The learning-goal analogue
+ * of `recoveryMoves`.
+ *
+ * The forecast reasons over BOTH the goal's real tasks and its unattained skill
+ * effort, so a node is measured by removing its estimate from that combined pool.
+ *
+ * Only *sheddable* nodes are offered:
+ *  - **never a checkpoint** — a checkpoint is a milestone; parking one abandons the
+ *    goal's demonstrable bar, not the deadline (the "never shed the goal's bar"
+ *    twin of the pit-wall "never shed a project's last task" invariant);
+ *  - **never a node something still-open depends on** — parking a prerequisite would
+ *    strand its dependents, so only leaves of the open frontier qualify.
+ *
+ * `deferred`/`attained` nodes are already out of the plan and ignored. Best
+ * improvement first; each kept move actually lifts the odds (> current + 0.01).
+ */
+export function skillRecoveryMoves(
+  nodes: SkillNode[],
+  realEstimates: number[],
+  deployable: number,
+  options: ForecastOptions = {},
+  limit = 3,
+): SkillRecoveryMove[] {
+  const open = nodes.filter((n) => !n.attained && !n.deferred);
+  // Never offer to park a goal down to nothing — a single remaining node is the
+  // whole goal, and shedding it is abandonment, not recovery.
+  if (open.length <= 1) return [];
+
+  const baseSkill = open.map((n) => n.estimated_minutes);
+  const current = forecast(
+    [...realEstimates, ...baseSkill],
+    deployable,
+    options,
+  ).probability;
+
+  const hasOpenDependent = (id: string) =>
+    open.some((n) => n.prerequisites.includes(id));
+  // Cheapest-to-give-up first (skills carry no priority_score, so ascending effort
+  // is the tie order); then keep only the ones that actually help.
+  const candidates = open
+    .filter((n) => !n.is_checkpoint && !hasOpenDependent(n.id))
+    .sort((a, b) => a.estimated_minutes - b.estimated_minutes);
+
+  const moves: SkillRecoveryMove[] = [];
+  for (const node of candidates) {
+    const remaining = open
+      .filter((n) => n.id !== node.id)
+      .map((n) => n.estimated_minutes);
+    const after = forecast(
+      [...realEstimates, ...remaining],
+      deployable,
+      options,
+    ).probability;
+    if (after > current + 0.01) {
+      moves.push({ nodeId: node.id, title: node.title, probabilityAfter: after });
     }
   }
 
