@@ -191,6 +191,11 @@ export interface SkillNode {
   attained: boolean;
   attained_confidence: CompletionConfidence | null;
   attained_at: string | null;
+  /** Parked out of the current deadline push (the `defer_skill` recovery move).
+   *  Not attained, still on the goal, reversible — the skill analogue of
+   *  `Task.deferred`. Stops consuming forecast budget while set. */
+  deferred: boolean;
+  deferred_at: string | null;
   sort_index: number;
   created_at: string;
 }
@@ -621,6 +626,14 @@ export interface RecoveryMove {
   /** Probability if this task were deferred past the deadline. */
   probabilityAfter: number;
 }
+/** A learning goal's per-skill recovery move: park a non-checkpoint node to make
+ *  the checkpoints + deadline fit. Mirrors `RecoveryMove` but keyed by node. */
+export interface SkillRecoveryMove {
+  nodeId: string;
+  title: string;
+  /** Probability if this skill node were parked out of the current push. */
+  probabilityAfter: number;
+}
 
 /** A forecast attached to its project — what the UI renders. */
 export interface ProjectForecast extends ForecastResult {
@@ -740,6 +753,10 @@ export interface RecoveryPlan {
   goalCost: GoalCutCost | null;
   /** Defer these (lowest-priority-first) to recover; best improvement first. */
   defer: RecoveryMove[];
+  /** Park these non-checkpoint skill nodes (learning goals) to recover; best
+   *  improvement first. Empty for project goals and for goals with no sheddable
+   *  skill effort. */
+  deferSkill: SkillRecoveryMove[];
   /** Earliest deadline clearing the target probability, or null if out of reach. */
   reschedule: RescheduleMove | null;
   /** Dependency-aware order to tackle the remaining open work (advisory). */
@@ -1095,6 +1112,10 @@ export type StrategyMoveKind =
   | "reroute"
   | "mark_done"
   | "attain_skill"
+  // Park a non-checkpoint skill node past the deadline (the learning-goal analogue
+  // of `defer`). Sheds its effort from the current push so the checkpoints + date
+  // fit; reversible. NEVER sheds a checkpoint (that would abandon a milestone).
+  | "defer_skill"
   // §5.6 slice 6b — resolve a structural blocker: mark it done + cascade one-hop
   // edge removal over `task_dependencies` (frees its direct dependents) + stamp
   // free-text provenance. Distinct from `unblock` (which clears the SOFT
@@ -1154,6 +1175,16 @@ export type StrategyMovePayload =
       resolvedBy: string | null;
       /** The blocker's direct dependents at generation time — display only. */
       freedTaskIds: string[];
+    }
+  | {
+      // Park a non-checkpoint skill node out of the current deadline push. Persist
+      // sets `skill_nodes.deferred`; the forecast twin drops its `skill:`+nodeId
+      // synthetic task, freeing the budget it occupied — same drop mechanic as
+      // `attain_skill`, but semantically "parked", not "done".
+      kind: "defer_skill";
+      goalId: string;
+      nodeId: string;
+      title: string;
     }
   | { kind: "triage"; taskIds: string[]; titles: string[] }
   | { kind: "add_tasks"; tasks: SuggestedTask[] }
