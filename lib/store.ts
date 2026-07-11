@@ -607,11 +607,13 @@ export async function createGoal(
 export async function listGoals(): Promise<Goal[]> {
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
-    const { data } = await supabase
-      .from("goals")
-      .select("*")
-      .order("created_at", { ascending: false });
-    return (data as Goal[]) ?? [];
+    return mustRows<Goal>(
+      await supabase
+        .from("goals")
+        .select("*")
+        .order("created_at", { ascending: false }),
+      "goals list",
+    );
   }
   await ensureSeeded();
   return [...memDB().projects].sort((a, b) =>
@@ -622,12 +624,10 @@ export async function listGoals(): Promise<Goal[]> {
 export async function getGoal(id: string): Promise<Goal | null> {
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
-    const { data } = await supabase
-      .from("goals")
-      .select("*")
-      .eq("id", id)
-      .maybeSingle();
-    return (data as Goal) ?? null;
+    return mustOne<Goal>(
+      await supabase.from("goals").select("*").eq("id", id).maybeSingle(),
+      "goal read",
+    );
   }
   await ensureSeeded();
   return memDB().projects.find((p) => p.id === id) ?? null;
@@ -656,12 +656,14 @@ export async function listGoalCriteria(
 ): Promise<GoalCriterion[]> {
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
-    const { data } = await supabase
-      .from("goal_criteria")
-      .select("*")
-      .eq("goal_id", goalId)
-      .order("sort_index", { ascending: true });
-    return (data as GoalCriterion[]) ?? [];
+    return mustRows<GoalCriterion>(
+      await supabase
+        .from("goal_criteria")
+        .select("*")
+        .eq("goal_id", goalId)
+        .order("sort_index", { ascending: true }),
+      "goal_criteria list",
+    );
   }
   await ensureSeeded();
   return memDB()
@@ -766,11 +768,13 @@ export async function setGoalCriterionDegraded(
 export async function listAllGoalCriteria(): Promise<GoalCriterion[]> {
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
-    const { data } = await supabase
-      .from("goal_criteria")
-      .select("*")
-      .order("sort_index", { ascending: true });
-    return (data as GoalCriterion[]) ?? [];
+    return mustRows<GoalCriterion>(
+      await supabase
+        .from("goal_criteria")
+        .select("*")
+        .order("sort_index", { ascending: true }),
+      "goal_criteria list (all)",
+    );
   }
   await ensureSeeded();
   return [...memDB().goalCriteria].sort((a, b) => a.sort_index - b.sort_index);
@@ -782,12 +786,14 @@ export async function listAllGoalCriteria(): Promise<GoalCriterion[]> {
 export async function listSkillNodes(goalId: string): Promise<SkillNode[]> {
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
-    const { data } = await supabase
-      .from("skill_nodes")
-      .select("*")
-      .eq("goal_id", goalId)
-      .order("sort_index", { ascending: true });
-    return (data as SkillNode[]) ?? [];
+    return mustRows<SkillNode>(
+      await supabase
+        .from("skill_nodes")
+        .select("*")
+        .eq("goal_id", goalId)
+        .order("sort_index", { ascending: true }),
+      "skill_nodes list",
+    );
   }
   await ensureSeeded();
   return memDB()
@@ -800,11 +806,13 @@ export async function listSkillNodes(goalId: string): Promise<SkillNode[]> {
 export async function listAllSkillNodes(): Promise<SkillNode[]> {
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
-    const { data } = await supabase
-      .from("skill_nodes")
-      .select("*")
-      .order("sort_index", { ascending: true });
-    return (data as SkillNode[]) ?? [];
+    return mustRows<SkillNode>(
+      await supabase
+        .from("skill_nodes")
+        .select("*")
+        .order("sort_index", { ascending: true }),
+      "skill_nodes list (all)",
+    );
   }
   await ensureSeeded();
   return [...memDB().skillNodes].sort((a, b) => a.sort_index - b.sort_index);
@@ -820,12 +828,14 @@ export async function listSkillTaskLinksForGoal(goalId: string): Promise<SkillTa
   if (nodeIds.size === 0) return [];
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
-    const { data } = await supabase
-      .from("skill_task_links")
-      .select("*")
-      .in("skill_node_id", [...nodeIds])
-      .order("created_at", { ascending: true });
-    return (data as SkillTaskLink[]) ?? [];
+    return mustRows<SkillTaskLink>(
+      await supabase
+        .from("skill_task_links")
+        .select("*")
+        .in("skill_node_id", [...nodeIds])
+        .order("created_at", { ascending: true }),
+      "skill_task_links list",
+    );
   }
   await ensureSeeded();
   return memDB().skillTaskLinks.filter((l) => nodeIds.has(l.skill_node_id));
@@ -836,11 +846,10 @@ export async function listSkillTaskLinksForGoal(goalId: string): Promise<SkillTa
 export async function listConfirmedSkillTaskLinks(): Promise<SkillTaskLink[]> {
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
-    const { data } = await supabase
-      .from("skill_task_links")
-      .select("*")
-      .eq("status", "confirmed");
-    return (data as SkillTaskLink[]) ?? [];
+    return mustRows<SkillTaskLink>(
+      await supabase.from("skill_task_links").select("*").eq("status", "confirmed"),
+      "skill_task_links list (confirmed)",
+    );
   }
   await ensureSeeded();
   return memDB().skillTaskLinks.filter((l) => l.status === "confirmed");
@@ -862,8 +871,10 @@ export async function insertSuggestedLinks(
   }));
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
-    const { data } = await supabase.from("skill_task_links").insert(created).select();
-    return (data as SkillTaskLink[]) ?? [];
+    return mustRows<SkillTaskLink>(
+      await supabase.from("skill_task_links").insert(created).select(),
+      "skill_task_links insert",
+    );
   }
   await ensureSeeded();
   memDB().skillTaskLinks.push(...created);
@@ -1096,12 +1107,14 @@ export async function discardDraft(entryId: string): Promise<void> {
 export async function listEntries(): Promise<Entry[]> {
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
-    const { data } = await supabase
-      .from("entries")
-      .select("*")
-      .eq("status", "active")
-      .order("created_at", { ascending: false });
-    return (data as Entry[]) ?? [];
+    return mustRows<Entry>(
+      await supabase
+        .from("entries")
+        .select("*")
+        .eq("status", "active")
+        .order("created_at", { ascending: false }),
+      "entries list",
+    );
   }
   await ensureSeeded();
   return [...memDB().entries]
@@ -1112,11 +1125,10 @@ export async function listEntries(): Promise<Entry[]> {
 export async function getEntry(id: string): Promise<EntryDetail | null> {
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
-    const { data: entry } = await supabase
-      .from("entries")
-      .select("*")
-      .eq("id", id)
-      .maybeSingle();
+    const entry = mustOne<Entry>(
+      await supabase.from("entries").select("*").eq("id", id).maybeSingle(),
+      "entry read",
+    );
     if (!entry) return null;
     const [decisions, questions, tasks, deps] = await Promise.all([
       supabase.from("decisions").select("*").eq("entry_id", id),
@@ -1129,11 +1141,11 @@ export async function getEntry(id: string): Promise<EntryDetail | null> {
       supabase.from("task_dependencies").select("*").eq("entry_id", id),
     ]);
     return {
-      ...(entry as Entry),
-      decisions: (decisions.data as Decision[]) ?? [],
-      open_questions: (questions.data as OpenQuestion[]) ?? [],
-      tasks: (tasks.data as Task[]) ?? [],
-      dependencies: (deps.data as TaskDependency[]) ?? [],
+      ...entry,
+      decisions: mustRows<Decision>(decisions, "decisions list"),
+      open_questions: mustRows<OpenQuestion>(questions, "open_questions list"),
+      tasks: mustRows<Task>(tasks, "entry tasks list"),
+      dependencies: mustRows<TaskDependency>(deps, "task_dependencies list"),
     };
   }
 
@@ -1189,18 +1201,20 @@ export async function getEntrySchedule(
 export async function listAllTasks(): Promise<Task[]> {
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
-    const { data: active } = await supabase
-      .from("entries")
-      .select("id")
-      .eq("status", "active");
-    const ids = ((active as { id: string }[]) ?? []).map((m) => m.id);
+    const active = mustRows<{ id: string }>(
+      await supabase.from("entries").select("id").eq("status", "active"),
+      "active entry ids list",
+    );
+    const ids = active.map((m) => m.id);
     if (ids.length === 0) return [];
-    const { data } = await supabase
-      .from("tasks")
-      .select("*")
-      .in("entry_id", ids)
-      .order("created_at", { ascending: false });
-    return (data as Task[]) ?? [];
+    return mustRows<Task>(
+      await supabase
+        .from("tasks")
+        .select("*")
+        .in("entry_id", ids)
+        .order("created_at", { ascending: false }),
+      "tasks list (all)",
+    );
   }
   await ensureSeeded();
   const db = memDB();
@@ -1214,17 +1228,16 @@ export async function listAllTasks(): Promise<Task[]> {
 export async function listAllDependencies(): Promise<TaskDependency[]> {
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
-    const { data: active } = await supabase
-      .from("entries")
-      .select("id")
-      .eq("status", "active");
-    const ids = ((active as { id: string }[]) ?? []).map((m) => m.id);
+    const active = mustRows<{ id: string }>(
+      await supabase.from("entries").select("id").eq("status", "active"),
+      "active entry ids list",
+    );
+    const ids = active.map((m) => m.id);
     if (ids.length === 0) return [];
-    const { data } = await supabase
-      .from("task_dependencies")
-      .select("*")
-      .in("entry_id", ids);
-    return (data as TaskDependency[]) ?? [];
+    return mustRows<TaskDependency>(
+      await supabase.from("task_dependencies").select("*").in("entry_id", ids),
+      "task_dependencies list (all)",
+    );
   }
   await ensureSeeded();
   const db = memDB();
@@ -1260,13 +1273,16 @@ export async function updateTask(
 ): Promise<Task | null> {
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
-    const { data } = await supabase
-      .from("tasks")
-      .update(patch)
-      .eq("id", id)
-      .select("*")
-      .maybeSingle();
-    return (data as Task) ?? null;
+    // `null` here means no row matched the id, never that the update failed.
+    return mustOne<Task>(
+      await supabase
+        .from("tasks")
+        .update(patch)
+        .eq("id", id)
+        .select("*")
+        .maybeSingle(),
+      "task update",
+    );
   }
   await ensureSeeded();
   const task = memDB().tasks.find((t) => t.id === id);
@@ -1359,8 +1375,12 @@ export async function setProjectDeadline(
 export async function getAvailability(): Promise<Availability[]> {
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
-    const { data } = await supabase.from("availability").select("*");
-    return mergeAvailability((data as Availability[]) ?? []);
+    return mergeAvailability(
+      mustRows<Availability>(
+        await supabase.from("availability").select("*"),
+        "availability list",
+      ),
+    );
   }
   await ensureSeeded();
   return mergeAvailability(memDB().availability);
@@ -1404,11 +1424,11 @@ export async function setAvailability(
 export async function getAutoStrategy(): Promise<boolean> {
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
-    const { data } = await supabase
-      .from("user_settings")
-      .select("auto_strategy")
-      .maybeSingle();
-    return (data as { auto_strategy?: boolean } | null)?.auto_strategy ?? false;
+    const row = mustOne<{ auto_strategy?: boolean }>(
+      await supabase.from("user_settings").select("auto_strategy").maybeSingle(),
+      "user_settings read",
+    );
+    return row?.auto_strategy ?? false;
   }
   await ensureSeeded();
   return memDB().autoStrategy;
@@ -1438,11 +1458,11 @@ export async function setAutoStrategy(value: boolean): Promise<void> {
 export async function getValueModel(): Promise<ValueModel> {
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
-    const { data } = await supabase
-      .from("value_model")
-      .select("model")
-      .maybeSingle();
-    const raw = (data as { model?: unknown } | null)?.model;
+    const row = mustOne<{ model?: unknown }>(
+      await supabase.from("value_model").select("model").maybeSingle(),
+      "value_model read",
+    );
+    const raw = row?.model;
     return raw === undefined || raw === null
       ? { ...DEFAULT_VALUE_MODEL, areaWeights: {} }
       : normalizeValueModel(raw);
@@ -1477,11 +1497,11 @@ export async function setValueModel(model: ValueModel): Promise<void> {
 export async function getWindowAvailability(): Promise<WindowAvailability> {
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
-    const { data } = await supabase
-      .from("window_availability")
-      .select("weights")
-      .maybeSingle();
-    const raw = (data as { weights?: unknown } | null)?.weights;
+    const row = mustOne<{ weights?: unknown }>(
+      await supabase.from("window_availability").select("weights").maybeSingle(),
+      "window_availability read",
+    );
+    const raw = row?.weights;
     return raw === undefined || raw === null
       ? EMPTY_WINDOW_AVAILABILITY
       : normalizeWindowAvailability(raw);
@@ -1521,13 +1541,11 @@ export async function setWindowAvailability(avail: WindowAvailability): Promise<
 export async function getCachedStrategy(): Promise<PortfolioStrategy | null> {
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
-    const { data } = await supabase
-      .from("portfolio_strategy")
-      .select("strategy")
-      .maybeSingle();
-    return (
-      (data as { strategy?: PortfolioStrategy } | null)?.strategy ?? null
+    const row = mustOne<{ strategy?: PortfolioStrategy }>(
+      await supabase.from("portfolio_strategy").select("strategy").maybeSingle(),
+      "portfolio_strategy read",
     );
+    return row?.strategy ?? null;
   }
   await ensureSeeded();
   return memDB().portfolioStrategy;
@@ -1571,11 +1589,11 @@ export async function getCommittedPlan(): Promise<CommittedPlan | null> {
   let plan: CommittedPlan | null;
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
-    const { data } = await supabase
-      .from("committed_plan")
-      .select("plan")
-      .maybeSingle();
-    plan = (data as { plan?: CommittedPlan } | null)?.plan ?? null;
+    const row = mustOne<{ plan?: CommittedPlan }>(
+      await supabase.from("committed_plan").select("plan").maybeSingle(),
+      "committed_plan read",
+    );
+    plan = row?.plan ?? null;
   } else {
     await ensureSeeded();
     plan = memDB().committedPlan;
@@ -1708,12 +1726,14 @@ export async function listPlanRolls(): Promise<PlanRoll[]> {
   let rolls: PlanRoll[];
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
-    const { data } = await supabase
-      .from("plan_rolls")
-      .select("*")
-      .order("rolled_at", { ascending: false })
-      .limit(PLAN_ROLL_CAP);
-    rolls = ((data as PlanRollRow[]) ?? []).map(rowToPlanRoll);
+    rolls = mustRows<PlanRollRow>(
+      await supabase
+        .from("plan_rolls")
+        .select("*")
+        .order("rolled_at", { ascending: false })
+        .limit(PLAN_ROLL_CAP),
+      "plan_rolls list",
+    ).map(rowToPlanRoll);
   } else {
     await ensureSeeded();
     rolls = memDB().planRolls;
@@ -1725,12 +1745,11 @@ async function getPlanRoll(id: string): Promise<PlanRoll | null> {
   let roll: PlanRoll | null;
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
-    const { data } = await supabase
-      .from("plan_rolls")
-      .select("*")
-      .eq("id", id)
-      .maybeSingle();
-    roll = data ? rowToPlanRoll(data as PlanRollRow) : null;
+    const row = mustOne<PlanRollRow>(
+      await supabase.from("plan_rolls").select("*").eq("id", id).maybeSingle(),
+      "plan_roll read",
+    );
+    roll = row ? rowToPlanRoll(row) : null;
   } else {
     await ensureSeeded();
     roll = memDB().planRolls.find((r) => r.id === id) ?? null;
@@ -1745,14 +1764,17 @@ async function getPlanRoll(id: string): Promise<PlanRoll | null> {
 async function priorPlanRoll(roll: PlanRoll): Promise<PlanRoll | null> {
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
-    const { data } = await supabase
-      .from("plan_rolls")
-      .select("*")
-      .lt("rolled_at", roll.rolledAt)
-      .order("rolled_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-    return data ? rowToPlanRoll(data as PlanRollRow) : null;
+    const row = mustOne<PlanRollRow>(
+      await supabase
+        .from("plan_rolls")
+        .select("*")
+        .lt("rolled_at", roll.rolledAt)
+        .order("rolled_at", { ascending: false })
+        .limit(1)
+        .maybeSingle(),
+      "prior plan_roll read",
+    );
+    return row ? rowToPlanRoll(row) : null;
   }
   await ensureSeeded();
   // memDB is newest-first (unshift), so the first entry older than `roll` is its predecessor.
@@ -1871,12 +1893,14 @@ export async function listPlanReorders(): Promise<PlanReorder[]> {
   let reorders: PlanReorder[];
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
-    const { data } = await supabase
-      .from("plan_reorders")
-      .select("*")
-      .order("captured_at", { ascending: false })
-      .limit(PLAN_REORDER_CAP);
-    reorders = ((data as PlanReorderRow[]) ?? []).map(rowToPlanReorder);
+    reorders = mustRows<PlanReorderRow>(
+      await supabase
+        .from("plan_reorders")
+        .select("*")
+        .order("captured_at", { ascending: false })
+        .limit(PLAN_REORDER_CAP),
+      "plan_reorders list",
+    ).map(rowToPlanReorder);
   } else {
     await ensureSeeded();
     reorders = memDB().planReorders;
@@ -1973,12 +1997,14 @@ export async function listMoveChoices(): Promise<MoveChoice[]> {
   let choices: MoveChoice[];
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
-    const { data } = await supabase
-      .from("move_choices")
-      .select("*")
-      .order("captured_at", { ascending: false })
-      .limit(MOVE_CHOICE_CAP);
-    choices = ((data as MoveChoiceRow[]) ?? []).map(rowToMoveChoice);
+    choices = mustRows<MoveChoiceRow>(
+      await supabase
+        .from("move_choices")
+        .select("*")
+        .order("captured_at", { ascending: false })
+        .limit(MOVE_CHOICE_CAP),
+      "move_choices list",
+    ).map(rowToMoveChoice);
   } else {
     await ensureSeeded();
     choices = memDB().moveChoices;
@@ -2024,8 +2050,10 @@ async function getTasksByIds(ids: string[]): Promise<Task[]> {
   if (ids.length === 0) return [];
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
-    const { data } = await supabase.from("tasks").select("*").in("id", ids);
-    return (data as Task[]) ?? [];
+    return mustRows<Task>(
+      await supabase.from("tasks").select("*").in("id", ids),
+      "tasks by id list",
+    );
   }
   await ensureSeeded();
   const set = new Set(ids);
@@ -2041,8 +2069,11 @@ async function snapshotSkillNodeAttainment(
   let row: SkillNode | undefined;
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
-    const { data } = await supabase.from("skill_nodes").select("*").eq("id", id).maybeSingle();
-    row = (data as SkillNode | null) ?? undefined;
+    row =
+      mustOne<SkillNode>(
+        await supabase.from("skill_nodes").select("*").eq("id", id).maybeSingle(),
+        "skill_node read",
+      ) ?? undefined;
   } else {
     await ensureSeeded();
     row = memDB().skillNodes.find((n) => n.id === id);
@@ -2467,12 +2498,11 @@ export async function listPlanVersions(): Promise<PlanVersion[]> {
 async function getPlanVersion(id: string): Promise<PlanVersion | null> {
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
-    const { data } = await supabase
-      .from("plan_versions")
-      .select("*")
-      .eq("id", id)
-      .maybeSingle();
-    return data ? rowToPlanVersion(data as PlanVersionRow) : null;
+    const row = mustOne<PlanVersionRow>(
+      await supabase.from("plan_versions").select("*").eq("id", id).maybeSingle(),
+      "plan_version read",
+    );
+    return row ? rowToPlanVersion(row) : null;
   }
   await ensureSeeded();
   return memDB().planVersions.find((v) => v.id === id) ?? null;
@@ -2609,12 +2639,14 @@ export async function listCommitments(): Promise<Commitment[]> {
   const today = todayISO();
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
-    const { data } = await supabase
-      .from("commitments")
-      .select("*")
-      .gte("date", today)
-      .order("date");
-    return (data as Commitment[]) ?? [];
+    return mustRows<Commitment>(
+      await supabase
+        .from("commitments")
+        .select("*")
+        .gte("date", today)
+        .order("date"),
+      "commitments list (upcoming)",
+    );
   }
   await ensureSeeded();
   return memDB()
@@ -2662,9 +2694,14 @@ async function getRawTimeBudget(): Promise<TimeBudget> {
       supabase.from("commitments").select("*"),
     ]);
     return {
-      availability: mergeAvailability((avail.data as Availability[]) ?? []),
-      overrides: (over.data as AvailabilityOverride[]) ?? [],
-      commitments: (comm.data as Commitment[]) ?? [],
+      availability: mergeAvailability(
+        mustRows<Availability>(avail, "availability list"),
+      ),
+      overrides: mustRows<AvailabilityOverride>(
+        over,
+        "availability_overrides list",
+      ),
+      commitments: mustRows<Commitment>(comm, "commitments list"),
     };
   }
   await ensureSeeded();
@@ -2687,11 +2724,13 @@ async function getTimeBudget(): Promise<TimeBudget> {
 export async function listRecurringActivities(): Promise<RecurringActivity[]> {
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
-    const { data } = await supabase
-      .from("recurring_activities")
-      .select("*")
-      .order("created_at", { ascending: false });
-    return (data as RecurringActivity[]) ?? [];
+    return mustRows<RecurringActivity>(
+      await supabase
+        .from("recurring_activities")
+        .select("*")
+        .order("created_at", { ascending: false }),
+      "recurring_activities list",
+    );
   }
   await ensureSeeded();
   return [...memDB().recurringActivities].sort((a, b) =>
@@ -2703,11 +2742,13 @@ export async function listRecurringActivities(): Promise<RecurringActivity[]> {
 export async function listActivityCompletions(): Promise<ActivityCompletion[]> {
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
-    const { data } = await supabase
-      .from("activity_completions")
-      .select("*")
-      .order("date", { ascending: false });
-    return (data as ActivityCompletion[]) ?? [];
+    return mustRows<ActivityCompletion>(
+      await supabase
+        .from("activity_completions")
+        .select("*")
+        .order("date", { ascending: false }),
+      "activity_completions list",
+    );
   }
   await ensureSeeded();
   return [...memDB().activityCompletions];
@@ -2790,13 +2831,16 @@ export async function updateRecurringActivity(
 ): Promise<RecurringActivity | null> {
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
-    const { data } = await supabase
-      .from("recurring_activities")
-      .update(patch)
-      .eq("id", id)
-      .select("*")
-      .maybeSingle();
-    return (data as RecurringActivity) ?? null;
+    // `null` here means no row matched the id, never that the update failed.
+    return mustOne<RecurringActivity>(
+      await supabase
+        .from("recurring_activities")
+        .update(patch)
+        .eq("id", id)
+        .select("*")
+        .maybeSingle(),
+      "recurring_activities update",
+    );
   }
   await ensureSeeded();
   const a = memDB().recurringActivities.find((x) => x.id === id);
@@ -2886,12 +2930,13 @@ export async function logWorkSession(input: {
 export async function listWorkSessions(): Promise<WorkSession[]> {
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
-    const { data, error } = await supabase
-      .from("work_sessions")
-      .select("*")
-      .order("logged_for", { ascending: true });
-    if (error) throw new Error(`Supabase work_sessions list failed: ${error.message}`);
-    return (data ?? []) as WorkSession[];
+    return mustRows<WorkSession>(
+      await supabase
+        .from("work_sessions")
+        .select("*")
+        .order("logged_for", { ascending: true }),
+      "work_sessions list",
+    );
   }
   await ensureSeeded();
   return [...memDB().workSessions];
