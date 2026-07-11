@@ -105,6 +105,11 @@ export interface AllocTask {
   difficulty?: number;
 }
 
+/** Id prefix for synthetic `AllocTask`s that stand in for a learning goal's skill
+ *  nodes (`skill:<nodeId>`). Lives here, next to `AllocTask`, so the alloc layer can
+ *  tell a real task row from an injected skill lane without importing upward. */
+export const SKILL_TASK_PREFIX = "skill:";
+
 export interface GlobalPlanInput {
   /** Open tasks across all projects (deadlined or not). */
   tasks: AllocTask[];

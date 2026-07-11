@@ -26,7 +26,13 @@ import type {
 import { computePriority } from "./priority";
 import { dayCapacities, type DayCapacity, type DependencyEdge } from "./schedule";
 import { globalForecastJoint, type ForecastOptions } from "./forecast";
-import { buildGlobalPlan, effectiveOrder, effortToDifficulty, type AllocTask } from "./allocate";
+import {
+  buildGlobalPlan,
+  effectiveOrder,
+  effortToDifficulty,
+  SKILL_TASK_PREFIX,
+  type AllocTask,
+} from "./allocate";
 import { activityDrainCommitments, currentWeekOwedDates } from "./recurring";
 import { arrangeOrder, windowCapacities, type ArrangeWeights, type WindowProfile } from "./arrange";
 
@@ -148,10 +154,11 @@ export interface AllocState {
 }
 
 /** Skill alloc-task ids are namespaced so they never collide with real task uuids.
- *  Lives in this client-safe module (not store.ts) because the `attain_skill`
- *  forecast arm below — which runs CLIENT-SIDE during live re-solve — must rebuild
- *  the same id from a node id; store.ts imports it back. */
-export const SKILL_TASK_PREFIX = "skill:";
+ *  The constant lives in `allocate.ts` (next to `AllocTask`); re-exported here because
+ *  the `attain_skill`/`defer_skill` forecast arms below — which run CLIENT-SIDE during
+ *  live re-solve — must rebuild the same id from a node id, and store.ts + actions.ts
+ *  still import it from this module. */
+export { SKILL_TASK_PREFIX };
 
 /** A synthetic alloc task for injected work, scored from its 1-5 factors so
  *  `buildGlobalPlan` orders it plausibly among the real tasks. */
