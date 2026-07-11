@@ -321,6 +321,7 @@ export const CAUSE_MOVE_PREFERENCES: Record<
     reshape: -0.5,
     reroute: -1,
     triage: -1,
+    defer_skill: -0.5,
   },
   // The estimates are systematically low — re-shape (re-estimate / scope down) or
   // move the date; re-arranging the same work won't fix a pace problem.
@@ -351,6 +352,7 @@ export const CAUSE_MOVE_PREFERENCES: Record<
     triage: 1,
     reroute: 0.5,
     defer: 0.25,
+    defer_skill: 0.5,
   },
 };
 

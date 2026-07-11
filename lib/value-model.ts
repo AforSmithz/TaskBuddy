@@ -78,6 +78,7 @@ export const RECOVERY_STYLE_PREFERENCES: Record<
     reroute: 0.5,
     unblock: 0.5,
     defer: -0.5,
+    defer_skill: -0.5,
     skip_activity: -0.5,
     triage: -1,
   },
@@ -86,6 +87,7 @@ export const RECOVERY_STYLE_PREFERENCES: Record<
   protect_dates: {
     triage: 0.5,
     defer: 0.5,
+    defer_skill: 0.5,
     reshape: 0.5,
     skip_activity: 0.25,
     unblock: 0.5,
