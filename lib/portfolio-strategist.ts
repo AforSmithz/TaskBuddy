@@ -248,6 +248,27 @@ function buildDeterministicCandidates(
       });
     }
 
+    // Learning-goal recovery: park a non-checkpoint skill node. Sheds prep effort
+    // so the milestones + date fit; never offered for a checkpoint.
+    for (const m of plan.deferSkill) {
+      out.push({
+        move: candidateMove({
+          kind: "defer_skill",
+          projectId,
+          projectName,
+          rationale: `Park the skill "${m.title}" in ${projectName} for now — it protects the milestones and the deadline without dropping either.`,
+          probabilityAfter: m.probabilityAfter,
+          payload: {
+            kind: "defer_skill",
+            goalId: projectId,
+            nodeId: m.nodeId,
+            title: m.title,
+          },
+        }),
+        label: `Park skill "${m.title}" (${projectName})`,
+      });
+    }
+
     if (plan.reschedule) {
       out.push({
         move: candidateMove({
