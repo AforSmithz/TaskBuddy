@@ -233,6 +233,15 @@ export function applyMoveToAlloc(
         tasks: state.tasks.filter((t) => t.id !== SKILL_TASK_PREFIX + p.nodeId),
       };
 
+    case "defer_skill":
+      // Parking a skill node drops its synthetic forecast task, freeing its budget
+      // — the SAME drop mechanic as attain_skill, but the node is set aside, not
+      // demonstrated. The enumerator guarantees it is never a checkpoint.
+      return {
+        ...state,
+        tasks: state.tasks.filter((t) => t.id !== SKILL_TASK_PREFIX + p.nodeId),
+      };
+
     case "triage": {
       const drop = new Set(p.taskIds);
       return { ...state, tasks: state.tasks.filter((t) => !drop.has(t.id)) };
