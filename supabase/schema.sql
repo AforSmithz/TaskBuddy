@@ -251,6 +251,8 @@ create table if not exists skill_nodes (
   attained            boolean not null default false,
   attained_confidence text,
   attained_at         timestamptz,
+  deferred            boolean not null default false,
+  deferred_at         timestamptz,
   sort_index          integer not null default 0,
   created_at          timestamptz not null default now()
 );
