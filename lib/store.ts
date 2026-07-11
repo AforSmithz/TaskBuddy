@@ -2464,32 +2464,49 @@ async function insertPlanVersion(version: PlanVersion): Promise<void> {
 
 /** Delete versions older than the most recent `PLAN_VERSION_CAP` (soft cap). */
 async function prunePlanVersions(supabase: RequestClient): Promise<void> {
-  const { data } = await supabase
-    .from("plan_versions")
-    .select("id")
-    .order("created_at", { ascending: false })
-    .range(PLAN_VERSION_CAP, PLAN_VERSION_CAP + 1000);
-  const stale = (data as { id: string }[] | null) ?? [];
-  if (stale.length)
+  const stale = mustRows<{ id: string }>(
     await supabase
       .from("plan_versions")
-      .delete()
-      .in(
-        "id",
-        stale.map((r) => r.id),
-      );
+      .select("id")
+      .order("created_at", { ascending: false })
+      .range(PLAN_VERSION_CAP, PLAN_VERSION_CAP + 1000),
+    "plan_versions stale list",
+  );
+  if (stale.length)
+    mustOk(
+      await supabase
+        .from("plan_versions")
+        .delete()
+        .in(
+          "id",
+          stale.map((r) => r.id),
+        ),
+      "plan_versions prune delete",
+    );
 }
 
-/** The plan version history, newest-first (capped at `PLAN_VERSION_CAP`). */
+/**
+ * The plan version history, newest-first (capped at `PLAN_VERSION_CAP`).
+ *
+ * TERMINAL DISPLAY, so `bestEffortRows` (degrade + log), not `mustRows`: the only
+ * consumer is the Strategy page's history timeline, and nothing reads this list back
+ * into a number or a decision. The actual undo path reads the single row through
+ * `getPlanVersion`, which still throws. So if `plan_versions` alone is unhealthy, the
+ * timeline empties (and logs) instead of felling the whole Strategy page. Contrast
+ * `listPlanRolls`, shown in the same timeline but load-bearing (four reconcile/undo
+ * gathers consume it) — it throws.
+ */
 export async function listPlanVersions(): Promise<PlanVersion[]> {
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
-    const { data } = await supabase
-      .from("plan_versions")
-      .select("*")
-      .order("created_at", { ascending: false })
-      .limit(PLAN_VERSION_CAP);
-    return ((data as PlanVersionRow[]) ?? []).map(rowToPlanVersion);
+    return bestEffortRows<PlanVersionRow>(
+      await supabase
+        .from("plan_versions")
+        .select("*")
+        .order("created_at", { ascending: false })
+        .limit(PLAN_VERSION_CAP),
+      "plan_versions list",
+    ).map(rowToPlanVersion);
   }
   await ensureSeeded();
   return memDB().planVersions;
