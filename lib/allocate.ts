@@ -521,6 +521,11 @@ export interface TriageCandidate {
  * The shed order: open tasks of the conflicted (over-budget) projects, lowest
  * value-density first — the lowest-WSJF "doomed" work whose hours are best spent
  * rescuing higher-value projects (locked decision #3). Blocked/done work excluded.
+ *
+ * Skill lanes are excluded too: a `skill:`-prefixed synthetic has no task row, so
+ * shedding it here would drop it from the forecast preview but no-op on persist
+ * (`updateTask` matches nothing). Parking a skill has its own move now (`defer_skill`),
+ * which writes `skill_nodes.deferred`, so triage stays a real-task-only operation.
  */
 export function triageCandidates(
   tasks: AllocTask[],
@@ -529,7 +534,12 @@ export function triageCandidates(
   today: string,
 ): TriageCandidate[] {
   return tasks
-    .filter((t) => conflictedProjectIds.has(t.projectId) && t.status !== "done")
+    .filter(
+      (t) =>
+        conflictedProjectIds.has(t.projectId) &&
+        t.status !== "done" &&
+        !t.id.startsWith(SKILL_TASK_PREFIX),
+    )
     .map((task) => ({
       task,
       wsjf: wsjf(task, deadlineByProject.get(task.projectId) ?? null, today),
