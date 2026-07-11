@@ -593,10 +593,10 @@ export async function createGoal(
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
     const user_id = await currentUserId(supabase);
-    const { error } = await supabase
-      .from("goals")
-      .insert({ ...project, user_id });
-    if (error) throw new Error(`Supabase project insert failed: ${error.message}`);
+    mustOk(
+      await supabase.from("goals").insert({ ...project, user_id }),
+      "project insert",
+    );
   } else {
     await ensureSeeded();
     memDB().projects.unshift(project);
@@ -637,11 +637,10 @@ export async function getGoal(id: string): Promise<Goal | null> {
 export async function setGoalKind(id: string, kind: GoalKind): Promise<void> {
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
-    const { error } = await supabase
-      .from("goals")
-      .update({ kind })
-      .eq("id", id);
-    if (error) throw new Error(`Supabase goal kind update failed: ${error.message}`);
+    mustOk(
+      await supabase.from("goals").update({ kind }).eq("id", id),
+      "goal kind update",
+    );
     return;
   }
   await ensureSeeded();
@@ -688,9 +687,10 @@ export async function addGoalCriterion(
   };
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
-    const { error } = await supabase.from("goal_criteria").insert(row);
-    if (error)
-      throw new Error(`Supabase goal_criteria insert failed: ${error.message}`);
+    mustOk(
+      await supabase.from("goal_criteria").insert(row),
+      "goal_criteria insert",
+    );
   } else {
     await ensureSeeded();
     memDB().goalCriteria.push(row);
@@ -712,12 +712,10 @@ export async function setGoalCriterionMet(
   };
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
-    const { error } = await supabase
-      .from("goal_criteria")
-      .update(patch)
-      .eq("id", id);
-    if (error)
-      throw new Error(`Supabase goal_criteria update failed: ${error.message}`);
+    mustOk(
+      await supabase.from("goal_criteria").update(patch).eq("id", id),
+      "goal_criteria update",
+    );
     return;
   }
   await ensureSeeded();
@@ -729,12 +727,10 @@ export async function setGoalCriterionMet(
 export async function removeGoalCriterion(id: string): Promise<void> {
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
-    const { error } = await supabase
-      .from("goal_criteria")
-      .delete()
-      .eq("id", id);
-    if (error)
-      throw new Error(`Supabase goal_criteria delete failed: ${error.message}`);
+    mustOk(
+      await supabase.from("goal_criteria").delete().eq("id", id),
+      "goal_criteria delete",
+    );
     return;
   }
   await ensureSeeded();
@@ -754,12 +750,10 @@ export async function setGoalCriterionDegraded(
   const degraded_note = note?.trim() || null;
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
-    const { error } = await supabase
-      .from("goal_criteria")
-      .update({ degraded_note })
-      .eq("id", id);
-    if (error)
-      throw new Error(`Supabase goal_criteria update failed: ${error.message}`);
+    mustOk(
+      await supabase.from("goal_criteria").update({ degraded_note }).eq("id", id),
+      "goal_criteria update",
+    );
     return;
   }
   await ensureSeeded();
@@ -883,7 +877,10 @@ export async function setSkillTaskLinkStatus(
 ): Promise<void> {
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
-    await supabase.from("skill_task_links").update({ status }).eq("id", linkId);
+    mustOk(
+      await supabase.from("skill_task_links").update({ status }).eq("id", linkId),
+      "skill_task_links status update",
+    );
     return;
   }
   await ensureSeeded();
@@ -923,11 +920,17 @@ export async function replaceSkillNodes(
 
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
-    await supabase.from("skill_nodes").delete().eq("goal_id", goalId);
+    // Must throw: a swallowed delete followed by a successful insert would leave
+    // the goal carrying two overlapping skill graphs.
+    mustOk(
+      await supabase.from("skill_nodes").delete().eq("goal_id", goalId),
+      "skill_nodes delete",
+    );
     if (nodes.length) {
-      const { error } = await supabase.from("skill_nodes").insert(nodes);
-      if (error)
-        throw new Error(`Supabase skill_nodes insert failed: ${error.message}`);
+      mustOk(
+        await supabase.from("skill_nodes").insert(nodes),
+        "skill_nodes insert",
+      );
     }
     return;
   }
@@ -953,12 +956,10 @@ export async function setSkillNodeAttained(
   };
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
-    const { error } = await supabase
-      .from("skill_nodes")
-      .update(patch)
-      .eq("id", id);
-    if (error)
-      throw new Error(`Supabase skill_nodes update failed: ${error.message}`);
+    mustOk(
+      await supabase.from("skill_nodes").update(patch).eq("id", id),
+      "skill_nodes update",
+    );
     return;
   }
   await ensureSeeded();
@@ -1023,25 +1024,34 @@ export async function confirmDraft(
     const supabase = await getRequestClient();
     if (declined.size) {
       // Cascades remove dependency edges for these tasks.
-      await supabase
-        .from("tasks")
-        .delete()
-        .in("id", [...declined]);
+      mustOk(
+        await supabase
+          .from("tasks")
+          .delete()
+          .in("id", [...declined]),
+        "declined tasks delete",
+      );
     }
     // Stamp the confirmed goal onto the entry's tasks (the spine edge) along
     // with the chosen area.
-    await supabase
-      .from("tasks")
-      .update({ area, goal_id: projectId })
-      .eq("entry_id", entryId);
-    await supabase
-      .from("entries")
-      .update({
-        status: "active",
-        goal_id: projectId,
-        parent_entry_id: parentEntryId,
-      })
-      .eq("id", entryId);
+    mustOk(
+      await supabase
+        .from("tasks")
+        .update({ area, goal_id: projectId })
+        .eq("entry_id", entryId),
+      "tasks filing update",
+    );
+    mustOk(
+      await supabase
+        .from("entries")
+        .update({
+          status: "active",
+          goal_id: projectId,
+          parent_entry_id: parentEntryId,
+        })
+        .eq("id", entryId),
+      "entry activate update",
+    );
     return;
   }
 
@@ -1068,7 +1078,10 @@ export async function discardDraft(entryId: string): Promise<void> {
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
     // Child rows cascade on entry delete.
-    await supabase.from("entries").delete().eq("id", entryId);
+    mustOk(
+      await supabase.from("entries").delete().eq("id", entryId),
+      "entry delete",
+    );
     return;
   }
   await ensureSeeded();
@@ -1297,28 +1310,28 @@ async function ensureSeeded(): Promise<void> {
 async function persistSupabase(a: AssembledEntry): Promise<void> {
   const supabase = await getRequestClient();
   const user_id = await currentUserId(supabase);
-  const err = (label: string, e: { message: string } | null) => {
-    if (e) throw new Error(`Supabase ${label} insert failed: ${e.message}`);
-  };
   // Only the entry carries user_id; child rows inherit ownership through it
   // (see the RLS policies in supabase/schema.sql).
-  err(
-    "entry",
-    (await supabase.from("entries").insert({ ...a.entry, user_id })).error,
+  mustOk(
+    await supabase.from("entries").insert({ ...a.entry, user_id }),
+    "entry insert",
   );
   if (a.decisions.length)
-    err("decisions", (await supabase.from("decisions").insert(a.decisions)).error);
+    mustOk(
+      await supabase.from("decisions").insert(a.decisions),
+      "decisions insert",
+    );
   if (a.questions.length)
-    err(
-      "open_questions",
-      (await supabase.from("open_questions").insert(a.questions)).error,
+    mustOk(
+      await supabase.from("open_questions").insert(a.questions),
+      "open_questions insert",
     );
   if (a.tasks.length)
-    err("tasks", (await supabase.from("tasks").insert(a.tasks)).error);
+    mustOk(await supabase.from("tasks").insert(a.tasks), "tasks insert");
   if (a.deps.length)
-    err(
-      "task_dependencies",
-      (await supabase.from("task_dependencies").insert(a.deps)).error,
+    mustOk(
+      await supabase.from("task_dependencies").insert(a.deps),
+      "task_dependencies insert",
     );
 }
 
@@ -1331,7 +1344,10 @@ export async function setProjectDeadline(
 ): Promise<void> {
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
-    await supabase.from("goals").update({ deadline }).eq("id", projectId);
+    mustOk(
+      await supabase.from("goals").update({ deadline }).eq("id", projectId),
+      "goal deadline update",
+    );
     return;
   }
   await ensureSeeded();
@@ -1362,11 +1378,12 @@ export async function setAvailability(
       weekday: r.weekday,
       hours: Math.max(0, r.hours),
     }));
-    const { error } = await supabase
-      .from("availability")
-      .upsert(payload, { onConflict: "user_id,weekday" });
-    if (error)
-      throw new Error(`Supabase availability upsert failed: ${error.message}`);
+    mustOk(
+      await supabase
+        .from("availability")
+        .upsert(payload, { onConflict: "user_id,weekday" }),
+      "availability upsert",
+    );
     return;
   }
   await ensureSeeded();
@@ -1402,14 +1419,15 @@ export async function setAutoStrategy(value: boolean): Promise<void> {
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
     const user_id = await currentUserId(supabase);
-    const { error } = await supabase
-      .from("user_settings")
-      .upsert(
-        { user_id, auto_strategy: value, updated_at: new Date().toISOString() },
-        { onConflict: "user_id" },
-      );
-    if (error)
-      throw new Error(`Supabase user_settings upsert failed: ${error.message}`);
+    mustOk(
+      await supabase
+        .from("user_settings")
+        .upsert(
+          { user_id, auto_strategy: value, updated_at: new Date().toISOString() },
+          { onConflict: "user_id" },
+        ),
+      "user_settings upsert",
+    );
     return;
   }
   await ensureSeeded();
@@ -1439,14 +1457,15 @@ export async function setValueModel(model: ValueModel): Promise<void> {
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
     const user_id = await currentUserId(supabase);
-    const { error } = await supabase
-      .from("value_model")
-      .upsert(
-        { user_id, model: clean, updated_at: new Date().toISOString() },
-        { onConflict: "user_id" },
-      );
-    if (error)
-      throw new Error(`Supabase value_model upsert failed: ${error.message}`);
+    mustOk(
+      await supabase
+        .from("value_model")
+        .upsert(
+          { user_id, model: clean, updated_at: new Date().toISOString() },
+          { onConflict: "user_id" },
+        ),
+      "value_model upsert",
+    );
     return;
   }
   await ensureSeeded();
@@ -1477,14 +1496,15 @@ export async function setWindowAvailability(avail: WindowAvailability): Promise<
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
     const user_id = await currentUserId(supabase);
-    const { error } = await supabase
-      .from("window_availability")
-      .upsert(
-        { user_id, weights: clean.weights, updated_at: new Date().toISOString() },
-        { onConflict: "user_id" },
-      );
-    if (error)
-      throw new Error(`Supabase window_availability upsert failed: ${error.message}`);
+    mustOk(
+      await supabase
+        .from("window_availability")
+        .upsert(
+          { user_id, weights: clean.weights, updated_at: new Date().toISOString() },
+          { onConflict: "user_id" },
+        ),
+      "window_availability upsert",
+    );
     return;
   }
   await ensureSeeded();
@@ -1520,19 +1540,18 @@ export async function setCachedStrategy(
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
     const user_id = await currentUserId(supabase);
-    const { error } = await supabase.from("portfolio_strategy").upsert(
-      {
-        user_id,
-        fingerprint: strategy.fingerprint,
-        strategy,
-        updated_at: new Date().toISOString(),
-      },
-      { onConflict: "user_id" },
+    mustOk(
+      await supabase.from("portfolio_strategy").upsert(
+        {
+          user_id,
+          fingerprint: strategy.fingerprint,
+          strategy,
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: "user_id" },
+      ),
+      "portfolio_strategy upsert",
     );
-    if (error)
-      throw new Error(
-        `Supabase portfolio_strategy upsert failed: ${error.message}`,
-      );
     return;
   }
   await ensureSeeded();
@@ -1571,12 +1590,13 @@ export async function setCommittedPlan(plan: CommittedPlan): Promise<void> {
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
     const user_id = await currentUserId(supabase);
-    const { error } = await supabase.from("committed_plan").upsert(
-      { user_id, plan, updated_at: new Date().toISOString() },
-      { onConflict: "user_id" },
+    mustOk(
+      await supabase.from("committed_plan").upsert(
+        { user_id, plan, updated_at: new Date().toISOString() },
+        { onConflict: "user_id" },
+      ),
+      "committed_plan upsert",
     );
-    if (error)
-      throw new Error(`Supabase committed_plan upsert failed: ${error.message}`);
     return;
   }
   await ensureSeeded();
@@ -1604,22 +1624,23 @@ async function insertPlanRoll(roll: PlanRoll): Promise<void> {
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
     const user_id = await currentUserId(supabase);
-    const { error } = await supabase.from("plan_rolls").insert({
-      id: roll.id,
-      user_id,
-      rolled_at: roll.rolledAt,
-      anchor: roll.anchor,
-      fingerprint: roll.fingerprint,
-      j: roll.j,
-      kind: roll.kind,
-      prev_j: roll.prevJ,
-      plan_order: roll.order,
-      reverted_at: roll.revertedAt,
-      schema_version: roll.schemaVersion,
-    });
-    if (error)
-      throw new Error(`Supabase plan_rolls insert failed: ${error.message}`);
-    await prunePlanRolls(supabase);
+    mustOk(
+      await supabase.from("plan_rolls").insert({
+        id: roll.id,
+        user_id,
+        rolled_at: roll.rolledAt,
+        anchor: roll.anchor,
+        fingerprint: roll.fingerprint,
+        j: roll.j,
+        kind: roll.kind,
+        prev_j: roll.prevJ,
+        plan_order: roll.order,
+        reverted_at: roll.revertedAt,
+        schema_version: roll.schemaVersion,
+      }),
+      "plan_rolls insert",
+    );
+    await bestEffortPrune("plan_rolls", () => prunePlanRolls(supabase));
     return;
   }
   await ensureSeeded();
@@ -1630,20 +1651,25 @@ async function insertPlanRoll(roll: PlanRoll): Promise<void> {
 
 /** Delete rolls older than the most recent `PLAN_ROLL_CAP` (soft cap). */
 async function prunePlanRolls(supabase: RequestClient): Promise<void> {
-  const { data } = await supabase
-    .from("plan_rolls")
-    .select("id")
-    .order("rolled_at", { ascending: false })
-    .range(PLAN_ROLL_CAP, PLAN_ROLL_CAP + 1000);
-  const stale = (data as { id: string }[] | null) ?? [];
-  if (stale.length)
+  const stale = mustRows<{ id: string }>(
     await supabase
       .from("plan_rolls")
-      .delete()
-      .in(
-        "id",
-        stale.map((r) => r.id),
-      );
+      .select("id")
+      .order("rolled_at", { ascending: false })
+      .range(PLAN_ROLL_CAP, PLAN_ROLL_CAP + 1000),
+    "plan_rolls stale list",
+  );
+  if (stale.length)
+    mustOk(
+      await supabase
+        .from("plan_rolls")
+        .delete()
+        .in(
+          "id",
+          stale.map((r) => r.id),
+        ),
+      "plan_rolls prune delete",
+    );
 }
 
 interface PlanRollRow {
@@ -1737,10 +1763,13 @@ async function markPlanRollReverted(id: string): Promise<void> {
   const revertedAt = new Date().toISOString();
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
-    await supabase
-      .from("plan_rolls")
-      .update({ reverted_at: revertedAt })
-      .eq("id", id);
+    mustOk(
+      await supabase
+        .from("plan_rolls")
+        .update({ reverted_at: revertedAt })
+        .eq("id", id),
+      "plan_rolls reverted update",
+    );
     return;
   }
   await ensureSeeded();
@@ -1769,18 +1798,19 @@ export async function insertPlanReorder(reorder: PlanReorder): Promise<void> {
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
     const user_id = await currentUserId(supabase);
-    const { error } = await supabase.from("plan_reorders").insert({
-      id: reorder.id,
-      user_id,
-      captured_at: reorder.capturedAt,
-      date: reorder.date,
-      app_order: reorder.appOrder,
-      user_order: reorder.userOrder,
-      schema_version: reorder.schemaVersion,
-    });
-    if (error)
-      throw new Error(`Supabase plan_reorders insert failed: ${error.message}`);
-    await prunePlanReorders(supabase);
+    mustOk(
+      await supabase.from("plan_reorders").insert({
+        id: reorder.id,
+        user_id,
+        captured_at: reorder.capturedAt,
+        date: reorder.date,
+        app_order: reorder.appOrder,
+        user_order: reorder.userOrder,
+        schema_version: reorder.schemaVersion,
+      }),
+      "plan_reorders insert",
+    );
+    await bestEffortPrune("plan_reorders", () => prunePlanReorders(supabase));
     return;
   }
   await ensureSeeded();
@@ -1792,20 +1822,25 @@ export async function insertPlanReorder(reorder: PlanReorder): Promise<void> {
 
 /** Delete reorders older than the most recent `PLAN_REORDER_CAP` (soft cap). */
 async function prunePlanReorders(supabase: RequestClient): Promise<void> {
-  const { data } = await supabase
-    .from("plan_reorders")
-    .select("id")
-    .order("captured_at", { ascending: false })
-    .range(PLAN_REORDER_CAP, PLAN_REORDER_CAP + 1000);
-  const stale = (data as { id: string }[] | null) ?? [];
-  if (stale.length)
+  const stale = mustRows<{ id: string }>(
     await supabase
       .from("plan_reorders")
-      .delete()
-      .in(
-        "id",
-        stale.map((r) => r.id),
-      );
+      .select("id")
+      .order("captured_at", { ascending: false })
+      .range(PLAN_REORDER_CAP, PLAN_REORDER_CAP + 1000),
+    "plan_reorders stale list",
+  );
+  if (stale.length)
+    mustOk(
+      await supabase
+        .from("plan_reorders")
+        .delete()
+        .in(
+          "id",
+          stale.map((r) => r.id),
+        ),
+      "plan_reorders prune delete",
+    );
 }
 
 interface PlanReorderRow {
@@ -1869,17 +1904,18 @@ export async function insertMoveChoice(choice: MoveChoice): Promise<void> {
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
     const user_id = await currentUserId(supabase);
-    const { error } = await supabase.from("move_choices").insert({
-      id: choice.id,
-      user_id,
-      captured_at: choice.capturedAt,
-      recovery_style: choice.recoveryStyle,
-      offered: choice.offered,
-      schema_version: choice.schemaVersion,
-    });
-    if (error)
-      throw new Error(`Supabase move_choices insert failed: ${error.message}`);
-    await pruneMoveChoices(supabase);
+    mustOk(
+      await supabase.from("move_choices").insert({
+        id: choice.id,
+        user_id,
+        captured_at: choice.capturedAt,
+        recovery_style: choice.recoveryStyle,
+        offered: choice.offered,
+        schema_version: choice.schemaVersion,
+      }),
+      "move_choices insert",
+    );
+    await bestEffortPrune("move_choices", () => pruneMoveChoices(supabase));
     return;
   }
   await ensureSeeded();
@@ -1891,20 +1927,25 @@ export async function insertMoveChoice(choice: MoveChoice): Promise<void> {
 
 /** Delete choices older than the most recent `MOVE_CHOICE_CAP` (soft cap). */
 async function pruneMoveChoices(supabase: RequestClient): Promise<void> {
-  const { data } = await supabase
-    .from("move_choices")
-    .select("id")
-    .order("captured_at", { ascending: false })
-    .range(MOVE_CHOICE_CAP, MOVE_CHOICE_CAP + 1000);
-  const stale = (data as { id: string }[] | null) ?? [];
-  if (stale.length)
+  const stale = mustRows<{ id: string }>(
     await supabase
       .from("move_choices")
-      .delete()
-      .in(
-        "id",
-        stale.map((r) => r.id),
-      );
+      .select("id")
+      .order("captured_at", { ascending: false })
+      .range(MOVE_CHOICE_CAP, MOVE_CHOICE_CAP + 1000),
+    "move_choices stale list",
+  );
+  if (stale.length)
+    mustOk(
+      await supabase
+        .from("move_choices")
+        .delete()
+        .in(
+          "id",
+          stale.map((r) => r.id),
+        ),
+      "move_choices prune delete",
+    );
 }
 
 interface MoveChoiceRow {
@@ -2027,7 +2068,10 @@ async function deleteDependencies(ids: string[]): Promise<void> {
   if (ids.length === 0) return;
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
-    await supabase.from("task_dependencies").delete().in("id", ids);
+    mustOk(
+      await supabase.from("task_dependencies").delete().in("id", ids),
+      "task_dependencies delete",
+    );
     return;
   }
   await ensureSeeded();
@@ -2043,9 +2087,10 @@ async function insertDependencies(rows: TaskDependency[]): Promise<void> {
   if (rows.length === 0) return;
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
-    const { error } = await supabase.from("task_dependencies").insert(rows);
-    if (error)
-      throw new Error(`Supabase task_dependencies re-insert failed: ${error.message}`);
+    mustOk(
+      await supabase.from("task_dependencies").insert(rows),
+      "task_dependencies re-insert",
+    );
     return;
   }
   await ensureSeeded();
@@ -2362,20 +2407,21 @@ async function insertPlanVersion(version: PlanVersion): Promise<void> {
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
     const user_id = await currentUserId(supabase);
-    const { error } = await supabase.from("plan_versions").insert({
-      id: version.id,
-      user_id,
-      created_at: version.createdAt,
-      reverted_at: version.revertedAt,
-      reason: version.reason,
-      odds_before: version.oddsBefore,
-      odds_after: version.oddsAfter,
-      moves: version.moves,
-      restore: version.restore,
-    });
-    if (error)
-      throw new Error(`Supabase plan_versions insert failed: ${error.message}`);
-    await prunePlanVersions(supabase);
+    mustOk(
+      await supabase.from("plan_versions").insert({
+        id: version.id,
+        user_id,
+        created_at: version.createdAt,
+        reverted_at: version.revertedAt,
+        reason: version.reason,
+        odds_before: version.oddsBefore,
+        odds_after: version.oddsAfter,
+        moves: version.moves,
+        restore: version.restore,
+      }),
+      "plan_versions insert",
+    );
+    await bestEffortPrune("plan_versions", () => prunePlanVersions(supabase));
     return;
   }
   await ensureSeeded();
@@ -2436,10 +2482,13 @@ async function markPlanVersionReverted(id: string): Promise<void> {
   const revertedAt = new Date().toISOString();
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
-    await supabase
-      .from("plan_versions")
-      .update({ reverted_at: revertedAt })
-      .eq("id", id);
+    mustOk(
+      await supabase
+        .from("plan_versions")
+        .update({ reverted_at: revertedAt })
+        .eq("id", id),
+      "plan_versions reverted update",
+    );
     return;
   }
   await ensureSeeded();
@@ -2488,7 +2537,10 @@ async function deleteTasks(ids: string[]): Promise<void> {
   if (ids.length === 0) return;
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
-    await supabase.from("tasks").delete().in("id", ids);
+    mustOk(
+      await supabase.from("tasks").delete().in("id", ids),
+      "tasks delete",
+    );
     return;
   }
   await ensureSeeded();
@@ -2501,7 +2553,10 @@ async function deleteEntries(ids: string[]): Promise<void> {
   if (ids.length === 0) return;
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
-    await supabase.from("entries").delete().in("id", ids);
+    mustOk(
+      await supabase.from("entries").delete().in("id", ids),
+      "entries delete",
+    );
     return;
   }
   await ensureSeeded();
@@ -2514,7 +2569,10 @@ async function deleteActivityCompletions(ids: string[]): Promise<void> {
   if (ids.length === 0) return;
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
-    await supabase.from("activity_completions").delete().in("id", ids);
+    mustOk(
+      await supabase.from("activity_completions").delete().in("id", ids),
+      "activity_completions delete",
+    );
     return;
   }
   await ensureSeeded();
@@ -2528,14 +2586,15 @@ export async function setOverride(date: string, hours: number): Promise<void> {
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
     const user_id = await currentUserId(supabase);
-    const { error } = await supabase
-      .from("availability_overrides")
-      .upsert(
-        { user_id, date, hours: Math.max(0, hours) },
-        { onConflict: "user_id,date" },
-      );
-    if (error)
-      throw new Error(`Supabase override upsert failed: ${error.message}`);
+    mustOk(
+      await supabase
+        .from("availability_overrides")
+        .upsert(
+          { user_id, date, hours: Math.max(0, hours) },
+          { onConflict: "user_id,date" },
+        ),
+      "override upsert",
+    );
     return;
   }
   await ensureSeeded();
@@ -2695,11 +2754,10 @@ export async function createRecurringActivity(
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
     const user_id = await currentUserId(supabase);
-    const { error } = await supabase
-      .from("recurring_activities")
-      .insert({ ...activity, user_id });
-    if (error)
-      throw new Error(`Supabase recurring_activities insert failed: ${error.message}`);
+    mustOk(
+      await supabase.from("recurring_activities").insert({ ...activity, user_id }),
+      "recurring_activities insert",
+    );
   } else {
     await ensureSeeded();
     memDB().recurringActivities.unshift(activity);
@@ -2764,11 +2822,10 @@ export async function logActivityCompletion(
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
     const user_id = await currentUserId(supabase);
-    const { error } = await supabase
-      .from("activity_completions")
-      .insert({ ...row, user_id });
-    if (error)
-      throw new Error(`Supabase activity_completions insert failed: ${error.message}`);
+    mustOk(
+      await supabase.from("activity_completions").insert({ ...row, user_id }),
+      "activity_completions insert",
+    );
     return;
   }
   await ensureSeeded();
@@ -2812,8 +2869,10 @@ export async function logWorkSession(input: {
     if (isSupabaseConfigured()) {
       const supabase = await getRequestClient();
       const user_id = await currentUserId(supabase);
-      const { error } = await supabase.from("work_sessions").insert({ ...row, user_id });
-      if (error) throw new Error(error.message);
+      mustOk(
+        await supabase.from("work_sessions").insert({ ...row, user_id }),
+        "work_sessions insert",
+      );
       return;
     }
     await ensureSeeded();
@@ -2859,11 +2918,10 @@ export async function skipActivity(
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
     const user_id = await currentUserId(supabase);
-    const { error } = await supabase
-      .from("activity_completions")
-      .insert({ ...row, user_id });
-    if (error)
-      throw new Error(`Supabase activity skip insert failed: ${error.message}`);
+    mustOk(
+      await supabase.from("activity_completions").insert({ ...row, user_id }),
+      "activity skip insert",
+    );
     return;
   }
   await ensureSeeded();
@@ -2878,12 +2936,15 @@ export async function unskipActivity(
   const day = (date ?? todayISO()).slice(0, 10);
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
-    await supabase
-      .from("activity_completions")
-      .delete()
-      .eq("activity_id", activityId)
-      .eq("date", day)
-      .eq("skipped", true);
+    mustOk(
+      await supabase
+        .from("activity_completions")
+        .delete()
+        .eq("activity_id", activityId)
+        .eq("date", day)
+        .eq("skipped", true),
+      "activity unskip delete",
+    );
     return;
   }
   await ensureSeeded();
@@ -2935,11 +2996,12 @@ export async function skipActivityForWeek(activityId: string): Promise<string[]>
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
     const user_id = await currentUserId(supabase);
-    const { error } = await supabase
-      .from("activity_completions")
-      .insert(rows.map((r) => ({ ...r, user_id })));
-    if (error)
-      throw new Error(`Supabase activity week-skip insert failed: ${error.message}`);
+    mustOk(
+      await supabase
+        .from("activity_completions")
+        .insert(rows.map((r) => ({ ...r, user_id }))),
+      "activity week-skip insert",
+    );
     return rows.map((r) => r.id);
   }
   await ensureSeeded();
@@ -2985,42 +3047,50 @@ export async function getOrCreateErrandsProject(): Promise<{
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
     const user_id = await currentUserId(supabase);
-    const { data: proj } = await supabase
-      .from("goals")
-      .select("id")
-      .eq("name", ERRANDS_PROJECT_NAME)
-      .limit(1)
-      .maybeSingle();
-    let projectId = (proj as { id: string } | null)?.id;
+    // Must throw, not degrade: a swallowed read here reports "no errands goal" and
+    // the branch below then creates a second one.
+    const proj = mustOne<{ id: string }>(
+      await supabase
+        .from("goals")
+        .select("id")
+        .eq("name", ERRANDS_PROJECT_NAME)
+        .limit(1)
+        .maybeSingle(),
+      "errands project read",
+    );
+    let projectId = proj?.id;
     if (!projectId) {
       projectId = crypto.randomUUID();
-      const { error } = await supabase.from("goals").insert({
-        id: projectId,
-        name: ERRANDS_PROJECT_NAME,
-        description: "One-off errands.",
-        kind: "project",
-        deadline: null,
-        user_id,
-      });
-      if (error)
-        throw new Error(`Supabase errands project insert failed: ${error.message}`);
+      mustOk(
+        await supabase.from("goals").insert({
+          id: projectId,
+          name: ERRANDS_PROJECT_NAME,
+          description: "One-off errands.",
+          kind: "project",
+          deadline: null,
+          user_id,
+        }),
+        "errands project insert",
+      );
     }
-    const { data: ent } = await supabase
-      .from("entries")
-      .select("id")
-      .eq("goal_id", projectId)
-      .eq("status", "active")
-      .limit(1)
-      .maybeSingle();
-    let entryId = (ent as { id: string } | null)?.id;
+    const ent = mustOne<{ id: string }>(
+      await supabase
+        .from("entries")
+        .select("id")
+        .eq("goal_id", projectId)
+        .eq("status", "active")
+        .limit(1)
+        .maybeSingle(),
+      "errands entry read",
+    );
+    let entryId = ent?.id;
     if (!entryId) {
       const entry = buildErrandsHoldingEntry(projectId);
       entryId = entry.id;
-      const { error } = await supabase
-        .from("entries")
-        .insert({ ...entry, user_id });
-      if (error)
-        throw new Error(`Supabase errands entry insert failed: ${error.message}`);
+      mustOk(
+        await supabase.from("entries").insert({ ...entry, user_id }),
+        "errands entry insert",
+      );
     }
     return { projectId, entryId };
   }
@@ -3099,9 +3169,7 @@ export async function createErrandTask(
   };
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
-    const { error } = await supabase.from("tasks").insert(task);
-    if (error)
-      throw new Error(`Supabase errand task insert failed: ${error.message}`);
+    mustOk(await supabase.from("tasks").insert(task), "errand task insert");
   } else {
     await ensureSeeded();
     memDB().tasks.push(task);
@@ -4604,11 +4672,10 @@ export async function logCommitment(
   if (isSupabaseConfigured()) {
     const supabase = await getRequestClient();
     const user_id = await currentUserId(supabase);
-    const { error } = await supabase
-      .from("commitments")
-      .insert({ ...row, user_id });
-    if (error)
-      throw new Error(`Supabase commitment insert failed: ${error.message}`);
+    mustOk(
+      await supabase.from("commitments").insert({ ...row, user_id }),
+      "commitment insert",
+    );
   } else {
     await ensureSeeded();
     memDB().commitments.push(row);
