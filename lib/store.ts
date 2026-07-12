@@ -108,6 +108,7 @@ import {
   globalForecast,
   globalForecastJoint,
   recoveryMoves,
+  sheddableSkillNodes,
   skillRecoveryMoves,
   type CandidateTask,
   type ForecastOptions,
@@ -1005,6 +1006,24 @@ export async function setSkillNodeDeferred(
   await ensureSeeded();
   const row = memDB().skillNodes.find((n) => n.id === id);
   if (row) Object.assign(row, patch);
+}
+
+/**
+ * Park (or restore) one pit-wall triage id, routed to the right store: a
+ * `skill:<nodeId>` lane is a learning goal's skill node with no task row, so it
+ * must go through `setSkillNodeDeferred`; every other id is a real task deferral.
+ * The single router both triage apply surfaces share — Today's `applyTriageAction`
+ * and the Strategy page's `triage` move — so a shed skill lane always sticks.
+ */
+export async function setTriageItemDeferred(
+  id: string,
+  deferred: boolean,
+): Promise<void> {
+  if (id.startsWith(SKILL_TASK_PREFIX)) {
+    await setSkillNodeDeferred(id.slice(SKILL_TASK_PREFIX.length), deferred);
+  } else {
+    await updateTask(id, { deferred });
+  }
 }
 
 // --- Entries (meetings & plans) ---------------------------------------------
@@ -2239,9 +2258,28 @@ const MOVE_SPECS: { [K in StrategyMoveKind]: MoveSpec<K> } = {
     },
   },
   triage: {
-    snapshot: async (p) => ({ tasks: await snapshotTaskFields(p.taskIds, ["deferred"]), goals: [] }),
+    // The batch may mix real tasks with a learning goal's sheddable skill lanes
+    // (`skill:<nodeId>`), so snapshot each id's pre-image from the right table —
+    // task `deferred` for real ids, skill `deferred`/`deferred_at` for skill ids —
+    // exactly the fields `persist` (via `setTriageItemDeferred`) mutates, so undo
+    // restores both. The restore loop is already field-aware (an entry carrying
+    // `deferred` un-parks via `setSkillNodeDeferred`).
+    snapshot: async (p) => {
+      const taskIds = p.taskIds.filter((id) => !id.startsWith(SKILL_TASK_PREFIX));
+      const skillNodeIds = p.taskIds
+        .filter((id) => id.startsWith(SKILL_TASK_PREFIX))
+        .map((id) => id.slice(SKILL_TASK_PREFIX.length));
+      const skillNodes = (
+        await Promise.all(skillNodeIds.map((id) => snapshotSkillNodeDeferral(id)))
+      ).flat();
+      return {
+        tasks: await snapshotTaskFields(taskIds, ["deferred"]),
+        goals: [],
+        ...(skillNodes.length ? { skillNodes } : {}),
+      };
+    },
     persist: async (p) => {
-      await Promise.all(p.taskIds.map((id) => updateTask(id, { deferred: true })));
+      await Promise.all(p.taskIds.map((id) => setTriageItemDeferred(id, true)));
       return {};
     },
   },
@@ -4398,12 +4436,22 @@ function buildPitWall(
 
   // Shed the lowest-WSJF open work of the conflicted (over-budget) projects —
   // the obvious low-value doomed work auto can relieve on its own (locked #3).
+  // A learning goal's sheddable skill lanes (non-checkpoint leaves) compete in
+  // the same shed order; the `skill:<nodeId>` id routes to `setSkillNodeDeferred`
+  // on persist, and only these eligible ids are offered so the shed always sticks.
   const conflictedIds = new Set(conflicts.map((c) => c.projectId));
+  const sheddableSkillIds = new Set<string>();
+  for (const nodes of g.skillNodesByProject.values()) {
+    for (const n of sheddableSkillNodes(nodes)) {
+      sheddableSkillIds.add(SKILL_TASK_PREFIX + n.id);
+    }
+  }
   const candidates = triageCandidates(
     ctx.tasks,
     conflictedIds,
     g.deadlineByProject,
     g.today,
+    sheddableSkillIds,
   ).slice(0, MAX_TRIAGE_PROBES);
 
   const triage: TriageMove[] = [];
