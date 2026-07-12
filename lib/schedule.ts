@@ -191,7 +191,8 @@ export interface WindowCapacity {
   iso: string;
   window: TimeWindow;
   capacityMinutes: number;
-  /** `exp(μ_window − μ₀)`: <1 faster, >1 slower, =1 unlearned. Applied to work that STARTS here. */
+  /** `exp(μ_window − μ₀)`: <1 faster, >1 slower, =1 unlearned. Charged per-fraction to
+   *  the work that occupies this window (window-spanning; see `flowFinishOffsetsLanes`). */
   netMultiplier: number;
 }
 
@@ -452,11 +453,11 @@ export function flowFinishOffsetsComfort(
 }
 
 /** One lane of the windowed flow (OVERHAUL S3b Pillar 2): a contiguous capacity
- *  bucket the sampled work fills, the net velocity multiplier applied to work that
- *  STARTS in it, and the day offset it reports as a finish (so the deadline check
- *  stays day-granular even when lanes are sub-day window segments). The day-granular
- *  flow is the special case: one lane per day, `netMultiplier === 1`, `dayOffset` =
- *  the day's index. */
+ *  bucket the sampled work fills, the net velocity multiplier charged per-fraction to
+ *  the work occupying it, and the day offset it reports as a finish (so the deadline
+ *  check stays day-granular even when lanes are sub-day window segments). The
+ *  day-granular flow is the special case: one lane per day, `netMultiplier === 1`,
+ *  `dayOffset` = the day's index. */
 export interface FlowLane {
   capacityMinutes: number;
   netMultiplier: number;
@@ -472,16 +473,22 @@ function firstOpenLane(lanes: FlowLane[], from: number): number {
 
 /**
  * The windowed generalisation of `flowFinishOffsets`: flow `durations` (in order)
- * across capacity LANES, scaling each task by the net velocity multiplier of the
- * lane it STARTS in, and returning the `dayOffset` of the lane its last minute
- * lands on. With one lane per day and `netMultiplier === 1` it is byte-identical to
- * `flowFinishOffsets` — the no-regret anchor the harness proves. The windowed series
- * is a safe superset: lanes summing to a day's capacity, filled in clock order,
- * consume exactly that capacity before crossing to the next day, so a flat, unlearned
- * split returns the same finish DAY for every task. The start-lane multiplier is read
- * only AFTER rolling past any exhausted lane (and only for real work, so a zero-minute
- * task never advances the cursor — that keeps the daily path bit-identical), so a task
- * that genuinely begins in a learned-fast window shrinks.
+ * across capacity LANES, charging each FRACTION of a task at the net velocity
+ * multiplier of the lane it actually occupies (window-spanning pricing), and returning
+ * the `dayOffset` of the lane its last minute lands on. A lane with multiplier `m` and
+ * `remaining` wall-clock capacity absorbs `remaining / m` estimated minutes, so a task
+ * that begins in a fast window but spills into a slow one is priced part-fast,
+ * part-slow — not wholly at its start rate (the OVERHAUL S3b Phase-4 refinement over the
+ * original start-window pricing).
+ *
+ * With one lane per day and `netMultiplier === 1` it is byte-identical to
+ * `flowFinishOffsets` — the no-regret anchor the harness proves (`× 1.0` and `/ 1.0` are
+ * exact, so the per-fraction form collapses to the day-granular flow bit-for-bit). The
+ * windowed series is a safe superset: lanes summing to a day's capacity, filled in clock
+ * order, consume exactly that capacity before crossing to the next day, so a flat,
+ * unlearned split returns the same finish DAY for every task. The lane is advanced past
+ * any exhausted segment only for real work (a zero-minute task never advances the cursor
+ * — that keeps the daily path bit-identical) before its first fraction is priced.
  */
 export function flowFinishOffsetsLanes(
   durations: number[],
@@ -508,18 +515,22 @@ export function flowFinishOffsetsLanes(
       i = next;
       remaining = lanes[i].capacityMinutes;
     }
-    let need = durations[k] * lanes[i].netMultiplier;
-    while (need > remaining) {
+    // Window-spanning pricing: consume this task's ESTIMATED minutes lane by lane,
+    // charging each fraction at the multiplier of the lane it actually occupies. `est`
+    // is the estimated minutes still to place; a lane with multiplier `m` and
+    // `remaining` wall-clock capacity absorbs `remaining / m` of them.
+    let est = durations[k];
+    while (est * lanes[i].netMultiplier > remaining) {
       const next = firstOpenLane(lanes, i + 1);
       if (next >= lanes.length) {
         for (let j = k; j < durations.length; j++) offsets[j] = lastOffset;
         return offsets;
       }
-      need -= remaining;
+      est -= remaining / lanes[i].netMultiplier;
       i = next;
       remaining = lanes[i].capacityMinutes;
     }
-    remaining -= need;
+    remaining -= est * lanes[i].netMultiplier;
     offsets[k] = lanes[i].dayOffset;
   }
   return offsets;
@@ -538,7 +549,7 @@ function firstOpenLaneNextDay(lanes: FlowLane[], from: number, currentDay: numbe
 
 /**
  * The comfort × window COMPOSITION (OVERHAUL S3b Phase 4): flow `durations` across window
- * LANES (each task scaled by its START lane's net multiplier, exactly as
+ * LANES (each fraction charged at the lane it occupies, window-spanning, exactly as
  * `flowFinishOffsetsLanes`) AND meter each DAY's HARD-work minutes against a soft
  * `comfortCap` (exactly as `flowFinishOffsetsComfort`) — so a learned-fast window shrinks
  * effective work WHILE deep work still spreads across days. The two objectives compose
@@ -606,18 +617,21 @@ export function flowFinishOffsetsComfortLanes(
       }
     }
     const startDay = lanes[i].dayOffset;
-    let need = durations[k] * lanes[i].netMultiplier;
-    while (need > remaining) {
+    // Window-spanning pricing (see flowFinishOffsetsLanes): charge each fraction of the
+    // task at the multiplier of the lane it actually occupies, not the whole task at its
+    // start lane's rate. `est` = estimated minutes still to place.
+    let est = durations[k];
+    while (est * lanes[i].netMultiplier > remaining) {
       const next = firstOpenLane(lanes, i + 1);
       if (next >= lanes.length) {
         for (let j = k; j < durations.length; j++) offsets[j] = lastOffset;
         return offsets;
       }
-      need -= remaining;
+      est -= remaining / lanes[i].netMultiplier;
       i = next;
       remaining = lanes[i].capacityMinutes;
     }
-    remaining -= need;
+    remaining -= est * lanes[i].netMultiplier;
     const finishDay = lanes[i].dayOffset;
     // Hard load counts on the finish day; a task that spilled to a later day is the first
     // hard work there (reset), else it adds to the running tally — mirrors the day flow.

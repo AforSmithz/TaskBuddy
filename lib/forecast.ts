@@ -148,8 +148,10 @@ export interface ForecastOptions {
   /**
    * OVERHAUL S3b Pillar 2 — per-window capacity segments for the JOINT flow. When
    * present, `globalForecastJoint` flows the sampled durations across these instead
-   * of whole-day capacities, scaling each task by the net velocity multiplier of the
-   * window it STARTS in (so work in a learned-fast window genuinely shrinks). The
+   * of whole-day capacities, charging each fraction of a task at the net velocity
+   * multiplier of the window it occupies (window-spanning, so work in a learned-fast
+   * window genuinely shrinks and a task that spills into a slower one is priced part
+   * fast, part slow). The
    * deadline check stays day-granular (each segment carries its day). Absent — or a
    * flat/unlearned split (all `netMultiplier === 1`) — is byte-identical to the
    * day-granular forecast. Built by `arrange.ts windowCapacities`; the seed/total are
