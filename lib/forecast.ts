@@ -6,6 +6,7 @@ import type {
   RecoveryMove,
   SegmentModel,
   SkillNode,
+  SkillPathRescheduleMove,
   SkillRecoveryMove,
 } from "./types";
 import {
@@ -555,6 +556,152 @@ export function skillRecoveryMoves(
     ).probability;
     if (after > current + 0.01) {
       moves.push({ nodeId: node.id, title: node.title, probabilityAfter: after });
+    }
+  }
+
+  return moves
+    .sort((a, b) => b.probabilityAfter - a.probabilityAfter)
+    .slice(0, limit);
+}
+
+/**
+ * For each *descopable frontier milestone*, the strand-free set of open nodes that
+ * become dead weight if that milestone slides out of the current push — the unit a
+ * `reschedule_skill` move parks. The set-level generalization of
+ * {@link sheddableSkillNodes}: where that offers a single non-checkpoint leaf, this
+ * offers a whole checkpoint chain.
+ *
+ * A checkpoint `C` is a **descope candidate** iff no OTHER open checkpoint
+ * transitively depends on it — it is on the milestone frontier, so nothing kept
+ * needs it. Descoping `C` means parking the connected component of `C` in the graph
+ * of open nodes *with every prerequisite of a kept checkpoint removed*: that
+ * component is exactly `C` plus the prep that leads only to `C` (and any node that
+ * can't be reached without `C`), and it is provably strand-free — no kept node can
+ * depend on a parked one, because a kept node's prerequisites are all "needed by a
+ * kept checkpoint" and therefore excluded from every component but their own.
+ *
+ * Only `open` (unattained, non-deferred) nodes are considered — attained/parked
+ * nodes are already out of the push. Pure. Returns the checkpoint with its park-set
+ * (which includes the checkpoint); each caller imposes its own order/gate.
+ */
+export function descopableMilestoneParkSets(
+  nodes: SkillNode[],
+): { checkpoint: SkillNode; nodes: SkillNode[] }[] {
+  const open = nodes.filter((n) => !n.attained && !n.deferred);
+  if (open.length <= 1) return [];
+  const byId = new Map(open.map((n) => [n.id, n]));
+
+  // Transitive open ancestors (prerequisites, closed) of a node.
+  const ancestorsOf = (id: string): Set<string> => {
+    const acc = new Set<string>();
+    const stack = [...(byId.get(id)?.prerequisites ?? [])];
+    while (stack.length) {
+      const p = stack.pop()!;
+      if (!byId.has(p) || acc.has(p)) continue;
+      acc.add(p);
+      stack.push(...byId.get(p)!.prerequisites);
+    }
+    return acc;
+  };
+
+  const checkpoints = open.filter((n) => n.is_checkpoint);
+  const ancByCheckpoint = new Map(checkpoints.map((c) => [c.id, ancestorsOf(c.id)]));
+  // Frontier = a checkpoint no OTHER open checkpoint depends on (transitively).
+  const frontier = checkpoints.filter(
+    (c) =>
+      !checkpoints.some(
+        (o) => o.id !== c.id && ancByCheckpoint.get(o.id)!.has(c.id),
+      ),
+  );
+
+  // Undirected adjacency among open nodes (a prereq edge connects both ends).
+  const adj = new Map<string, Set<string>>(open.map((n) => [n.id, new Set<string>()]));
+  for (const n of open) {
+    for (const p of n.prerequisites) {
+      if (!byId.has(p)) continue;
+      adj.get(n.id)!.add(p);
+      adj.get(p)!.add(n.id);
+    }
+  }
+
+  const out: { checkpoint: SkillNode; nodes: SkillNode[] }[] = [];
+  for (const c of frontier) {
+    // Everything a KEPT checkpoint (every checkpoint but `c`) needs must stay — this
+    // is the boundary the component BFS never crosses, which is what makes the park
+    // strand-free.
+    const neededByKept = new Set<string>();
+    for (const k of checkpoints) {
+      if (k.id === c.id) continue;
+      neededByKept.add(k.id);
+      for (const a of ancByCheckpoint.get(k.id)!) neededByKept.add(a);
+    }
+    // The connected component of `c` among open nodes, blocked at kept-needed nodes.
+    const park = new Set<string>([c.id]);
+    const queue: string[] = [c.id];
+    while (queue.length) {
+      const cur = queue.shift()!;
+      for (const nb of adj.get(cur)!) {
+        if (park.has(nb) || neededByKept.has(nb)) continue;
+        park.add(nb);
+        queue.push(nb);
+      }
+    }
+    out.push({ checkpoint: c, nodes: open.filter((n) => park.has(n.id)) });
+  }
+  return out;
+}
+
+/**
+ * Per-path recovery for a learning goal: which frontier milestone chains, if
+ * re-phased out of the current push, recover probability. The learning-goal analogue
+ * of a scoped reschedule — it slides a whole checkpoint chain rather than shedding a
+ * single leaf ({@link skillRecoveryMoves}) or moving the whole goal date.
+ *
+ * Each candidate is a {@link descopableMilestoneParkSets} set, measured by removing
+ * its whole park-set's effort from the combined real-work + skill-effort pool. A set
+ * that would park the goal down to nothing (its component is the entire open graph)
+ * is skipped — that is abandonment, not recovery.
+ *
+ * Best improvement first; each kept move actually lifts the odds (> current + 0.01).
+ */
+export function skillPathRescheduleMoves(
+  nodes: SkillNode[],
+  realEstimates: number[],
+  deployable: number,
+  options: ForecastOptions = {},
+  limit = 3,
+): SkillPathRescheduleMove[] {
+  const open = nodes.filter((n) => !n.attained && !n.deferred);
+  if (open.length <= 1) return [];
+
+  const baseSkill = open.map((n) => n.estimated_minutes);
+  const current = forecast(
+    [...realEstimates, ...baseSkill],
+    deployable,
+    options,
+  ).probability;
+
+  const moves: SkillPathRescheduleMove[] = [];
+  for (const set of descopableMilestoneParkSets(nodes)) {
+    const parkIds = new Set(set.nodes.map((n) => n.id));
+    // Never re-phase the goal down to nothing.
+    if (parkIds.size >= open.length) continue;
+    const remaining = open
+      .filter((n) => !parkIds.has(n.id))
+      .map((n) => n.estimated_minutes);
+    const after = forecast(
+      [...realEstimates, ...remaining],
+      deployable,
+      options,
+    ).probability;
+    if (after > current + 0.01) {
+      moves.push({
+        checkpointId: set.checkpoint.id,
+        checkpointTitle: set.checkpoint.title,
+        nodeIds: set.nodes.map((n) => n.id),
+        titles: set.nodes.map((n) => n.title),
+        probabilityAfter: after,
+      });
     }
   }
 
