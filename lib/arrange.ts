@@ -46,10 +46,24 @@ import { fitCalibratedWeights, type PreferencePair } from "./calibrate";
  *  a project's cluster (group first, then sequence each cluster by energy); raising
  *  `energy` is the lever that lets it break a cluster for a strong window gain. The
  *  energy + buffer terms share the `(netMult−1)` window coupling, so both vanish without
- *  a learned profile and the score reduces EXACTLY to context-switch clustering. */
+ *  a learned profile and the score reduces EXACTLY to grouping — context-switch clustering
+ *  with the `domain` term keeping same-area projects adjacent (a coarser axis under switch). */
 export interface ArrangeWeights {
   /** Penalty per project change across a day's within-day sequence (context-switch cost). */
   switch: number;
+  /** Penalty per LIFE-AREA change across a day's within-day sequence (OVERHAUL S3b Phase-4
+   *  refinement — domain-axis grouping). A COARSER grouping axis than `switch`: since a
+   *  project belongs to one area, an area change always implies a project change, so this
+   *  term is a subset of `switch` — it never fires without `switch` also firing, and only
+   *  biases WHICH project the greedy switches to (another project in the SAME area before
+   *  crossing areas: Work with Work, Hobby with Hobby). Odds-neutral by the identical
+   *  mechanism as `switch` (a within-day permutation — display-only without a window/comfort
+   *  signal, MC-gated with one). Defaults to 1 (on, as a secondary axis under `switch`) and
+   *  reads `area` off the order entry, so it degrades to 0 when areas are absent. Learned
+   *  alongside `switch` from drag history (a correlated feature — the shrink seam shares
+   *  credit); both are "always live" (no window coupling), so grouping preferences teach
+   *  them first. */
+  domain: number;
   /** Weight on the energy term `difficulty·impactBoost·(netMult−1)` — negative (reward) for
    *  placing cognitively-HARD work in a fast window, positive (penalty) for hard work in a
    *  slow one. `difficulty` is the `effort`-derived cognitive load (S2): "do hard work when
@@ -76,7 +90,7 @@ export interface ArrangeWeights {
 }
 
 /** Default weights — `1.0` as knobs, calibrated later by S2's loop. */
-export const ARRANGE_WEIGHTS: ArrangeWeights = { switch: 1, energy: 1, buffer: 1 };
+export const ARRANGE_WEIGHTS: ArrangeWeights = { switch: 1, domain: 1, energy: 1, buffer: 1 };
 
 /** How strongly a task's impact modulates the ENERGY term (S3b Phase 4): the boost spans
  *  `[1−IMPACT_ENERGY_WEIGHT, 1+IMPACT_ENERGY_WEIGHT]` across impact 1→5 (neutral at 3). A
@@ -186,25 +200,32 @@ function daySegments(
 const COST_EPSILON = 1e-9;
 
 /**
- * The three UNWEIGHTED soft-objective terms of placing `e` next — the per-pick contribution to
- * the feature vector `φ = (switch, energy, buffer)`. A context-SWITCH is a unit when the project
- * changes; the ENERGY term is cognitively-hard (impact-weighted) work coupled to the window's net
- * multiplier; the BUFFER term gives a thin-buffer project's work the same fast-window coupling
- * independent of difficulty. Both window terms carry `(mult − 1)`, so both vanish when `mult === 1`
- * (no learned profile) and `φ` reduces to the switch count. The SINGLE source of the term math —
- * `marginalJ` dots this with the weights (chooser + scorer), `arrangementFeatures` sums it
- * (calibrator's `φ`) — so the chooser, the scorer, AND the calibrated preference contrast can
- * never drift apart. Pure. */
+ * The four UNWEIGHTED soft-objective terms of placing `e` next — the per-pick contribution to the
+ * feature vector `φ = (switch, domain, energy, buffer)`. A context-SWITCH is a unit when the project
+ * changes; a DOMAIN switch is a unit when the life-area changes (a coarser grouping axis — area
+ * change ⟹ project change, so `dm ≤ sw`, i.e. it only picks which project to switch to); the ENERGY
+ * term is cognitively-hard (impact-weighted) work coupled to the window's net multiplier; the BUFFER
+ * term gives a thin-buffer project's work the same fast-window coupling independent of difficulty.
+ * Both window terms carry `(mult − 1)`, so both vanish when `mult === 1` (no learned profile) and `φ`
+ * reduces to the switch + domain counts. The SINGLE source of the term math — `marginalJ` dots this
+ * with the weights (chooser + scorer), `arrangementFeatures` sums it (calibrator's `φ`) — so the
+ * chooser, the scorer, AND the calibrated preference contrast can never drift apart. Pure. */
 function marginalFeatures(
   e: EffectiveOrderEntry,
   current: string | null | undefined,
+  currentArea: string | null | undefined,
   mult: number,
   thinBuffer: ReadonlyMap<string, number>,
-): [number, number, number] {
+): [number, number, number, number] {
   const sw = current !== undefined && (e.projectId ?? null) !== current ? 1 : 0;
+  // Domain-axis grouping: a unit per LIFE-AREA change (a coarser sibling of `switch`). Since
+  // area change implies project change, `dm` is a subset of `sw` — it only settles which
+  // project to switch to. An absent area (null both sides) is never a change, so a plan with
+  // no area signal contributes 0 here (degrades to switch-only grouping).
+  const dm = currentArea !== undefined && (e.area ?? null) !== currentArea ? 1 : 0;
   const en = (e.difficulty ?? 0) * impactEnergyBoost(e.impact) * (mult - 1);
   const bf = (thinBuffer.get(e.projectId) ?? 0) * (mult - 1);
-  return [sw, en, bf];
+  return [sw, dm, en, bf];
 }
 
 /**
@@ -215,12 +236,13 @@ function marginalFeatures(
 function marginalJ(
   e: EffectiveOrderEntry,
   current: string | null | undefined,
+  currentArea: string | null | undefined,
   mult: number,
   weights: ArrangeWeights,
   thinBuffer: ReadonlyMap<string, number>,
 ): number {
-  const [sw, en, bf] = marginalFeatures(e, current, mult, thinBuffer);
-  return weights.switch * sw + weights.energy * en + weights.buffer * bf;
+  const [sw, dm, en, bf] = marginalFeatures(e, current, currentArea, mult, thinBuffer);
+  return weights.switch * sw + weights.domain * dm + weights.energy * en + weights.buffer * bf;
 }
 
 /**
@@ -244,6 +266,7 @@ function sequenceDay(
   const out: EffectiveOrderEntry[] = [];
   let cum = 0;
   let current: string | null | undefined; // last placed task's project
+  let currentArea: string | null | undefined; // last placed task's life-area
 
   while (out.length < entries.length) {
     const ready = entries.filter((e) => !emitted.has(e.taskId) && depsReady(e.taskId, prereqs, emitted));
@@ -255,9 +278,10 @@ function sequenceDay(
     let best = pool[0];
     let bestCost = Infinity;
     for (const e of pool) {
-      // Switch + energy (hard/valuable work into fast windows) + buffer (at-risk work into
-      // fast windows) — the shared objective `arrangementScore` also prices. See `marginalJ`.
-      const cost = marginalJ(e, current, mult, weights, thinBuffer);
+      // Switch + domain (keep same-area work together) + energy (hard/valuable work into fast
+      // windows) + buffer (at-risk work into fast windows) — the shared objective
+      // `arrangementScore` also prices. See `marginalJ`.
+      const cost = marginalJ(e, current, currentArea, mult, weights, thinBuffer);
       if (
         cost < bestCost - COST_EPSILON ||
         (cost <= bestCost + COST_EPSILON && rank.get(e.taskId)! < rank.get(best.taskId)!)
@@ -270,6 +294,7 @@ function sequenceDay(
     emitted.add(best.taskId);
     cum += Math.max(0, best.estimatedMinutes);
     current = best.projectId ?? null;
+    currentArea = best.area ?? null;
   }
   return out;
 }
@@ -341,12 +366,14 @@ export function arrangeOrder(
   return changed ? out : order; // same reference when nothing moved (cheap no-op signal)
 }
 
-/** The three-component feature vector `φ = (switch, energy, buffer)` of an order — the UNWEIGHTED
- *  decomposition of `arrangementScore` (`J = weights · φ` exactly). The switch total is the
- *  context-switch count; the energy total the summed impact-weighted hard-work × window coupling;
- *  the buffer total the summed thin-buffer × window coupling. */
+/** The four-component feature vector `φ = (switch, domain, energy, buffer)` of an order — the
+ *  UNWEIGHTED decomposition of `arrangementScore` (`J = weights · φ` exactly). The switch total is
+ *  the context-switch count; the domain total the life-area-change count (a coarser grouping axis);
+ *  the energy total the summed impact-weighted hard-work × window coupling; the buffer total the
+ *  summed thin-buffer × window coupling. */
 export interface ArrangeFeatures {
   switch: number;
+  domain: number;
   energy: number;
   buffer: number;
 }
@@ -367,7 +394,7 @@ export function arrangementFeatures(
   today: string,
   opts: ArrangeOrderOptions = {},
 ): ArrangeFeatures {
-  if (order.length === 0) return { switch: 0, energy: 0, buffer: 0 };
+  if (order.length === 0) return { switch: 0, domain: 0, energy: 0, buffer: 0 };
   const horizon = opts.horizonDays ?? ARRANGE_HORIZON_DAYS;
   const profile = opts.windowProfile ?? null;
   const cap = opts.comfortCapMinutes ?? null;
@@ -387,6 +414,7 @@ export function arrangementFeatures(
       : packOffsets(durations, capacities);
 
   let sSwitch = 0;
+  let sDomain = 0;
   let sEnergy = 0;
   let sBuffer = 0;
   let i = 0;
@@ -398,20 +426,23 @@ export function arrangementFeatures(
       const segs = daySegments(capacities[off]?.capacityMinutes ?? 0, profile);
       let cum = 0;
       let current: string | null | undefined;
+      let currentArea: string | null | undefined;
       for (let k = i; k < j; k++) {
         const e = order[k];
         const mult = segs.mult[windowIndexAt(cum, segs.caps)];
-        const [sw, en, bf] = marginalFeatures(e, current, mult, thinBuffer);
+        const [sw, dm, en, bf] = marginalFeatures(e, current, currentArea, mult, thinBuffer);
         sSwitch += sw;
+        sDomain += dm;
         sEnergy += en;
         sBuffer += bf;
         cum += Math.max(0, e.estimatedMinutes);
         current = e.projectId ?? null;
+        currentArea = e.area ?? null;
       }
     }
     i = j;
   }
-  return { switch: sSwitch, energy: sEnergy, buffer: sBuffer };
+  return { switch: sSwitch, domain: sDomain, energy: sEnergy, buffer: sBuffer };
 }
 
 /**
@@ -431,14 +462,14 @@ export function arrangementScore(
 ): number {
   const weights = opts.weights ?? ARRANGE_WEIGHTS;
   const f = arrangementFeatures(order, capacities, today, opts);
-  return weights.switch * f.switch + weights.energy * f.energy + weights.buffer * f.buffer;
+  return weights.switch * f.switch + weights.domain * f.domain + weights.energy * f.energy + weights.buffer * f.buffer;
 }
 
 /**
  * Calibrate the arrangement's soft `ArrangeWeights` from the user's drag-to-reorder history
  * (design/s3c5-shared-calibration-brain.md §4b/§5 — the 🔴 tier). Each stored pair is a revealed
  * preference `userOrder ≻ appOrder` captured odds-neutral; we recompute the feature vector
- * `φ = (switch, energy, buffer)` for BOTH orders under the CURRENT feature functions
+ * `φ = (switch, domain, energy, buffer)` for BOTH orders under the CURRENT feature functions
  * (`arrangementFeatures`, so a feature-fn change re-prices history — the single-source choice
  * `diagnoseRoll` also makes) and hand the contrasts to the shared perceptron+shrink seam
  * (`fitCalibratedWeights`). The solver picks `argmin w·φ`, so the user's order is the PREFERRED
@@ -448,22 +479,24 @@ export function arrangementScore(
  * `ARRANGE_WEIGHTS`, and a learned weight only reweights the SOFT `J` the odds gate already
  * dominates (design invariant 2). `φ` is priced under the SAME arrange options the live plan uses
  * (`windowProfile`/`comfortCapMinutes`/`thinBufferUrgency`), so the energy/buffer components are 0
- * — hence those weights stay at prior — until a window profile is learned; the switch component is
- * always live, so grouping preferences teach `switch` first (§4b identifiability). Pure. */
+ * — hence those weights stay at prior — until a window profile is learned; the switch AND domain
+ * components are always live (no window coupling), so grouping preferences teach `switch`/`domain`
+ * first (§4b identifiability — the two are correlated, `dm ≤ sw`, and the shrink seam shares the
+ * credit). Pure. */
 export function calibrateArrangeWeights(
   prefs: readonly Pick<PlanReorder, "appOrder" | "userOrder">[],
   capacities: DayCapacity[],
   today: string,
   opts: ArrangeOrderOptions = {},
 ): ArrangeWeights {
-  const prior = [ARRANGE_WEIGHTS.switch, ARRANGE_WEIGHTS.energy, ARRANGE_WEIGHTS.buffer];
+  const prior = [ARRANGE_WEIGHTS.switch, ARRANGE_WEIGHTS.domain, ARRANGE_WEIGHTS.energy, ARRANGE_WEIGHTS.buffer];
   const pairs: PreferencePair[] = prefs.map((p) => {
     const a = arrangementFeatures(p.appOrder, capacities, today, opts);
     const u = arrangementFeatures(p.userOrder, capacities, today, opts);
-    return { solver: [a.switch, a.energy, a.buffer], user: [u.switch, u.energy, u.buffer] };
+    return { solver: [a.switch, a.domain, a.energy, a.buffer], user: [u.switch, u.domain, u.energy, u.buffer] };
   });
-  const [sw, en, bf] = fitCalibratedWeights(pairs, prior);
-  return { switch: sw, energy: en, buffer: bf };
+  const [sw, dm, en, bf] = fitCalibratedWeights(pairs, prior);
+  return { switch: sw, domain: dm, energy: en, buffer: bf };
 }
 
 // --- Pillar 1: the window-capacity model (OVERHAUL S3b Phase 2) --------------

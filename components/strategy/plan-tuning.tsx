@@ -30,6 +30,11 @@ const DIALS: Record<
     up: "tighter — fewer context switches",
     down: "looser — more willing to interleave",
   },
+  domain: {
+    name: "Keeping a life-area together",
+    up: "tighter — finishes one area before the next",
+    down: "looser — more willing to mix areas",
+  },
   energy: {
     name: "Hard work in your best hours",
     up: "stronger pull into fast windows",
