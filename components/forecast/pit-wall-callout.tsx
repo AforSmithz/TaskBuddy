@@ -14,7 +14,6 @@ import type { PitWall } from "@/lib/store";
 import type { PitWallOption } from "@/lib/types";
 import {
   applyTriageAction,
-  deferTaskAction,
   setAutoStrategyAction,
   undoTriageAction,
 } from "@/lib/actions";
@@ -282,9 +281,9 @@ function ManualTriage({ triage }: { triage: PitWall["triage"] }) {
   function defer(ids: string[], key: string) {
     setBusy(key);
     startTransition(async () => {
-      await (ids.length === 1
-        ? deferTaskAction(ids[0], true)
-        : applyTriageAction(ids));
+      // Always route through applyTriageAction — it splits real tasks from
+      // `skill:` lanes, whereas deferTaskAction would no-op on a skill id.
+      await applyTriageAction(ids);
       setApplied((s) => {
         const next = new Set(s);
         ids.forEach((id) => next.add(id));
