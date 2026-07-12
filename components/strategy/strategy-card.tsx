@@ -64,6 +64,7 @@ const MOVE_ICON: Record<StrategyMoveKind, typeof ArrowRight> = {
   mark_done: Check,
   attain_skill: GraduationCap,
   defer_skill: PauseCircle,
+  reschedule_skill: CalendarClock,
   triage: TrafficCone,
   add_tasks: Sparkles,
   reshape: Scissors,
