@@ -1066,6 +1066,13 @@ export interface EffectiveOrderEntry {
    * Absent ⇒ neutral. Does not affect ordering or odds without a learned window profile.
    */
   impact?: number;
+  /**
+   * Life-area (OVERHAUL S3b Phase-4 refinement — domain-axis grouping): the within-day
+   * `arrange.ts` sequencer keeps same-area work adjacent (a coarser grouping axis than
+   * `projectId`). Carried from `AllocTask`. Odds-neutral (a within-day permutation).
+   * Absent ⇒ no area signal, so the domain term is inert (degrades to switch-only grouping).
+   */
+  area?: string;
 }
 
 /**
@@ -1628,7 +1635,7 @@ export interface PlanTuning {
   arrange: {
     /** The calibrated soft-`J` term weights the plan is currently arranged under. */
     weights: ArrangeWeights;
-    /** The default (no-data) weights `{1,1,1}` — the baseline "how far it moved" reads against. */
+    /** The default (no-data) weights `{1,1,1,1}` — the baseline "how far it moved" reads against. */
     prior: ArrangeWeights;
     /** How many odds-neutral drag observations the weights were learned from. */
     samples: number;

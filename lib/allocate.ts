@@ -103,6 +103,13 @@ export interface AllocTask {
    * (0), so a plan with no difficulty signal degrades to today (no comfort capping).
    */
   difficulty?: number;
+  /**
+   * Life-area (OVERHAUL S3b Phase-4 refinement — domain-axis grouping): carried verbatim
+   * onto the order entry so `arrange.ts` keeps same-area work adjacent within a day (a
+   * coarser grouping axis than `projectId`). Optional — synthetic/skill lanes omit it and
+   * read as no-area (the domain term is inert for them), like `importance`/`model`.
+   */
+  area?: string;
 }
 
 /** Id prefix for synthetic `AllocTask`s that stand in for a learning goal's skill
@@ -313,6 +320,8 @@ export function effectiveOrder(
       // Carry the impact factor (S3b Phase 4) so the energy term can prefer fast windows
       // for high-value hard work; never touches the comfort cap or the odds.
       impact: next.impact,
+      // Carry the life-area (S3b Phase-4 refinement) so the sequencer groups same-area work.
+      area: next.area,
       rank: order.length,
       pulledAhead: Boolean(leapfrogged),
       reason: leapfrogged

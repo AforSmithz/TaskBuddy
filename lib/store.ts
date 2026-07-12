@@ -3650,6 +3650,8 @@ function buildAllocTasks(g: ForecastGather): AllocTask[] {
         risk: t.risk_score ?? 3,
         // Value Model: scale this task's cost-of-delay by its life-area's importance.
         importance: areaWeight(g.valueModel, t.area),
+        // S3b domain-axis grouping: keep same-area work adjacent within a day.
+        area: t.area,
         // S2: bias this task's forecast by its life-area's own velocity (shrunk
         // toward the global bias; a sparse/new area resolves back to it).
         model: toSegmentModel(g.velocityModel.forSegment(t.area)),
