@@ -109,6 +109,7 @@ import {
   globalForecastJoint,
   recoveryMoves,
   sheddableSkillNodes,
+  skillPathRescheduleMoves,
   skillRecoveryMoves,
   type CandidateTask,
   type ForecastOptions,
@@ -2369,6 +2370,23 @@ const MOVE_SPECS: { [K in StrategyMoveKind]: MoveSpec<K> } = {
     }),
     persist: async (p) => {
       await setSkillNodeDeferred(p.nodeId, true);
+      return {};
+    },
+  },
+  reschedule_skill: {
+    // Parks the whole milestone chain (`parkNodeIds`, which includes the descoped
+    // checkpoint). Snapshot each node's deferral pre-image so undo un-parks the exact
+    // set — the restore loop is already field-aware (an entry carrying `deferred`
+    // un-parks via `setSkillNodeDeferred`). Mirrors `triage`'s batch handling.
+    snapshot: async (p) => ({
+      tasks: [],
+      goals: [],
+      skillNodes: (
+        await Promise.all(p.parkNodeIds.map((id) => snapshotSkillNodeDeferral(id)))
+      ).flat(),
+    }),
+    persist: async (p) => {
+      await Promise.all(p.parkNodeIds.map((id) => setSkillNodeDeferred(id, true)));
       return {};
     },
   },
@@ -5113,6 +5131,18 @@ function buildRecoveryPlan(
       )
     : [];
 
+  // Learning goals: which frontier milestone chains, if re-phased out of the current
+  // push, recover odds. The middle lever between deferSkill (one optional leaf) and
+  // re-dating the whole goal — parks a checkpoint plus the prep that serves only it.
+  const rescheduleSkill = offTrack
+    ? skillPathRescheduleMoves(
+        g.skillNodesByProject.get(projectId) ?? [],
+        candidates.map((t) => t.estimated_minutes),
+        deployable,
+        opts,
+      )
+    : [];
+
   // Re-date only when the current deadline can't already clear the target, and
   // only ever suggest a *later* date (pulling it earlier never helps).
   let reschedule: RecoveryPlan["reschedule"] = null;
@@ -5199,6 +5229,7 @@ function buildRecoveryPlan(
     goalCost,
     defer,
     deferSkill,
+    rescheduleSkill,
     reschedule,
     sequence,
     overdue,
