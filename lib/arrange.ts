@@ -307,7 +307,8 @@ function seqDepsValid(
  * Best-improvement local search over pairwise swaps from a given `seed` order — the
  * "best-improvement" half of the design's locked "greedy best-improvement" search
  * (`design/s3b-arrangement-optimizer.md`; only the greedy CONSTRUCTION shipped before, this
- * completes it). The greedy construction is one-step myopic: because a task's window
+ * completes it). `sequenceDay` runs it from two starts (the greedy construction AND the canonical
+ * order) and keeps the better. The greedy construction is one-step myopic: because a task's window
  * — hence its energy multiplier — depends on the whole day-prefix, placing a big low-difficulty
  * task early can shove a hard task out of a fast window in a way a nearest-neighbour pick can't
  * foresee. Each pass scans every pair `(i,j)` and applies the SINGLE dependency-valid swap that
@@ -407,9 +408,20 @@ function sequenceDay(
     current = best.projectId ?? null;
     currentArea = best.area ?? null;
   }
-  // Repair the greedy's one-step myopia: a best-improvement local search over the constructed
-  // order (seeded from `out`, so never worse than the greedy). Dependency-valid, deterministic, bounded.
-  return improveDaySwaps(out, prereqs, segs, weights, thinBuffer);
+  // Repair the greedy's one-step myopia with a TWO-START best-improvement local search: descend
+  // from BOTH the greedy construction (`out`) and the canonical bucket order (`entries`, itself a
+  // valid topological order) and keep the lower-`J` result. The greedy is the better start in most
+  // days (it groups first), but its myopic construction can occasionally score ABOVE the order it
+  // was handed; also descending from the canonical order guarantees the arrangement is NEVER worse
+  // than the input — J-level no-regret, the same anchor the odds gate holds. Both starts run to a
+  // swap-local-optimum, so the min is one too. Ties keep the greedy-seeded result (closest to the
+  // designed construction). Deterministic + dependency-valid throughout.
+  const fromGreedy = improveDaySwaps(out, prereqs, segs, weights, thinBuffer);
+  const fromCanonical = improveDaySwaps(entries.slice(), prereqs, segs, weights, thinBuffer);
+  return dayScore(fromCanonical, segs, weights, thinBuffer) <
+    dayScore(fromGreedy, segs, weights, thinBuffer) - COST_EPSILON
+    ? fromCanonical
+    : fromGreedy;
 }
 
 /**
