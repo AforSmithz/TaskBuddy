@@ -79,6 +79,9 @@ export const RECOVERY_STYLE_PREFERENCES: Record<
     unblock: 0.5,
     defer: -0.5,
     defer_skill: -0.5,
+    // Descopes a near-term milestone to protect the date — the mirror of
+    // reschedule_deadline (which protect_work reaches for), so a mild last resort.
+    reschedule_skill: -0.5,
     skip_activity: -0.5,
     triage: -1,
   },
@@ -88,6 +91,9 @@ export const RECOVERY_STYLE_PREFERENCES: Record<
     triage: 0.5,
     defer: 0.5,
     defer_skill: 0.5,
+    // Hits the date by sliding a milestone chain out of the near-term push —
+    // exactly the protect_dates thesis.
+    reschedule_skill: 0.5,
     reshape: 0.5,
     skip_activity: 0.25,
     unblock: 0.5,
