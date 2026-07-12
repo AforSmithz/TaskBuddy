@@ -482,22 +482,41 @@ export function recoveryMoves(
 }
 
 /**
+ * The non-checkpoint leaf skill nodes of a goal that can be parked without
+ * abandoning it — the sheddability rule shared by `skillRecoveryMoves` (the
+ * per-goal `defer_skill` move) and the pit-wall's cross-project skill triage,
+ * so both paths agree on what is safe to park. A node qualifies only if:
+ *  - **the goal has more than one open node** — a single remaining node is the
+ *    whole goal, and parking it is abandonment, not recovery;
+ *  - **it is not a checkpoint** — a checkpoint is a milestone; parking one
+ *    abandons the goal's demonstrable bar (the "never shed the goal's bar" twin
+ *    of the pit-wall "never shed a project's last task" invariant);
+ *  - **nothing still-open depends on it** — parking a prerequisite would strand
+ *    its dependents, so only leaves of the open frontier qualify.
+ *
+ * `deferred`/`attained` nodes are already out of the plan and ignored. Returned
+ * unsorted — each caller imposes its own shed order (ascending effort for
+ * `skillRecoveryMoves`, value density for the pit wall). Pure.
+ */
+export function sheddableSkillNodes(nodes: SkillNode[]): SkillNode[] {
+  const open = nodes.filter((n) => !n.attained && !n.deferred);
+  if (open.length <= 1) return [];
+  const hasOpenDependent = (id: string) =>
+    open.some((n) => n.prerequisites.includes(id));
+  return open.filter((n) => !n.is_checkpoint && !hasOpenDependent(n.id));
+}
+
+/**
  * Per-skill recovery for a learning goal: which non-checkpoint skill nodes, if
  * parked out of the current push, recover probability. The learning-goal analogue
  * of `recoveryMoves`.
  *
  * The forecast reasons over BOTH the goal's real tasks and its unattained skill
  * effort, so a node is measured by removing its estimate from that combined pool.
+ * Only `sheddableSkillNodes` are offered (never a checkpoint, never a node
+ * something still-open depends on, never the goal's last node).
  *
- * Only *sheddable* nodes are offered:
- *  - **never a checkpoint** — a checkpoint is a milestone; parking one abandons the
- *    goal's demonstrable bar, not the deadline (the "never shed the goal's bar"
- *    twin of the pit-wall "never shed a project's last task" invariant);
- *  - **never a node something still-open depends on** — parking a prerequisite would
- *    strand its dependents, so only leaves of the open frontier qualify.
- *
- * `deferred`/`attained` nodes are already out of the plan and ignored. Best
- * improvement first; each kept move actually lifts the odds (> current + 0.01).
+ * Best improvement first; each kept move actually lifts the odds (> current + 0.01).
  */
 export function skillRecoveryMoves(
   nodes: SkillNode[],
@@ -518,13 +537,11 @@ export function skillRecoveryMoves(
     options,
   ).probability;
 
-  const hasOpenDependent = (id: string) =>
-    open.some((n) => n.prerequisites.includes(id));
   // Cheapest-to-give-up first (skills carry no priority_score, so ascending effort
   // is the tie order); then keep only the ones that actually help.
-  const candidates = open
-    .filter((n) => !n.is_checkpoint && !hasOpenDependent(n.id))
-    .sort((a, b) => a.estimated_minutes - b.estimated_minutes);
+  const candidates = sheddableSkillNodes(nodes).sort(
+    (a, b) => a.estimated_minutes - b.estimated_minutes,
+  );
 
   const moves: SkillRecoveryMove[] = [];
   for (const node of candidates) {
