@@ -147,11 +147,15 @@ function dayOffset(today: string, iso: string): number {
 //
 // `arrangeOrder` re-sequences the canonical order WITHIN each near-horizon day. It
 // buckets the order by the greedy pack offsets (so a bucket = a day's tasks), then
-// runs a deterministic, dependency-safe greedy over each bucket that minimises the
+// runs a deterministic, dependency-safe search over each bucket that minimises the
 // per-pick marginal `J = w_switch·(project changed) + w_energy·difficulty·(netMult−1)`.
 // Picking a task advances the day's cumulative minutes, which selects the next task's
 // start window (hence its `netMult`) — so within a project's cluster the greedy slots
 // cognitively-HARD work into the day's FASTEST windows while continuing that cluster.
+// The search is two-stage (design's "greedy best-improvement"): a greedy CONSTRUCTION,
+// then a best-improvement swap loop (`improveDaySwaps`) that repairs the greedy's one-step
+// myopia (a task's window depends on the whole day-prefix, not just its predecessor) — the
+// second stage only ever accepts strict `J` drops, so it is never worse than the greedy.
 // With no window profile the energy term is 0 and it reduces EXACTLY to context-switch
 // clustering (continue current project among ready blocks, else lowest-canonical-rank);
 // with a single task per day it is the identity. Pure + RNG-free ⇒ the client replays it.
@@ -198,6 +202,12 @@ function daySegments(
 /** Float-comparison slack for the marginal-`J` tiebreak (the canonical rank breaks
  *  near-equal costs, so identical inputs ⇒ identical sequence). */
 const COST_EPSILON = 1e-9;
+
+/** Safety cap on best-improvement passes per day (`improveDaySwaps`). Each accepted pass
+ *  strictly lowers the day `J`, so a local optimum is reached in far fewer than this for a
+ *  real day bucket (a handful of tasks); the bound only guards against a pathological float
+ *  landscape. Not a tuning knob — the search is exhaustive within a pass, this just terminates it. */
+const ARRANGE_MAX_IMPROVE_STEPS = 64;
 
 /**
  * The four UNWEIGHTED soft-objective terms of placing `e` next — the per-pick contribution to the
@@ -246,11 +256,112 @@ function marginalJ(
 }
 
 /**
+ * The full-day soft score `J` of a within-day sequence: `Σ_t marginalJ(t | prev-project,
+ * prev-area, window-at-cursor)` — the exact per-day slice `arrangementFeatures` weights and sums,
+ * so the best-improvement search descends the SAME objective the scorer and calibrator price. The
+ * window a task lands in is `windowIndexAt(cum)`, i.e. it depends on the running cumulative minutes
+ * — on the WHOLE prefix, not just the immediate predecessor. That coupling is precisely what a
+ * one-step greedy construction can misjudge, and what best-improvement repairs. Pure. */
+function dayScore(
+  seq: readonly EffectiveOrderEntry[],
+  segs: { caps: number[]; mult: number[] },
+  weights: ArrangeWeights,
+  thinBuffer: ReadonlyMap<string, number>,
+): number {
+  let cum = 0;
+  let J = 0;
+  let current: string | null | undefined;
+  let currentArea: string | null | undefined;
+  for (const e of seq) {
+    const mult = segs.mult[windowIndexAt(cum, segs.caps)];
+    J += marginalJ(e, current, currentArea, mult, weights, thinBuffer);
+    cum += Math.max(0, e.estimatedMinutes);
+    current = e.projectId ?? null;
+    currentArea = e.area ?? null;
+  }
+  return J;
+}
+
+/** True when `seq` respects every same-day prerequisite (each in-bucket prereq of a task appears
+ *  at an earlier position). A candidate swap is admitted only if it keeps this — so best-improvement
+ *  never moves a task before a same-day prerequisite. Cross-day prereqs are honoured by the bucketing
+ *  (an earlier day fully precedes a later one), so `prereqs` holds only same-bucket edges. Pure. */
+function seqDepsValid(
+  seq: readonly EffectiveOrderEntry[],
+  prereqs: Map<string, Set<string>>,
+): boolean {
+  const pos = new Map<string, number>();
+  seq.forEach((e, i) => pos.set(e.taskId, i));
+  for (let i = 0; i < seq.length; i++) {
+    const reqs = prereqs.get(seq[i].taskId);
+    if (!reqs) continue;
+    for (const r of reqs) {
+      const rp = pos.get(r);
+      if (rp !== undefined && rp > i) return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Best-improvement local search over pairwise swaps from a given `seed` order — the
+ * "best-improvement" half of the design's locked "greedy best-improvement" search
+ * (`design/s3b-arrangement-optimizer.md`; only the greedy CONSTRUCTION shipped before, this
+ * completes it). The greedy construction is one-step myopic: because a task's window
+ * — hence its energy multiplier — depends on the whole day-prefix, placing a big low-difficulty
+ * task early can shove a hard task out of a fast window in a way a nearest-neighbour pick can't
+ * foresee. Each pass scans every pair `(i,j)` and applies the SINGLE dependency-valid swap that
+ * most lowers the day `J`, repeating to a local optimum or `ARRANGE_MAX_IMPROVE_STEPS`.
+ *
+ * Deterministic (no RNG; fixed scan order; a swap is accepted only on a STRICT improvement beyond
+ * `COST_EPSILON`, so on a near-tie the earliest-scanned pair wins) and monotone (`J` strictly
+ * decreases each accepted pass) ⇒ the result is NEVER worse than the `seed` and IS a
+ * swap-local-optimum, and the pure client re-solve replays it exactly (S1 parity, no new shipped
+ * input). With no window profile the energy+buffer terms vanish and `J` is the switch+domain count,
+ * so a swap only fires to undo a dependency-forced grouping the greedy couldn't avoid — still an
+ * odds-neutral within-day permutation. Pure. */
+function improveDaySwaps(
+  seed: EffectiveOrderEntry[],
+  prereqs: Map<string, Set<string>>,
+  segs: { caps: number[]; mult: number[] },
+  weights: ArrangeWeights,
+  thinBuffer: ReadonlyMap<string, number>,
+): EffectiveOrderEntry[] {
+  const n = seed.length;
+  if (n < 2) return seed; // nothing to swap
+  let cur = seed;
+  let curJ = dayScore(cur, segs, weights, thinBuffer);
+  for (let step = 0; step < ARRANGE_MAX_IMPROVE_STEPS; step++) {
+    let bestJ = curJ;
+    let bestSeq: EffectiveOrderEntry[] | null = null;
+    for (let i = 0; i < n - 1; i++) {
+      for (let j = i + 1; j < n; j++) {
+        const cand = cur.slice();
+        [cand[i], cand[j]] = [cand[j], cand[i]];
+        if (!seqDepsValid(cand, prereqs)) continue;
+        const candJ = dayScore(cand, segs, weights, thinBuffer);
+        if (candJ < bestJ - COST_EPSILON) {
+          bestJ = candJ;
+          bestSeq = cand;
+        }
+      }
+    }
+    if (!bestSeq) break; // local optimum
+    cur = bestSeq;
+    curJ = bestJ;
+  }
+  return cur;
+}
+
+/**
  * Re-sequence one day's tasks to descend `J` (switches + energy misfit), staying
- * dependency-valid. Greedy, deterministic: among the ready tasks (same-day prereqs
- * emitted), take the one with the lowest marginal cost for the current cursor —
- * continuing the project (no switch) and, in a fast window, preferring hard work
- * (the energy reward). Ties break on canonical rank, so the result is reproducible.
+ * dependency-valid, in two stages: a deterministic greedy CONSTRUCTION, then a
+ * best-improvement local search (`improveDaySwaps`) that repairs the greedy's one-step
+ * myopia — together the design's "greedy best-improvement". The greedy: among the ready
+ * tasks (same-day prereqs emitted), take the one with the lowest marginal cost for the
+ * current cursor — continuing the project (no switch) and, in a fast window, preferring
+ * hard work (the energy reward). Ties break on canonical rank, so the result is reproducible;
+ * the improvement pass only ever accepts strict `J` drops, so it is never worse than the greedy.
  */
 function sequenceDay(
   entries: EffectiveOrderEntry[],
@@ -296,7 +407,9 @@ function sequenceDay(
     current = best.projectId ?? null;
     currentArea = best.area ?? null;
   }
-  return out;
+  // Repair the greedy's one-step myopia: a best-improvement local search over the constructed
+  // order (seeded from `out`, so never worse than the greedy). Dependency-valid, deterministic, bounded.
+  return improveDaySwaps(out, prereqs, segs, weights, thinBuffer);
 }
 
 /**
