@@ -25,6 +25,7 @@ import {
   setGoalCriterionMet,
   setGoalKind,
   setSkillNodeAttained,
+  setTriageItemDeferred,
   listSkillNodes,
   listAllSkillNodes,
   listSkillTaskLinksForGoal,
@@ -388,25 +389,26 @@ export async function deferTaskAction(
 }
 
 /**
- * Apply a pit-wall triage move in one shot: defer a batch of tasks (the
- * lowest-value work auto chose to shed, or a colliding project's open work the
- * user chose to sacrifice). Like a single defer, each is reversible from the
- * project's Deferred section.
+ * Apply a pit-wall triage move in one shot: defer a batch of work (the
+ * lowest-value tasks auto chose to shed, or a colliding project's open work the
+ * user chose to sacrifice). The batch may mix real tasks with a learning goal's
+ * skill lanes; `setTriageItemDeferred` routes each to the right persist. Like a
+ * single defer, each is reversible from the project's Deferred section.
  */
 export async function applyTriageAction(taskIds: string[]): Promise<void> {
   await requireUser();
-  await Promise.all(taskIds.map((id) => updateTask(id, { deferred: true })));
+  await Promise.all(taskIds.map((id) => setTriageItemDeferred(id, true)));
   await revalidateAll();
 }
 
 /**
- * Reverse a triage batch: bring the deferred tasks back into scope. Backs the
+ * Reverse a triage batch: bring the deferred work back into scope. Backs the
  * pit wall's "Undo" on an auto-applied deferral, so an automatic move is never a
- * one-way door.
+ * one-way door. Mirrors `applyTriageAction`'s task/skill routing.
  */
 export async function undoTriageAction(taskIds: string[]): Promise<void> {
   await requireUser();
-  await Promise.all(taskIds.map((id) => updateTask(id, { deferred: false })));
+  await Promise.all(taskIds.map((id) => setTriageItemDeferred(id, false)));
   await revalidateAll();
 }
 
