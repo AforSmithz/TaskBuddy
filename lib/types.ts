@@ -634,6 +634,22 @@ export interface SkillRecoveryMove {
   /** Probability if this skill node were parked out of the current push. */
   probabilityAfter: number;
 }
+/** A learning goal's per-path recovery move: re-phase a frontier milestone chain
+ *  out of the current push. Unlike {@link SkillRecoveryMove} (one optional leaf),
+ *  this parks a checkpoint together with the prerequisites that exist ONLY to serve
+ *  it — a strand-free set — so the goal can commit to a reduced set of milestones
+ *  by the deadline and slide the rest. `nodeIds` includes `checkpointId`. */
+export interface SkillPathRescheduleMove {
+  /** The descoped checkpoint (the milestone that slides out of the push). */
+  checkpointId: string;
+  checkpointTitle: string;
+  /** The full strand-free park-set (checkpoint + its exclusive open prereqs). */
+  nodeIds: string[];
+  /** Titles parallel to `nodeIds`. */
+  titles: string[];
+  /** Probability if this whole chain were parked out of the current push. */
+  probabilityAfter: number;
+}
 
 /** A forecast attached to its project — what the UI renders. */
 export interface ProjectForecast extends ForecastResult {
@@ -757,6 +773,11 @@ export interface RecoveryPlan {
    *  improvement first. Empty for project goals and for goals with no sheddable
    *  skill effort. */
   deferSkill: SkillRecoveryMove[];
+  /** Re-phase these frontier milestone chains (learning goals) out of the current
+   *  push to recover; best improvement first. Each parks a checkpoint plus its
+   *  exclusive prereqs. Empty for project goals and when no milestone can slide
+   *  without stranding a kept one. */
+  rescheduleSkill: SkillPathRescheduleMove[];
   /** Earliest deadline clearing the target probability, or null if out of reach. */
   reschedule: RescheduleMove | null;
   /** Dependency-aware order to tackle the remaining open work (advisory). */
@@ -1116,6 +1137,13 @@ export type StrategyMoveKind =
   // of `defer`). Sheds its effort from the current push so the checkpoints + date
   // fit; reversible. NEVER sheds a checkpoint (that would abandon a milestone).
   | "defer_skill"
+  // Re-phase a whole milestone CHAIN out of the current push (the learning-goal
+  // analogue of a scoped `reschedule`). Parks a frontier checkpoint together with
+  // the prerequisites that exist only to serve it, as one reversible unit — the
+  // middle lever between `defer_skill` (one optional leaf, never a milestone) and
+  // `reschedule_deadline` (push the whole goal date). Unlike `defer_skill` it may
+  // touch a checkpoint; the dropped milestone is surfaced honestly via `goalCost`.
+  | "reschedule_skill"
   // §5.6 slice 6b — resolve a structural blocker: mark it done + cascade one-hop
   // edge removal over `task_dependencies` (frees its direct dependents) + stamp
   // free-text provenance. Distinct from `unblock` (which clears the SOFT
@@ -1185,6 +1213,23 @@ export type StrategyMovePayload =
       goalId: string;
       nodeId: string;
       title: string;
+    }
+  | {
+      // Re-phase a milestone chain: park a frontier checkpoint (`nodeId`) AND every
+      // node in its strand-free park-set (`parkNodeIds`, which includes `nodeId`) out
+      // of the current push. Persist sets `skill_nodes.deferred` on the whole set; the
+      // forecast twin drops each one's `skill:`+id synthetic task. Self-contained (the
+      // full set rides on the payload) so a cached strategy applies without re-deriving
+      // the closure — a stale id simply no-ops.
+      kind: "reschedule_skill";
+      goalId: string;
+      /** The descoped checkpoint (the milestone that slides). */
+      nodeId: string;
+      title: string;
+      /** The full park-set node ids (includes `nodeId` and its exclusive prereqs). */
+      parkNodeIds: string[];
+      /** Titles parallel to `parkNodeIds`, for the card's shed list. */
+      parkTitles: string[];
     }
   | { kind: "triage"; taskIds: string[]; titles: string[] }
   | { kind: "add_tasks"; tasks: SuggestedTask[] }
