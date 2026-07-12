@@ -269,6 +269,33 @@ function buildDeterministicCandidates(
       });
     }
 
+    // Learning-goal recovery: re-phase a frontier milestone chain out of the current
+    // push. Slides a checkpoint + the prep that serves only it, keeping the earlier
+    // milestones and the deadline; the descoped milestone is surfaced via goalCost.
+    for (const m of plan.rescheduleSkill) {
+      const extra = m.nodeIds.length - 1;
+      const chain =
+        extra > 0 ? ` and ${extra} prep ${extra === 1 ? "step" : "steps"}` : "";
+      out.push({
+        move: candidateMove({
+          kind: "reschedule_skill",
+          projectId,
+          projectName,
+          rationale: `Re-phase the milestone "${m.checkpointTitle}"${chain} in ${projectName} to a later run — it keeps the earlier milestones and the deadline on track.`,
+          probabilityAfter: m.probabilityAfter,
+          payload: {
+            kind: "reschedule_skill",
+            goalId: projectId,
+            nodeId: m.checkpointId,
+            title: m.checkpointTitle,
+            parkNodeIds: m.nodeIds,
+            parkTitles: m.titles,
+          },
+        }),
+        label: `Re-phase milestone "${m.checkpointTitle}" (${projectName})`,
+      });
+    }
+
     if (plan.reschedule) {
       out.push({
         move: candidateMove({
