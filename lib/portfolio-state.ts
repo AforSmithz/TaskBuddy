@@ -249,6 +249,15 @@ export function applyMoveToAlloc(
         tasks: state.tasks.filter((t) => t.id !== SKILL_TASK_PREFIX + p.nodeId),
       };
 
+    case "reschedule_skill": {
+      // Re-phasing a milestone chain parks its whole node set (checkpoint + exclusive
+      // prep); drop each parked node's `skill:`+id synthetic task, freeing their
+      // combined budget — the defer_skill drop mechanic generalized to a set (as triage
+      // does for real tasks). The enumerator guarantees the set is strand-free.
+      const drop = new Set(p.parkNodeIds.map((id) => SKILL_TASK_PREFIX + id));
+      return { ...state, tasks: state.tasks.filter((t) => !drop.has(t.id)) };
+    }
+
     case "triage": {
       const drop = new Set(p.taskIds);
       return { ...state, tasks: state.tasks.filter((t) => !drop.has(t.id)) };
