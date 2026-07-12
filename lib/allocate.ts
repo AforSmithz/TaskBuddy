@@ -518,27 +518,32 @@ export interface TriageCandidate {
 }
 
 /**
- * The shed order: open tasks of the conflicted (over-budget) projects, lowest
+ * The shed order: open work of the conflicted (over-budget) projects, lowest
  * value-density first — the lowest-WSJF "doomed" work whose hours are best spent
  * rescuing higher-value projects (locked decision #3). Blocked/done work excluded.
  *
- * Skill lanes are excluded too: a `skill:`-prefixed synthetic has no task row, so
- * shedding it here would drop it from the forecast preview but no-op on persist
- * (`updateTask` matches nothing). Parking a skill has its own move now (`defer_skill`),
- * which writes `skill_nodes.deferred`, so triage stays a real-task-only operation.
+ * A learning goal's skill lanes compete in the same shed order as real tasks
+ * (cross-project skill triage), but a `skill:`-prefixed synthetic has no task row,
+ * so parking one must go through `skill_nodes.deferred` — and only *sheddable*
+ * nodes may be parked (non-checkpoint leaves; see `sheddableSkillNodes`). The
+ * caller passes `sheddableSkillIds` (the eligible `skill:<nodeId>` ids) and the
+ * persist layer routes those to `setSkillNodeDeferred`. A skill lane not in the
+ * set is skipped: shedding it would move the forecast preview but no-op on
+ * persist. Default empty ⇒ real-task-only triage (backwards-compatible).
  */
 export function triageCandidates(
   tasks: AllocTask[],
   conflictedProjectIds: Set<string>,
   deadlineByProject: Map<string, string | null>,
   today: string,
+  sheddableSkillIds: Set<string> = new Set(),
 ): TriageCandidate[] {
   return tasks
     .filter(
       (t) =>
         conflictedProjectIds.has(t.projectId) &&
         t.status !== "done" &&
-        !t.id.startsWith(SKILL_TASK_PREFIX),
+        (!t.id.startsWith(SKILL_TASK_PREFIX) || sheddableSkillIds.has(t.id)),
     )
     .map((task) => ({
       task,
