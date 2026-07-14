@@ -1,0 +1,4 @@
+# Secrets and one-off extraction artefacts. Never commit these.
+env.sh
+seed_users.sql
+*.pem
