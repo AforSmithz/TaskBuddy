@@ -1,4 +1,5 @@
-# Secrets and one-off extraction artefacts. Never commit these.
+# Secrets and carried-over credential material. Never commit these.
 env.sh
 seed_users.sql
+seed-users.sh
 *.pem
