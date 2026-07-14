@@ -96,6 +96,33 @@ function clientFor(uid: string) {
     );
 }
 
+/**
+ * Await a setup write and throw if it failed.
+ *
+ * The shim resolves errors instead of rejecting — that is the contract, and it
+ * is the right one — but it means an unchecked setup write leaves a null for
+ * some later assertion to trip over, three steps from the actual cause. Every
+ * arrangement step in this file goes through here.
+ */
+async function must(
+  what: string,
+  p: PromiseLike<{ data: unknown; error: { message: string } | null }>,
+): Promise<unknown> {
+  const res = await p;
+  if (res.error) throw new Error(`setup "${what}" failed: ${res.error.message}`);
+  return res.data;
+}
+
+/** The single row from a `.maybeSingle()`, or throw. */
+async function one(
+  what: string,
+  p: PromiseLike<{ data: unknown; error: { message: string } | null }>,
+): Promise<Record<string, unknown>> {
+  const data = await must(what, p);
+  if (!data) throw new Error(`setup "${what}" returned no row`);
+  return data as Record<string, unknown>;
+}
+
 const ALICE = randomUUID();
 const BOB = randomUUID();
 
@@ -111,7 +138,8 @@ async function main(): Promise<void> {
     super: boolean;
     bypass: boolean;
   }>(
-    "select current_user, usesuper as super, userbypassrls as bypass from pg_user where usename = current_user",
+    "select current_user, rolsuper as super, rolbypassrls as bypass " +
+      "from pg_roles where rolname = current_user",
   );
   check("connected as taskbuddy_app", who.rows[0].current_user, "taskbuddy_app");
   check("the app role is not a superuser", who.rows[0].super, false);
@@ -141,20 +169,21 @@ async function main(): Promise<void> {
 
   // --- 2. type parsers, against real column types --------------------------
   const goalId = randomUUID();
-  await alice("goals").insert({
-    id: goalId,
-    user_id: ALICE,
-    title: "Harness goal",
-    kind: "project",
-    status: "active",
-    deadline: "2026-12-25",
-  });
+  await must(
+    "goal insert",
+    alice("goals").insert({
+      id: goalId,
+      user_id: ALICE,
+      name: "Harness goal",
+      kind: "project",
+      deadline: "2026-12-25",
+    }),
+  );
 
-  const goal = (
-    (await alice("goals").select("*").eq("id", goalId).maybeSingle()) as {
-      data: Record<string, unknown>;
-    }
-  ).data;
+  const goal = await one(
+    "goal read",
+    alice("goals").select("*").eq("id", goalId).maybeSingle(),
+  );
 
   check(
     "date comes back as a raw 'YYYY-MM-DD' string, NOT a Date (D.5)",
@@ -168,34 +197,40 @@ async function main(): Promise<void> {
   );
 
   const entryId = randomUUID();
-  await alice("entries").insert({
-    id: entryId,
-    user_id: ALICE,
-    goal_id: goalId,
-    title: "Harness entry",
-    kind: "meeting",
-    status: "active",
-    risks: ["late supplier", "scope creep"],
-    stakeholders: [{ name: "Dana", role: "PM" }],
-  });
+  await must(
+    "entry insert",
+    alice("entries").insert({
+      id: entryId,
+      user_id: ALICE,
+      goal_id: goalId,
+      title: "Harness entry",
+      raw_input: "notes from the harness",
+      kind: "meeting",
+      status: "active",
+      risks: ["late supplier", "scope creep"],
+      stakeholders: [{ name: "Dana", role: "PM" }],
+    }),
+  );
 
   const taskId = randomUUID();
-  await alice("tasks").insert({
-    id: taskId,
-    entry_id: entryId,
-    goal_id: goalId,
-    title: "Harness task",
-    status: "todo",
-    sort_index: 0,
-    priority_score: 4.5,
-    due_date: "2026-09-01",
-  });
+  await must(
+    "task insert",
+    alice("tasks").insert({
+      id: taskId,
+      entry_id: entryId,
+      goal_id: goalId,
+      title: "Harness task",
+      status: "todo",
+      sort_index: 0,
+      priority_score: 4.5,
+      due_date: "2026-09-01",
+    }),
+  );
 
-  const task = (
-    (await alice("tasks").select("*").eq("id", taskId).maybeSingle()) as {
-      data: Record<string, unknown>;
-    }
-  ).data;
+  const task = await one(
+    "task read",
+    alice("tasks").select("*").eq("id", taskId).maybeSingle(),
+  );
 
   checkThat(
     "numeric comes back as a NUMBER, not a string (D.5)",
@@ -211,11 +246,10 @@ async function main(): Promise<void> {
   check("due_date stays a string", task.due_date, "2026-09-01");
 
   // --- 3. jsonb round-trip -------------------------------------------------
-  const entry = (
-    (await alice("entries").select("*").eq("id", entryId).maybeSingle()) as {
-      data: Record<string, unknown>;
-    }
-  ).data;
+  const entry = await one(
+    "entry read",
+    alice("entries").select("*").eq("id", entryId).maybeSingle(),
+  );
   check(
     "a jsonb ARRAY survives the round trip (this is what breaks silently)",
     entry.risks,
@@ -228,21 +262,22 @@ async function main(): Promise<void> {
   // plan_versions.restore is the one that breaks undo if it is missed (G-10).
   const versionId = randomUUID();
   const restore = { tasks: [{ id: taskId, sort_index: 3 }] };
-  await alice("plan_versions").insert({
-    id: versionId,
-    user_id: ALICE,
-    label: "harness",
-    moves: [{ kind: "reorder" }],
-    restore,
-    odds_before: 0.4,
-    odds_after: 0.7,
-  });
-  const version = (
-    (await alice("plan_versions")
-      .select("*")
-      .eq("id", versionId)
-      .maybeSingle()) as { data: Record<string, unknown> }
-  ).data;
+  await must(
+    "plan_version insert",
+    alice("plan_versions").insert({
+      id: versionId,
+      user_id: ALICE,
+      reason: "harness",
+      moves: [{ kind: "reorder" }],
+      restore,
+      odds_before: 0.4,
+      odds_after: 0.7,
+    }),
+  );
+  const version = await one(
+    "plan_version read",
+    alice("plan_versions").select("*").eq("id", versionId).maybeSingle(),
+  );
   check("plan_versions.restore round-trips — undo depends on it", version.restore, restore);
   check("plan_versions.moves (an array) round-trips", version.moves, [
     { kind: "reorder" },
@@ -286,15 +321,18 @@ async function main(): Promise<void> {
 
   // --- 5. the live .update({}) path (G-9) ----------------------------------
   const activityId = randomUUID();
-  await alice("recurring_activities").insert({
-    id: activityId,
-    user_id: ALICE,
-    title: "Harness activity",
-    cadence_period: "week",
-    cadence_count: 1,
-    weekdays: [1, 3, 5],
-    active: true,
-  });
+  await must(
+    "activity insert",
+    alice("recurring_activities").insert({
+      id: activityId,
+      user_id: ALICE,
+      title: "Harness activity",
+      period: "week",
+      target_count: 1,
+      weekdays: [1, 3, 5],
+      active: true,
+    }),
+  );
   const emptyPatch = await alice("recurring_activities")
     .update({})
     .eq("id", activityId)
@@ -305,24 +343,25 @@ async function main(): Promise<void> {
     emptyPatch,
     { data: null, error: null },
   );
-  const activity = (
-    (await alice("recurring_activities")
-      .select("*")
-      .eq("id", activityId)
-      .maybeSingle()) as { data: Record<string, unknown> }
-  ).data;
+  const activity = await one(
+    "activity read",
+    alice("recurring_activities").select("*").eq("id", activityId).maybeSingle(),
+  );
   check("…and changed nothing", activity.weekdays, [1, 3, 5]);
 
   // --- 6. maybeSingle over >1 row -----------------------------------------
   const t2 = randomUUID();
-  await alice("tasks").insert({
-    id: t2,
-    entry_id: entryId,
-    goal_id: goalId,
-    title: "Harness task 2",
-    status: "todo",
-    sort_index: 1,
-  });
+  await must(
+    "second task insert",
+    alice("tasks").insert({
+      id: t2,
+      entry_id: entryId,
+      goal_id: goalId,
+      title: "Harness task 2",
+      status: "todo",
+      sort_index: 1,
+    }),
+  );
   const ambiguous = (await alice("tasks")
     .select("*")
     .eq("entry_id", entryId)
@@ -336,9 +375,12 @@ async function main(): Promise<void> {
 
   // --- 7. upsert -----------------------------------------------------------
   for (const hours of [3, 7]) {
-    await alice("availability").upsert(
-      { id: randomUUID(), user_id: ALICE, weekday: 2, hours },
-      { onConflict: "user_id,weekday" },
+    await must(
+      `availability upsert (${hours}h)`,
+      alice("availability").upsert(
+        { id: randomUUID(), user_id: ALICE, weekday: 2, hours },
+        { onConflict: "user_id,weekday" },
+      ),
     );
   }
   const avail = (await alice("availability").select("*").eq("weekday", 2)) as {
