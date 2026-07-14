@@ -71,6 +71,20 @@ export function AuthForm({ mode }: { mode: "login" | "signup" }) {
           />
         </div>
 
+        {isSignup && (
+          <div>
+            <FieldLabel htmlFor="code">Invite code</FieldLabel>
+            <TextField
+              id="code"
+              name="code"
+              type="password"
+              autoComplete="off"
+              placeholder="Ask the workspace owner"
+              required
+            />
+          </div>
+        )}
+
         {state.error && (
           <p className="flex items-start gap-1.5 rounded-sm bg-[var(--color-danger-subtle)] px-2.5 py-2 text-[13px] text-[var(--color-danger)]">
             <AlertCircle className="mt-px size-4 shrink-0" />

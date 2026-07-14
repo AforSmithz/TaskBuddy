@@ -1,7 +1,7 @@
 import { Sidebar } from "@/components/layout/sidebar";
 import { TopBar } from "@/components/layout/top-bar";
 import { LocalNowBeacon } from "@/components/layout/local-now-beacon";
-import { isSupabaseConfigured } from "@/lib/store";
+import { isDbConfigured } from "@/lib/store";
 import { isLLMConfigured } from "@/lib/extraction";
 import { requireUser, displayName } from "@/lib/auth";
 
@@ -14,7 +14,7 @@ export default async function AppLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
   const user = await requireUser();
-  const demoMode = !isSupabaseConfigured() || !isLLMConfigured();
+  const demoMode = !isDbConfigured() || !isLLMConfigured();
   const name = displayName(user);
   const firstName = name.split(/\s+/)[0];
 
