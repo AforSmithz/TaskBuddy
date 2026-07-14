@@ -187,20 +187,16 @@ import {
   type AllocContext,
   type ResolveInput,
 } from "./portfolio-state";
-import { getRequestClient } from "./supabase";
+import { getRequestClient } from "./db/shim";
+import { isDbConfigured } from "./db/pool";
 
 // Central data layer.
-// Uses Supabase when configured; otherwise an in-memory store seeded with
+// Uses PostgreSQL when configured; otherwise an in-memory store seeded with
 // sample data so the app is fully demoable without any backend setup.
-// Every Supabase query runs through a request-scoped client carrying the
-// user's session, so Row Level Security scopes reads and writes to that user.
+// Every query runs through a request-scoped client carrying the user's session,
+// so Row Level Security scopes reads and writes to that user.
 
-export function isSupabaseConfigured(): boolean {
-  return Boolean(
-    process.env.NEXT_PUBLIC_SUPABASE_URL &&
-      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
-  );
-}
+export { isDbConfigured };
 
 type RequestClient = Awaited<ReturnType<typeof getRequestClient>>;
 
@@ -252,7 +248,7 @@ interface PostgrestResult {
 
 /** Throw if the query failed. All a write with no returning rows needs. */
 function mustOk(res: Pick<PostgrestResult, "error">, what: string): void {
-  if (res.error) throw new Error(`Supabase ${what} failed: ${res.error.message}`);
+  if (res.error) throw new Error(`DB ${what} failed: ${res.error.message}`);
 }
 
 /** Rows from a read, or throw. An empty list means the table really was empty. */
@@ -593,7 +589,7 @@ export async function createGoal(
     deadline: null,
     created_at: new Date().toISOString(),
   };
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     const user_id = await currentUserId(supabase);
     mustOk(
@@ -608,7 +604,7 @@ export async function createGoal(
 }
 
 export async function listGoals(): Promise<Goal[]> {
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     return mustRows<Goal>(
       await supabase
@@ -625,7 +621,7 @@ export async function listGoals(): Promise<Goal[]> {
 }
 
 export async function getGoal(id: string): Promise<Goal | null> {
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     return mustOne<Goal>(
       await supabase.from("goals").select("*").eq("id", id).maybeSingle(),
@@ -638,7 +634,7 @@ export async function getGoal(id: string): Promise<Goal | null> {
 
 /** Reclassify a goal as a project or a learning goal. */
 export async function setGoalKind(id: string, kind: GoalKind): Promise<void> {
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     mustOk(
       await supabase.from("goals").update({ kind }).eq("id", id),
@@ -657,7 +653,7 @@ export async function setGoalKind(id: string, kind: GoalKind): Promise<void> {
 export async function listGoalCriteria(
   goalId: string,
 ): Promise<GoalCriterion[]> {
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     return mustRows<GoalCriterion>(
       await supabase
@@ -690,7 +686,7 @@ export async function addGoalCriterion(
     sort_index: existing.length,
     created_at: new Date().toISOString(),
   };
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     mustOk(
       await supabase.from("goal_criteria").insert(row),
@@ -715,7 +711,7 @@ export async function setGoalCriterionMet(
     met,
     met_confidence: met ? confidence : null,
   };
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     mustOk(
       await supabase.from("goal_criteria").update(patch).eq("id", id),
@@ -730,7 +726,7 @@ export async function setGoalCriterionMet(
 
 /** Remove a criterion from a goal's definition of done. */
 export async function removeGoalCriterion(id: string): Promise<void> {
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     mustOk(
       await supabase.from("goal_criteria").delete().eq("id", id),
@@ -753,7 +749,7 @@ export async function setGoalCriterionDegraded(
   note: string | null,
 ): Promise<void> {
   const degraded_note = note?.trim() || null;
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     mustOk(
       await supabase.from("goal_criteria").update({ degraded_note }).eq("id", id),
@@ -769,7 +765,7 @@ export async function setGoalCriterionDegraded(
 /** Every definition-of-done criterion across all goals — the forecast gather's
  *  bulk read (one query instead of N), so divergence detection sees real DoD. */
 export async function listAllGoalCriteria(): Promise<GoalCriterion[]> {
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     return mustRows<GoalCriterion>(
       await supabase
@@ -787,7 +783,7 @@ export async function listAllGoalCriteria(): Promise<GoalCriterion[]> {
 
 /** A learning goal's skill nodes, oldest-first (already in graph order). */
 export async function listSkillNodes(goalId: string): Promise<SkillNode[]> {
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     return mustRows<SkillNode>(
       await supabase
@@ -807,7 +803,7 @@ export async function listSkillNodes(goalId: string): Promise<SkillNode[]> {
 /** Every skill node across all goals — the forecast gather's bulk read (one query
  *  instead of N), so a learning goal's effort can enter the joint forecast. */
 export async function listAllSkillNodes(): Promise<SkillNode[]> {
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     return mustRows<SkillNode>(
       await supabase
@@ -829,7 +825,7 @@ export async function listSkillTaskLinksForGoal(goalId: string): Promise<SkillTa
   const nodes = await listSkillNodes(goalId);
   const nodeIds = new Set(nodes.map((n) => n.id));
   if (nodeIds.size === 0) return [];
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     return mustRows<SkillTaskLink>(
       await supabase
@@ -847,7 +843,7 @@ export async function listSkillTaskLinksForGoal(goalId: string): Promise<SkillTa
 /** Only the confirmed links, across every goal — the set spillover is allowed to
  *  act on. Suggested links are inert until the user says yes; dismissed stay dead. */
 export async function listConfirmedSkillTaskLinks(): Promise<SkillTaskLink[]> {
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     return mustRows<SkillTaskLink>(
       await supabase.from("skill_task_links").select("*").eq("status", "confirmed"),
@@ -872,7 +868,7 @@ export async function insertSuggestedLinks(
     rationale: r.rationale,
     created_at: new Date().toISOString(),
   }));
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     return mustRows<SkillTaskLink>(
       await supabase.from("skill_task_links").insert(created).select(),
@@ -889,7 +885,7 @@ export async function setSkillTaskLinkStatus(
   linkId: string,
   status: SkillTaskLinkStatus,
 ): Promise<void> {
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     mustOk(
       await supabase.from("skill_task_links").update({ status }).eq("id", linkId),
@@ -934,7 +930,7 @@ export async function replaceSkillNodes(
     created_at: createdAt,
   }));
 
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     // Must throw: a swallowed delete followed by a successful insert would leave
     // the goal carrying two overlapping skill graphs.
@@ -970,7 +966,7 @@ export async function setSkillNodeAttained(
     attained_confidence: attained ? confidence : null,
     attained_at: attained ? new Date().toISOString() : null,
   };
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     mustOk(
       await supabase.from("skill_nodes").update(patch).eq("id", id),
@@ -996,7 +992,7 @@ export async function setSkillNodeDeferred(
     deferred,
     deferred_at: deferred ? new Date().toISOString() : null,
   };
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     mustOk(
       await supabase.from("skill_nodes").update(patch).eq("id", id),
@@ -1038,7 +1034,7 @@ export async function createDraft(
     ...opts,
     status: "draft",
   });
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     await persistSupabase(assembled);
   } else {
     await ensureSeeded();
@@ -1080,7 +1076,7 @@ export async function confirmDraft(
       : null;
   const area = classification.area.trim() || "Work";
 
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     if (declined.size) {
       // Cascades remove dependency edges for these tasks.
@@ -1135,7 +1131,7 @@ export async function confirmDraft(
 
 /** Delete a draft entirely (used when the user discards it during review). */
 export async function discardDraft(entryId: string): Promise<void> {
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     // Child rows cascade on entry delete.
     mustOk(
@@ -1154,7 +1150,7 @@ export async function discardDraft(entryId: string): Promise<void> {
 }
 
 export async function listEntries(): Promise<Entry[]> {
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     return mustRows<Entry>(
       await supabase
@@ -1172,7 +1168,7 @@ export async function listEntries(): Promise<Entry[]> {
 }
 
 export async function getEntry(id: string): Promise<EntryDetail | null> {
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     const entry = mustOne<Entry>(
       await supabase.from("entries").select("*").eq("id", id).maybeSingle(),
@@ -1248,7 +1244,7 @@ export async function getEntrySchedule(
 
 /** All tasks belonging to active (non-draft) entries. */
 export async function listAllTasks(): Promise<Task[]> {
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     const active = mustRows<{ id: string }>(
       await supabase.from("entries").select("id").eq("status", "active"),
@@ -1275,7 +1271,7 @@ export async function listAllTasks(): Promise<Task[]> {
 
 /** All dependency edges belonging to active (non-draft) entries. */
 export async function listAllDependencies(): Promise<TaskDependency[]> {
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     const active = mustRows<{ id: string }>(
       await supabase.from("entries").select("id").eq("status", "active"),
@@ -1320,7 +1316,7 @@ export async function updateTask(
     >
   >,
 ): Promise<Task | null> {
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     // `null` here means no row matched the id, never that the update failed.
     return mustOne<Task>(
@@ -1407,7 +1403,7 @@ export async function setProjectDeadline(
   projectId: string,
   deadline: string | null,
 ): Promise<void> {
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     mustOk(
       await supabase.from("goals").update({ deadline }).eq("id", projectId),
@@ -1422,7 +1418,7 @@ export async function setProjectDeadline(
 
 /** The user's weekly availability template — all 7 weekdays, defaults merged in. */
 export async function getAvailability(): Promise<Availability[]> {
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     return mergeAvailability(
       mustRows<Availability>(
@@ -1439,7 +1435,7 @@ export async function getAvailability(): Promise<Availability[]> {
 export async function setAvailability(
   rows: { weekday: number; hours: number }[],
 ): Promise<void> {
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     const user_id = await currentUserId(supabase);
     const payload = rows.map((r) => ({
@@ -1471,7 +1467,7 @@ export async function setAvailability(
  * a new user is never surprised by tasks the strategist deferred on its own.
  */
 export async function getAutoStrategy(): Promise<boolean> {
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     const row = mustOne<{ auto_strategy?: boolean }>(
       await supabase.from("user_settings").select("auto_strategy").maybeSingle(),
@@ -1485,7 +1481,7 @@ export async function getAutoStrategy(): Promise<boolean> {
 
 /** Set the pit-wall automation mode (one row per user, upserted). */
 export async function setAutoStrategy(value: boolean): Promise<void> {
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     const user_id = await currentUserId(supabase);
     mustOk(
@@ -1505,7 +1501,7 @@ export async function setAutoStrategy(value: boolean): Promise<void> {
 
 /** The user's value model — importance weights + recovery style. Defaults when unset. */
 export async function getValueModel(): Promise<ValueModel> {
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     const row = mustOne<{ model?: unknown }>(
       await supabase.from("value_model").select("model").maybeSingle(),
@@ -1523,7 +1519,7 @@ export async function getValueModel(): Promise<ValueModel> {
 /** Persist the value model (one row per user, upserted). Input is re-normalized. */
 export async function setValueModel(model: ValueModel): Promise<void> {
   const clean = normalizeValueModel(model);
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     const user_id = await currentUserId(supabase);
     mustOk(
@@ -1544,7 +1540,7 @@ export async function setValueModel(model: ValueModel): Promise<void> {
 /** The user's explicit per-window availability (S3b Phase 4), or the unset default
  *  (all-zero weights ⇒ the derived share is used). */
 export async function getWindowAvailability(): Promise<WindowAvailability> {
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     const row = mustOne<{ weights?: unknown }>(
       await supabase.from("window_availability").select("weights").maybeSingle(),
@@ -1562,7 +1558,7 @@ export async function getWindowAvailability(): Promise<WindowAvailability> {
 /** Persist the per-window availability (one row per user, upserted). Re-normalized. */
 export async function setWindowAvailability(avail: WindowAvailability): Promise<void> {
   const clean = normalizeWindowAvailability(avail);
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     const user_id = await currentUserId(supabase);
     mustOk(
@@ -1588,7 +1584,7 @@ export async function setWindowAvailability(avail: WindowAvailability): Promise<
  * its `fingerprint` to the current situation to decide fresh vs. stale.
  */
 export async function getCachedStrategy(): Promise<PortfolioStrategy | null> {
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     const row = mustOne<{ strategy?: PortfolioStrategy }>(
       await supabase.from("portfolio_strategy").select("strategy").maybeSingle(),
@@ -1604,7 +1600,7 @@ export async function getCachedStrategy(): Promise<PortfolioStrategy | null> {
 export async function setCachedStrategy(
   strategy: PortfolioStrategy,
 ): Promise<void> {
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     const user_id = await currentUserId(supabase);
     mustOk(
@@ -1636,7 +1632,7 @@ export async function setCachedStrategy(
  */
 export async function getCommittedPlan(): Promise<CommittedPlan | null> {
   let plan: CommittedPlan | null;
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     const row = mustOne<{ plan?: CommittedPlan }>(
       await supabase.from("committed_plan").select("plan").maybeSingle(),
@@ -1654,7 +1650,7 @@ export async function getCommittedPlan(): Promise<CommittedPlan | null> {
 /** Persist the committed plan (one row per user, upserted). Called only by the
  *  mutation-time roll (`commitRollingPlan`); the read path never writes. */
 export async function setCommittedPlan(plan: CommittedPlan): Promise<void> {
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     const user_id = await currentUserId(supabase);
     mustOk(
@@ -1688,7 +1684,7 @@ const PLAN_ROLL_CAP = 50;
  *  `commitRollingPlan` runs inside the mutation hook's swallowed try/catch, so a
  *  history-append failure can never break the mutation that triggered the roll. */
 async function insertPlanRoll(roll: PlanRoll): Promise<void> {
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     const user_id = await currentUserId(supabase);
     mustOk(
@@ -1773,7 +1769,7 @@ function rowToPlanRoll(r: PlanRollRow): PlanRoll {
  *  shown nor undone. Mirrors `listPlanVersions`. */
 export async function listPlanRolls(): Promise<PlanRoll[]> {
   let rolls: PlanRoll[];
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     rolls = mustRows<PlanRollRow>(
       await supabase
@@ -1792,7 +1788,7 @@ export async function listPlanRolls(): Promise<PlanRoll[]> {
 
 async function getPlanRoll(id: string): Promise<PlanRoll | null> {
   let roll: PlanRoll | null;
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     const row = mustOne<PlanRollRow>(
       await supabase.from("plan_rolls").select("*").eq("id", id).maybeSingle(),
@@ -1811,7 +1807,7 @@ async function getPlanRoll(id: string): Promise<PlanRoll | null> {
  *  superseded, hence what its undo restores. Null when `roll` is the earliest retained (it was
  *  the first-ever commit): undo then falls back to a fresh build (design §4). */
 async function priorPlanRoll(roll: PlanRoll): Promise<PlanRoll | null> {
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     const row = mustOne<PlanRollRow>(
       await supabase
@@ -1832,7 +1828,7 @@ async function priorPlanRoll(roll: PlanRoll): Promise<PlanRoll | null> {
 
 async function markPlanRollReverted(id: string): Promise<void> {
   const revertedAt = new Date().toISOString();
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     mustOk(
       await supabase
@@ -1866,7 +1862,7 @@ const PLAN_REORDER_CAP = 50;
  *  the call site (S3's `reorderTodayAction` runs the accrual inside the same swallowed
  *  path as the honoring commit), so a history-append failure can never break the drag. */
 export async function insertPlanReorder(reorder: PlanReorder): Promise<void> {
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     const user_id = await currentUserId(supabase);
     mustOk(
@@ -1940,7 +1936,7 @@ function rowToPlanReorder(r: PlanReorderRow): PlanReorder {
  *  them. Mirrors `listPlanRolls`. */
 export async function listPlanReorders(): Promise<PlanReorder[]> {
   let reorders: PlanReorder[];
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     reorders = mustRows<PlanReorderRow>(
       await supabase
@@ -1974,7 +1970,7 @@ const MOVE_CHOICE_CAP = 50;
 /** Append one offered-vs-kept observation and prune to the cap. Best-effort at the call
  *  site: an accrual failure must never break the bundle the user just applied. */
 export async function insertMoveChoice(choice: MoveChoice): Promise<void> {
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     const user_id = await currentUserId(supabase);
     mustOk(
@@ -2044,7 +2040,7 @@ function rowToMoveChoice(r: MoveChoiceRow): MoveChoice {
  *  can't be re-priced, so the calibrator skips them. Mirrors `listPlanReorders`. */
 export async function listMoveChoices(): Promise<MoveChoice[]> {
   let choices: MoveChoice[];
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     choices = mustRows<MoveChoiceRow>(
       await supabase
@@ -2097,7 +2093,7 @@ async function snapshotTaskFields(
 /** Batch-read tasks by id (current values) — for snapshotting + restore reads. */
 async function getTasksByIds(ids: string[]): Promise<Task[]> {
   if (ids.length === 0) return [];
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     return mustRows<Task>(
       await supabase.from("tasks").select("*").in("id", ids),
@@ -2116,7 +2112,7 @@ async function snapshotSkillNodeAttainment(
 ): Promise<(Partial<SkillNode> & { id: string })[]> {
   const fields = ["attained", "attained_confidence", "attained_at"] as const;
   let row: SkillNode | undefined;
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     row =
       mustOne<SkillNode>(
@@ -2139,7 +2135,7 @@ async function snapshotSkillNodeDeferral(
   id: string,
 ): Promise<(Partial<SkillNode> & { id: string })[]> {
   let row: SkillNode | undefined;
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     row =
       mustOne<SkillNode>(
@@ -2167,7 +2163,7 @@ async function getDependenciesByBlocker(blockerId: string): Promise<TaskDependen
 /** Delete dependency edges by id (supabase + memDB), mirroring `deleteTasks`. */
 async function deleteDependencies(ids: string[]): Promise<void> {
   if (ids.length === 0) return;
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     mustOk(
       await supabase.from("task_dependencies").delete().in("id", ids),
@@ -2186,7 +2182,7 @@ async function deleteDependencies(ids: string[]): Promise<void> {
  *  re-satisfies whatever FK/RLS admitted them. Mirrors `deleteTasks` across stores. */
 async function insertDependencies(rows: TaskDependency[]): Promise<void> {
   if (rows.length === 0) return;
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     mustOk(
       await supabase.from("task_dependencies").insert(rows),
@@ -2552,7 +2548,7 @@ function rowToPlanVersion(r: PlanVersionRow): PlanVersion {
 }
 
 async function insertPlanVersion(version: PlanVersion): Promise<void> {
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     const user_id = await currentUserId(supabase);
     mustOk(
@@ -2614,7 +2610,7 @@ async function prunePlanVersions(supabase: RequestClient): Promise<void> {
  * gathers consume it) — it throws.
  */
 export async function listPlanVersions(): Promise<PlanVersion[]> {
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     return bestEffortRows<PlanVersionRow>(
       await supabase
@@ -2630,7 +2626,7 @@ export async function listPlanVersions(): Promise<PlanVersion[]> {
 }
 
 async function getPlanVersion(id: string): Promise<PlanVersion | null> {
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     const row = mustOne<PlanVersionRow>(
       await supabase.from("plan_versions").select("*").eq("id", id).maybeSingle(),
@@ -2644,7 +2640,7 @@ async function getPlanVersion(id: string): Promise<PlanVersion | null> {
 
 async function markPlanVersionReverted(id: string): Promise<void> {
   const revertedAt = new Date().toISOString();
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     mustOk(
       await supabase
@@ -2701,7 +2697,7 @@ export async function undoPlanVersion(id: string): Promise<void> {
 
 async function deleteTasks(ids: string[]): Promise<void> {
   if (ids.length === 0) return;
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     mustOk(
       await supabase.from("tasks").delete().in("id", ids),
@@ -2717,7 +2713,7 @@ async function deleteTasks(ids: string[]): Promise<void> {
 
 async function deleteEntries(ids: string[]): Promise<void> {
   if (ids.length === 0) return;
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     mustOk(
       await supabase.from("entries").delete().in("id", ids),
@@ -2733,7 +2729,7 @@ async function deleteEntries(ids: string[]): Promise<void> {
 
 async function deleteActivityCompletions(ids: string[]): Promise<void> {
   if (ids.length === 0) return;
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     mustOk(
       await supabase.from("activity_completions").delete().in("id", ids),
@@ -2749,7 +2745,7 @@ async function deleteActivityCompletions(ids: string[]): Promise<void> {
 
 /** Override the template for one specific date. */
 export async function setOverride(date: string, hours: number): Promise<void> {
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     const user_id = await currentUserId(supabase);
     mustOk(
@@ -2773,7 +2769,7 @@ export async function setOverride(date: string, hours: number): Promise<void> {
 /** Upcoming logged commitments (today onward). */
 export async function listCommitments(): Promise<Commitment[]> {
   const today = todayISO();
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     return mustRows<Commitment>(
       await supabase
@@ -2822,7 +2818,7 @@ async function appendActivityDrain(budget: TimeBudget): Promise<TimeBudget> {
 /** Raw time-budget inputs — the real availability/overrides/commitments, NO
  *  recurring drain folded in (so callers that need the un-drained set can get it). */
 async function getRawTimeBudget(): Promise<TimeBudget> {
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     const [avail, over, comm] = await Promise.all([
       supabase.from("availability").select("*"),
@@ -2858,7 +2854,7 @@ async function getTimeBudget(): Promise<TimeBudget> {
 
 /** All recurring activities for the user (active and archived). */
 export async function listRecurringActivities(): Promise<RecurringActivity[]> {
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     return mustRows<RecurringActivity>(
       await supabase
@@ -2876,7 +2872,7 @@ export async function listRecurringActivities(): Promise<RecurringActivity[]> {
 
 /** The full completion log for the user (all activities, all dates). */
 export async function listActivityCompletions(): Promise<ActivityCompletion[]> {
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     return mustRows<ActivityCompletion>(
       await supabase
@@ -2928,7 +2924,7 @@ export async function createRecurringActivity(
     active: true,
     created_at: new Date().toISOString(),
   };
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     const user_id = await currentUserId(supabase);
     mustOk(
@@ -2965,7 +2961,7 @@ export async function updateRecurringActivity(
     >
   >,
 ): Promise<RecurringActivity | null> {
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     // `null` here means no row matched the id, never that the update failed.
     return mustOne<RecurringActivity>(
@@ -2999,7 +2995,7 @@ export async function logActivityCompletion(
     skipped: false,
     created_at: new Date().toISOString(),
   };
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     const user_id = await currentUserId(supabase);
     mustOk(
@@ -3046,7 +3042,7 @@ export async function logWorkSession(input: {
     created_at: new Date().toISOString(),
   };
   try {
-    if (isSupabaseConfigured()) {
+    if (isDbConfigured()) {
       const supabase = await getRequestClient();
       const user_id = await currentUserId(supabase);
       mustOk(
@@ -3064,7 +3060,7 @@ export async function logWorkSession(input: {
 
 /** All work sessions, oldest-first — the slice-C velocity/energy reads' source. */
 export async function listWorkSessions(): Promise<WorkSession[]> {
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     return mustRows<WorkSession>(
       await supabase
@@ -3096,7 +3092,7 @@ export async function skipActivity(
     skipped: true,
     created_at: new Date().toISOString(),
   };
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     const user_id = await currentUserId(supabase);
     mustOk(
@@ -3115,7 +3111,7 @@ export async function unskipActivity(
   date?: string,
 ): Promise<void> {
   const day = (date ?? todayISO()).slice(0, 10);
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     mustOk(
       await supabase
@@ -3174,7 +3170,7 @@ export async function skipActivityForWeek(activityId: string): Promise<string[]>
     skipped: true,
     created_at: new Date().toISOString(),
   }));
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     const user_id = await currentUserId(supabase);
     mustOk(
@@ -3225,7 +3221,7 @@ export async function getOrCreateErrandsProject(): Promise<{
   projectId: string;
   entryId: string;
 }> {
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     const user_id = await currentUserId(supabase);
     // Must throw, not degrade: a swallowed read here reports "no errands goal" and
@@ -3348,7 +3344,7 @@ export async function createErrandTask(
     sort_index: 0,
     created_at: new Date().toISOString(),
   };
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     mustOk(await supabase.from("tasks").insert(task), "errand task insert");
   } else {
@@ -4863,7 +4859,7 @@ export async function logCommitment(
     label: label?.trim() || null,
     created_at: new Date().toISOString(),
   };
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     const supabase = await getRequestClient();
     const user_id = await currentUserId(supabase);
     mustOk(
@@ -5728,7 +5724,7 @@ async function persistRecoveryEntry(
     tasks: taskRows,
     deps: [],
   };
-  if (isSupabaseConfigured()) {
+  if (isDbConfigured()) {
     await persistSupabase(assembled);
   } else {
     await ensureSeeded();
