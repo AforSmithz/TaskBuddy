@@ -42,3 +42,13 @@ next-env.d.ts
 
 # playwright mcp scratch
 .playwright-mcp/
+
+# local agent tooling and scratch notes (kept on disk, not tracked)
+.agents/
+.claude/
+.mcp.json
+skills-lock.json
+CLAUDE.md
+AGENTS.md
+HANDOFF.md
+OVERHAUL.md
