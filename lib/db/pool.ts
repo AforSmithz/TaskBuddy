@@ -12,13 +12,24 @@ import { attachDatabasePool } from "@vercel/functions";
 // SIZING. The database is a Burstable B1ms: 50 connections total, ~35 usable
 // once the platform takes its 15. A single dashboard render fires roughly 21
 // concurrent statements (`store.ts` gatherForecast, a 13-way Promise.all, inside
-// forecastDashboard's 8-way). With `max: 2` those queue inside one instance
-// instead of racing to exhaust the server, and Fluid Compute scale-out is what
-// adds throughput. PgBouncer is not available on the Burstable tier, so there is
-// no server-side pooler to fall back on.
+// forecastDashboard's 8-way). Those queue against the pool instead of racing to
+// exhaust the server, and Fluid Compute scale-out is what adds throughput.
+// PgBouncer is not available on the Burstable tier, so there is no server-side
+// pooler to fall back on.
+//
+// `max: 6` and not 2. The ceiling is ~35 usable connections; this app has two
+// users, so at most a handful of Fluid Compute instances are warm at once and
+// the realistic worst case is ~18 of 35. At `max: 2` those 21 statements
+// serialised into about eleven round-trip batches, which is a latency cost paid
+// for traffic that does not exist. Six takes it to about four batches.
+//
+// The safety net for that judgement is a metric alert on `active_connections`
+// (fires above 25), so the assumption is watched rather than merely asserted.
+// If you raise this further, raise that alert with it — and remember the number
+// is per instance, not per deployment.
 //
 // This is a module-scope singleton on purpose. A per-request pool would multiply
-// 2 by the number of in-flight requests and blow through 35 immediately.
+// `max` by the number of in-flight requests and blow through 35 immediately.
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -69,7 +80,7 @@ function buildPool(): Pool {
       ...(ca ? { ca } : {}),
       servername: url.hostname,
     },
-    max: 2,
+    max: 6,
     idleTimeoutMillis: 10_000,
     connectionTimeoutMillis: 10_000,
     // Belt and braces against G-5: the server-side
@@ -123,13 +134,31 @@ export async function withUser<T>(
   if (!UUID_RE.test(uid)) {
     // Never reachable from a verified session token, but an invalid uuid here
     // would surface as a confusing 22P02 from deep inside a policy check.
+    // This check is also what makes the interpolation below safe — see there.
     throw new Error("Invalid user id.");
   }
 
   const client = await getPool().connect();
   try {
-    await client.query("BEGIN");
-    await client.query("select set_config('app.user_id', $1, true)", [uid]);
+    // BEGIN and the GUC in ONE round trip rather than two.
+    //
+    // Passing no `values` makes node-postgres use the simple query protocol,
+    // which accepts several semicolon-separated statements per message. The
+    // extended protocol — anything with parameters — does not, which is why
+    // this cannot be written with a $1 placeholder.
+    //
+    // INTERPOLATING `uid` IS SAFE HERE, AND ONLY HERE, because it has just been
+    // matched against UUID_RE above: the only characters that survive that test
+    // are hex digits and hyphens, so there is no quote to escape and nothing to
+    // inject. Keep the two adjacent. If the guard ever moves or softens, this
+    // line has to go back to a parameterised `set_config` and pay the extra
+    // round trip.
+    //
+    // Worth it because every statement in the app pays this: four round trips
+    // per statement becomes three, ~25% off the database time of every render.
+    await client.query(
+      `BEGIN; select set_config('app.user_id', '${uid}', true)`,
+    );
     const out = await fn(client);
     await client.query("COMMIT");
     return out;
