@@ -40,13 +40,18 @@ Add a `.env.local` file (copy `.env.local.example`) and fill in:
    - `NEXT_PUBLIC_SUPABASE_URL`
    - `SUPABASE_SERVICE_ROLE_KEY` (server-only — never exposed to the browser)
 
-### 2. OpenRouter (LLM extraction)
+### 2. Microsoft Foundry (LLM extraction)
 
-1. Get an API key at <https://openrouter.ai/keys>.
-2. Set `OPENROUTER_API_KEY` and (optionally) `OPENROUTER_MODEL`.
+1. Provision the Foundry resource and its two model deployments — the exact
+   `az` commands are in `azure/FOUNDRY.md` §6.
+2. Set `AZURE_FOUNDRY_ENDPOINT` and `AZURE_FOUNDRY_API_KEY`.
 
-Once a key set is present, TaskBuddy switches that layer over automatically —
-no code change. If an LLM call fails, it falls back to the heuristic extractor.
+Once both are present, TaskBuddy switches that layer over automatically — no
+code change. If an LLM call fails, it falls back to the heuristic extractor.
+
+The primary deployment is `gpt-5-mini` and the fallback is `gpt-4.1-mini`, both
+in `koreacentral`. That region is not a preference: `eastasia`, where the
+database lives, has zero model quota on this subscription.
 
 ## How it works
 
@@ -85,4 +90,4 @@ pnpm lint     # ESLint
 ## Stack
 
 Next.js 16 (App Router) · React 19 · TypeScript · Tailwind CSS v4 ·
-lucide-react · Supabase · OpenRouter.
+lucide-react · Azure PostgreSQL · Microsoft Foundry.
