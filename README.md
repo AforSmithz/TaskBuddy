@@ -90,24 +90,26 @@ cannot return another account's data even if the application logic is wrong.
 
 ## Infrastructure
 
-The whole Azure stack is defined as Bicep in `azure/infra/`. Read
-`azure/infra/README.md` before deploying: several properties are immutable after
-creation, so a careless apply can replace a resource rather than update it. A
-GitHub Actions workflow posts a what-if plan on
-any PR touching infrastructure, authenticating through OIDC federation with a
-`Reader` role, so CI can show the blast radius without holding credentials that
-could change anything.
+The whole Azure stack is defined as Bicep in `azure/infra/`. Always run
+`az deployment group what-if` before applying: several properties on the
+Postgres server are cost controls sitting exactly on the free-tier edge, and
+changing `storageSizeGB`, `autoGrow`, `skuName`, `highAvailability` or
+`geoRedundantBackup` moves the server off $0/mo. A GitHub Actions workflow posts
+that what-if plan on any PR touching infrastructure, authenticating through OIDC
+federation with a `Reader` role, so CI can show the blast radius without holding
+credentials that could change anything.
 
 On Vercel the app authenticates to Foundry with a federated workload identity
 exchanged from a per-invocation OIDC assertion, so no long-lived Azure secret is
 stored in the deployment.
 
-Further reading:
-
-- `azure/README.md` for the migration and its live verification
-- `azure/FOUNDRY.md` for model choice, region and quota
-- `azure/VERCEL.md` for deployment and firewall configuration
-- `azure/SPEC.md` for the full specification
+Two region constraints worth knowing before provisioning. The subscription's
+`sys.regionrestriction` policy allows only `japanwest`, `centralindia`,
+`indonesiacentral`, `koreacentral` and `eastasia`, and a disallowed region fails
+*after* the CLI prints "Creating PostgreSQL Server", so it reads as a transient
+error. Postgres sits in `eastasia` paired with Vercel's `hkg1` because the db
+layer runs a transaction per statement and latency dominates. Foundry cannot sit
+beside it: `eastasia` has zero model quota, so it runs in `koreacentral`.
 
 ## Scripts
 
