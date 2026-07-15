@@ -1,44 +1,98 @@
 import "server-only";
 import type { ExtractedSkill, SkillDecomposition } from "./types";
-import type { ChatMessage } from "./openrouter";
-import { callOpenRouterJSON } from "./openrouter";
+import type { ChatMessage } from "./foundry";
+import { callFoundryJSON } from "./foundry";
 import { isLLMConfigured } from "./extraction";
 
 // Learning-goal decomposer (Engine 1, the LLM-proposes half of §0). Turns a
 // stated learning goal into a prerequisite graph of skills + checkpoints. The
 // LLM proposes the structure and the effort estimates; progress and scheduling
 // are decided elsewhere. Falls back to an offline heuristic when no API key is
-// configured, so the feature works without OpenRouter.
+// configured, so the feature works without Foundry.
 
-const SYSTEM_PROMPT = `You are TaskBuddy's learning coach. You turn a stated learning
-goal into a prerequisite graph of concrete skills to master, ordered from
-foundations to mastery.
+const MIN_SKILLS = 3;
+const MAX_SKILLS = 9;
+const MIN_MINUTES = 30;
+const MAX_MINUTES = 1200;
 
-Return ONLY a JSON object with this exact shape (no markdown, no commentary):
-
-{
-  "skills": [{
-    "key": string,              // unique slug, e.g. "s1", referenced by prerequisites
-    "title": string,            // the capability, phrased as something you can DO
-    "description": string,      // one sentence: what mastering this looks like
-    "prerequisites": string[],  // keys of skills that must be learned first
-    "is_checkpoint": boolean,   // true for a verifiable milestone you can demonstrate
-    "estimated_minutes": number // realistic practice time to attain this skill
-  }]
-}
+const SYSTEM_PROMPT = `Turn a stated learning goal into a prerequisite graph of concrete skills to master.
 
 Rules:
-- Produce 5–9 skills. Order them foundations-first; later skills depend on earlier ones.
-- prerequisites must reference earlier keys only — no cycles, no self-references.
-- Phrase each title as a demonstrable capability ("Hold a 5-minute conversation"),
-  not a topic ("Conversation"). Checkpoints are the ones you could prove to someone.
-- Mark 2–4 skills as checkpoints: real milestones, spread across the graph (not all
-  at the end). Foundational drills are usually NOT checkpoints.
-- estimated_minutes is cumulative practice for THAT skill alone, not the whole goal.`;
+- Produce 5 to 9 skills. Never more than 9: a longer list is worse than a shorter one.
+- List skills in topological order: a skill's prerequisites must all appear earlier in the array. Parallel foundations with no prerequisites are fine and expected. Do not invent a dependency to force a single chain.
+- Phrase each title as a demonstrable capability ("Hold a 5-minute conversation"), not a topic ("Conversation").
+- Exactly 2 to 4 skills are checkpoints. A skill is a checkpoint if and only if someone else could watch you do it and agree you can do it. When in doubt it is NOT a checkpoint. At least one checkpoint sits in the first half of the list, and the final skill is always one.
+- estimated_minutes is practice time for THAT skill alone, not the whole goal, in minutes, between 30 and 1200.
+- Write titles and descriptions in the same language as the stated goal.
+- If the goal is empty, nonsensical, or is not a learning goal at all (an errand or a one-off task), return an empty skills array and nothing else.`;
 
-/** Reject a semantically-empty decomposition so the model chain advances. */
+// Strict schema. The per-field guidance that used to live in the prompt's shape
+// block now rides on the property descriptions, where the model reads it beside
+// the constraint. The 5-9 count and the 2-4 checkpoint count cannot be
+// expressed here at all, so they stay in prose and are enforced below.
+const DECOMPOSITION_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["skills"],
+  properties: {
+    skills: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: [
+          "key",
+          "title",
+          "description",
+          "prerequisites",
+          "is_checkpoint",
+          "estimated_minutes",
+        ],
+        properties: {
+          key: {
+            type: "string",
+            description: 'Lowercase slug, unique within this response, e.g. "s1".."s9".',
+          },
+          title: {
+            type: "string",
+            description: "The capability, phrased as something you can DO.",
+          },
+          description: {
+            type: "string",
+            description: "One sentence, at most 20 words, on what mastering this looks like.",
+          },
+          prerequisites: {
+            type: "array",
+            items: { type: "string" },
+            description: "Keys of skills appearing EARLIER in this array.",
+          },
+          is_checkpoint: {
+            type: "boolean",
+            description: "A milestone someone else could watch you demonstrate.",
+          },
+          estimated_minutes: {
+            type: "integer",
+            description: "Practice minutes for this skill alone, 30 to 1200.",
+          },
+        },
+      },
+    },
+  },
+} as const;
+
+/**
+ * Reject a decomposition the pipeline cannot use, so the deployment chain
+ * advances. An EMPTY array is deliberately not rejected — the prompt now uses
+ * it to mean "this is not a learning goal", which is a real answer rather than
+ * a failure. What is rejected is an over-long graph or duplicate keys, neither
+ * of which a strict schema can catch.
+ */
 function isUsable(d: SkillDecomposition): boolean {
-  return Array.isArray(d?.skills) && d.skills.length > 0;
+  if (!Array.isArray(d?.skills)) return false;
+  if (d.skills.length === 0) return true;
+  if (d.skills.length < MIN_SKILLS || d.skills.length > 12) return false;
+  const keys = d.skills.map((s) => s?.key);
+  return new Set(keys).size === keys.length;
 }
 
 /**
@@ -62,9 +116,18 @@ export async function decomposeLearningGoal(
   ];
 
   try {
-    const result = await callOpenRouterJSON<SkillDecomposition>(messages, {
+    const result = await callFoundryJSON<SkillDecomposition>(messages, {
+      schema: DECOMPOSITION_SCHEMA as unknown as Record<string, unknown>,
+      schemaName: "skill_decomposition",
+      // The one genuinely structural call in the codebase: ordering, dependency
+      // structure and checkpoint placement. It was the worst served by the low
+      // effort the old wrapper hardcoded for every caller.
+      reasoningEffort: "medium",
       validate: isUsable,
     });
+    // An empty graph is the model saying "not a learning goal". Respect it
+    // rather than substituting the generic ladder, which would look like a
+    // successful decomposition of nonsense.
     return sanitizeSkills(result.skills);
   } catch (err) {
     console.error("decomposeLearningGoal failed, using heuristic:", err);
@@ -77,24 +140,28 @@ export async function decomposeLearningGoal(
  * unknown keys and any that would point at a later skill (which would imply a
  * cycle, since the prompt orders foundations-first). Keeps persistence honest
  * regardless of what the model returns.
+ *
+ * Still load-bearing after the move to a strict schema: the graph invariant,
+ * the count cap and the minute range are all outside what JSON Schema can
+ * express, and `maxItems` would truncate the array without telling the model.
  */
 function sanitizeSkills(skills: ExtractedSkill[]): ExtractedSkill[] {
   const seen = new Set<string>();
-  return skills.map((s) => {
+  return skills.slice(0, MAX_SKILLS).map((s) => {
     const prerequisites = (s.prerequisites ?? []).filter(
       (k) => k !== s.key && seen.has(k),
     );
     seen.add(s.key);
+    const minutes = Math.round(Number(s.estimated_minutes));
     return {
       key: s.key,
       title: s.title,
       description: s.description ?? "",
       prerequisites,
       is_checkpoint: Boolean(s.is_checkpoint),
-      estimated_minutes:
-        Number.isFinite(s.estimated_minutes) && s.estimated_minutes > 0
-          ? Math.round(s.estimated_minutes)
-          : 60,
+      estimated_minutes: Number.isFinite(minutes)
+        ? Math.min(MAX_MINUTES, Math.max(MIN_MINUTES, minutes))
+        : 60,
     };
   });
 }

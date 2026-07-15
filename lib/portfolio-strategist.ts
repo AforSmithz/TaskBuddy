@@ -20,7 +20,7 @@ import { isOnTrack } from "./types";
 import { aggregateCauseMovePref, causeMovePref } from "./grounding";
 import { goalValue, movePref, type ValueModel } from "./value-model";
 import type { AllocTask } from "./allocate";
-import type { ChatMessage } from "./openrouter";
+import type { ChatMessage } from "./foundry";
 import { isLLMConfigured } from "./extraction";
 import {
   createJointScorer,
@@ -478,61 +478,178 @@ and mix move types.
 You have three move types, each scoped to one project (by its "P#" ref):
 - "add_tasks": net-new corrective tasks that fill a genuine hole reality created
   (rework after a failed review, an unblock action, work to de-risk an overrun).
-- "reshape": reshape an EXISTING task (by its "T#" ref within that project) —
-  "scope_down" replaces it with a lighter version (smaller estimate), or "split"
-  breaks a vague/stuck monolith into 2-4 concrete steps whose total does not
-  exceed the original.
+  Fill "tasks"; leave "approach" and "modifications" null.
+- "reshape": reshape EXISTING tasks — "scope_down" replaces one with a lighter
+  version (smaller estimate), or "split" breaks a vague/stuck monolith into 2-4
+  concrete steps whose total does not exceed the original. Fill "modifications";
+  leave "approach" and "tasks" null.
 - "reroute": replace a project's ENTIRE open plan with a fundamentally different,
   lighter approach to the same deliverable (buy vs build, template vs scratch).
-
-Return ONLY a JSON object with this exact shape (no markdown, no commentary):
-
-{
-  "moves": [
-    {
-      "project": "P1",
-      "kind": "add_tasks",
-      "rationale": "one sentence: the gap these tasks fill",
-      "tasks": [{ "title": string, "description": string, "estimated_minutes": number,
-        "due_date": string|null, "blocked_by": string|null,
-        "gap_kind": "rework"|"unblock"|"de_risk",
-        "urgency": number, "impact": number, "dependency": number, "risk": number,
-        "effort": number, "confidence": number, "priority_reason": string }]
-    },
-    {
-      "project": "P1",
-      "kind": "reshape",
-      "rationale": "one sentence: the reshaping strategy",
-      "modifications": [{ "task_ref": "T1", "kind": "scope_down"|"split",
-        "rationale": string,
-        "replacements": [{ "title": string, "description": string,
-          "estimated_minutes": number, "urgency": number, "impact": number,
-          "dependency": number, "risk": number, "effort": number,
-          "confidence": number, "priority_reason": string }] }]
-    },
-    {
-      "project": "P2",
-      "kind": "reroute",
-      "approach": "short name of the alternative approach",
-      "rationale": "one sentence: how it differs and why it fits",
-      "tasks": [{ "title": string, "description": string, "estimated_minutes": number,
-        "due_date": string|null, "blocked_by": string|null,
-        "urgency": number, "impact": number, "dependency": number, "risk": number,
-        "effort": number, "confidence": number, "priority_reason": string }]
-    }
-  ]
-}
+  Fill "approach" and "tasks"; leave "modifications" null.
 
 Rules:
-- Propose moves ONLY where they genuinely help. If a project just needs its work
+- Propose a move ONLY where it genuinely helps. If a project just needs its work
   done or rearranged, propose nothing for it. An empty "moves" array is valid.
-- Only reference projects/tasks by the "P#"/"T#" refs you are given. Never invent a ref.
-- A scope_down's estimate MUST be smaller than the original; a split needs 2-4 steps
-  whose total does NOT exceed the original; a reroute must be materially lighter.
-- Score every 1-5 factor honestly (urgency, impact, dependency, risk, effort,
-  confidence), same scale as the existing tasks.
-- NEVER output a probability, percentage, or likelihood. You propose the work;
-  TaskBuddy scores the odds.`;
+- A reroute must cut at least a quarter of the project's remaining open hours, and a
+  reshape must reduce the project's total open minutes. Anything less is rejected before
+  the user ever sees it, so do not propose it.
+- At most one move per project. At most 4 tasks in an add_tasks, at most 3 modifications
+  in a reshape, at most 6 tasks in a reroute, and 1 replacement for a scope_down or 2 to 4
+  for a split.
+- Task refs are namespaced to their project: "P1.T1" belongs to P1, "P2.T1" to P2. A
+  reshape's "task_ref" must start with the same "P#" as its "project" field.
+- A project listed with "(no open tasks)" has nothing to reshape or reroute. Only
+  "add_tasks" is valid for it.
+- A scope_down's estimate MUST be smaller than the original; a split's steps MUST total
+  no more than the original.
+- Do not put percentages, probabilities or odds language in "rationale", "description",
+  "approach" or "priority_reason" — those strings are shown next to TaskBuddy's own
+  computed probability and must not compete with it.
+
+Score each 1-5 factor. Use the whole scale.
+- Urgency: 5=due today or tomorrow, 4=due this week, 3=due this month, 2=has a deadline beyond a month, 1=no deadline.
+- Impact: 5=directly unblocks the deliverable, 4=materially advances it, 3=useful supporting work, 2=nice to have, 1=optional.
+- Dependency: 5=blocks several other tasks, 4=blocks one major task, 3=blocks one minor task, 2=loosely coupled, 1=independent.
+- Risk: 5=delay seriously hurts the deadline, 4=delay causes visible slippage, 3=delay is recoverable, 2=minor consequence, 1=little consequence.
+- Effort: 5=more than 4h, 4=2-4h, 3=1-2h, 2=30-60min, 1=under 30min.
+- Confidence: 5=clearly needed, 4=very likely needed, 3=probably needed, 2=a guess with some support, 1=speculative.`;
+
+// The move is FLATTENED rather than encoded as a 3-way anyOf. Strict mode permits anyOf
+// on a non-root subschema, but flattening costs nothing here: the existing normalizers
+// each early-return [] on a non-array input, so a null in an inapplicable slot is already
+// a no-op, and scoreGenerativeMove dispatches on `kind` and never reads the other
+// branches' fields.
+const GEN_FACTOR = { type: "integer", enum: [1, 2, 3, 4, 5] };
+const GEN_FACTOR_KEYS = [
+  "urgency",
+  "impact",
+  "dependency",
+  "risk",
+  "effort",
+  "confidence",
+];
+const GEN_FACTOR_PROPS = {
+  urgency: GEN_FACTOR,
+  impact: GEN_FACTOR,
+  dependency: GEN_FACTOR,
+  risk: GEN_FACTOR,
+  effort: GEN_FACTOR,
+  confidence: GEN_FACTOR,
+};
+
+function genTaskObject(withGapKind: boolean) {
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: [
+      "title",
+      "description",
+      "estimated_minutes",
+      "due_date",
+      "blocked_by",
+      ...(withGapKind ? ["gap_kind"] : []),
+      ...GEN_FACTOR_KEYS,
+      "priority_reason",
+    ],
+    properties: {
+      title: { type: "string" },
+      description: { type: "string" },
+      estimated_minutes: { type: "integer" },
+      due_date: { type: ["string", "null"], description: "YYYY-MM-DD or null." },
+      blocked_by: { type: ["string", "null"] },
+      ...(withGapKind
+        ? {
+            gap_kind: {
+              type: "string",
+              enum: ["rework", "unblock", "de_risk"],
+            },
+          }
+        : {}),
+      ...GEN_FACTOR_PROPS,
+      priority_reason: { type: "string", description: "One sentence." },
+    },
+  };
+}
+
+/** Built per request so `project` and `task_ref` are closed sets. */
+export function generativeSchema(projectRefs: string[], taskRefs: string[]) {
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: ["moves"],
+    properties: {
+      moves: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: [
+            "project",
+            "kind",
+            "rationale",
+            "approach",
+            "tasks",
+            "modifications",
+          ],
+          properties: {
+            project: { type: "string", enum: projectRefs },
+            kind: {
+              type: "string",
+              enum: ["add_tasks", "reshape", "reroute"],
+            },
+            rationale: { type: "string", description: "One sentence." },
+            approach: {
+              type: ["string", "null"],
+              description: "reroute only; null otherwise.",
+            },
+            tasks: {
+              type: ["array", "null"],
+              description: "add_tasks and reroute only; null otherwise.",
+              items: genTaskObject(true),
+            },
+            modifications: {
+              type: ["array", "null"],
+              description: "reshape only; null otherwise.",
+              items: {
+                type: "object",
+                additionalProperties: false,
+                required: ["task_ref", "kind", "rationale", "replacements"],
+                properties: {
+                  task_ref: taskRefs.length
+                    ? { type: "string", enum: taskRefs }
+                    : { type: "string" },
+                  kind: { type: "string", enum: ["scope_down", "split"] },
+                  rationale: { type: "string", description: "One sentence." },
+                  replacements: {
+                    type: "array",
+                    items: {
+                      type: "object",
+                      additionalProperties: false,
+                      required: [
+                        "title",
+                        "description",
+                        "estimated_minutes",
+                        ...GEN_FACTOR_KEYS,
+                        "priority_reason",
+                      ],
+                      properties: {
+                        title: { type: "string" },
+                        description: { type: "string" },
+                        estimated_minutes: { type: "integer" },
+                        ...GEN_FACTOR_PROPS,
+                        priority_reason: { type: "string" },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+  };
+}
 
 interface RawGenerative {
   moves?: unknown;
@@ -600,15 +717,26 @@ async function proposeGenerativeCandidates(
   );
   if (ctxByRef.size === 0) return [];
 
-  const { callOpenRouterJSON } = await import("./openrouter");
+  const { callFoundryJSON } = await import("./foundry");
+  // Closed sets for both ref namespaces, so a cross-project or invented ref is
+  // structurally impossible rather than silently resolved against the wrong project.
+  const projectRefs = [...ctxByRef.keys()];
+  const allTaskRefs = projectRefs.flatMap((ref) =>
+    (ctxByRef.get(ref)?.openTasks ?? []).map((_, i) => `${ref}.T${i + 1}`),
+  );
   let raw: RawGenerative;
   try {
-    raw = await callOpenRouterJSON<RawGenerative>(
+    raw = await callFoundryJSON<RawGenerative>(
       [
         { role: "system", content: GENERATIVE_SYSTEM_PROMPT },
         { role: "user", content: buildGenerativePrompt(ctxByRef) },
       ],
-      { validate: (r) => Array.isArray(r.moves) },
+      {
+        schema: generativeSchema(projectRefs, allTaskRefs),
+        schemaName: "portfolio_generative_moves",
+        reasoningEffort: "medium",
+        validate: (r) => Array.isArray(r.moves),
+      },
     );
   } catch (err) {
     console.error("Generative proposal failed:", err);
@@ -625,7 +753,7 @@ async function proposeGenerativeCandidates(
     if (!ctx) continue;
     const projectId = ctx.project.id;
     const projectName = ctx.project.name;
-    const cand = scoreGenerativeMove(m, ctx, projectId, projectName);
+    const cand = scoreGenerativeMove(m, ctx, projectId, projectName, ref);
     if (cand) out.push(cand);
   }
   return out;
@@ -655,14 +783,11 @@ function buildGenerativePrompt(ctxByRef: Map<string, RecoveryContext>): string {
           if (t.blocked_by) flags.push(`blocked_by="${t.blocked_by}"`);
           if (t.due_date) flags.push(`due=${t.due_date.slice(0, 10)}`);
           const desc = t.description?.trim() ? ` — ${t.description.trim()}` : "";
-          return `  T${i + 1}: "${t.title}" (${t.estimated_minutes}m, ${flags.join(", ")})${desc}`;
+          return `  ${ref}.T${i + 1}: "${t.title}" (${t.estimated_minutes}m, ${flags.join(", ")})${desc}`;
         })
         .join("\n") || "  (no open tasks)";
     blocks.push(tasks, ``);
   }
-  blocks.push(
-    `Propose generative moves (add_tasks / reshape / reroute) only where they genuinely help. Empty is fine.`,
-  );
   return blocks.join("\n");
 }
 
@@ -672,6 +797,7 @@ function scoreGenerativeMove(
   ctx: RecoveryContext,
   projectId: string,
   projectName: string,
+  projectRef: string,
 ): Candidate | null {
   const kind = str(m.kind);
 
@@ -693,7 +819,7 @@ function scoreGenerativeMove(
   }
 
   if (kind === "reshape") {
-    const mods = normalizeReshape(m.modifications, ctx);
+    const mods = normalizeReshape(m.modifications, ctx, projectRef);
     if (mods.length === 0) return null;
     const prob = previewProbabilityWithModifications(ctx, mods);
     if (prob <= ctx.currentProbability + RESHAPE_MIN_GAIN) return null;
@@ -717,6 +843,9 @@ function scoreGenerativeMove(
   }
 
   if (kind === "reroute") {
+    // A project with nothing open has no plan to replace: the move would defer an empty
+    // set and "re-route" to a plan it was never compared against.
+    if (ctx.openTasks.length === 0) return null;
     const tasks = normalizeReroute(m.tasks);
     if (tasks.length === 0) return null;
     const prob = previewProbabilityWithReroute(ctx, tasks);
@@ -778,9 +907,18 @@ function normalizeAddTasks(raw: unknown, ctx: RecoveryContext): SuggestedTask[] 
   return out;
 }
 
-function normalizeReshape(raw: unknown, ctx: RecoveryContext): TaskModification[] {
+function normalizeReshape(
+  raw: unknown,
+  ctx: RecoveryContext,
+  projectRef: string,
+): TaskModification[] {
   if (!Array.isArray(raw)) return [];
-  const refs = new Map(ctx.openTasks.map((t, i) => [`T${i + 1}`, t]));
+  // Namespaced by project. The refs used to be rebuilt per project as bare T1..Tn, so
+  // "T1" existed once per project and a reshape naming another project's T1 resolved
+  // against THIS project's map — silently reshaping the wrong task, with no error.
+  const refs = new Map(
+    ctx.openTasks.map((t, i) => [`${projectRef}.T${i + 1}`, t]),
+  );
   const used = new Set<string>();
   const out: TaskModification[] = [];
 
@@ -906,8 +1044,8 @@ function planVsTimeDrift(
 
 // --- B3. Synthesis LLM call -------------------------------------------------
 
-const SYNTHESIS_SYSTEM_PROMPT = `You are TaskBuddy's portfolio strategist. The user lost time, missed some tasks,
-and competing projects share one pool of hours. The deterministic engine has
+const SYNTHESIS_SYSTEM_PROMPT = `You are TaskBuddy's portfolio strategist. Several projects may be off track, and all of
+them draw on one shared pool of hours. The deterministic engine has
 already forecast every project and precomputed a MENU of concrete candidate
 moves, each with the probability it would restore (always computed by the
 forecast, never by you).
@@ -916,27 +1054,49 @@ Your job: decide whether the portfolio needs to change at all, and if so, choose
 the FEWEST moves from the menu that put the whole portfolio back on the best
 footing — then write a short, plain-language assessment.
 
-Return ONLY a JSON object with this exact shape (no markdown, no commentary):
-
-{
-  "on_track": boolean,            // true => hold course; selected_move_ids may be empty
-  "assessment": string,           // 2-4 sentences across the whole portfolio, in plain language
-  "selected_move_ids": number[]   // ids from the menu, ORDERED best-first; [] is valid when on_track
-}
-
 Rules:
 - Select ONLY from the given menu, by id. NEVER invent a move, a task, or a
   probability. If you want an action that isn't on the menu, you can't have it.
+- on_track and selected_move_ids are mutually exclusive. If on_track is true,
+  selected_move_ids MUST be []. If selected_move_ids is non-empty, on_track MUST be false.
 - Holding course is a valid answer. If the projects already fit and nothing is at
   risk, set on_track=true and return an empty selection.
-- Prefer the fewest moves that restore the portfolio. Don't pile on moves that
-  don't materially help — a shorter plan the user will actually follow beats a
-  longer one they won't.
-- The assessment must reason across ALL projects together (including hobby work
-  that still competes for the hours), reference the time drift you were given, and
-  — when a previous strategy is provided — note continuity ("last time I suggested
-  X; you've slipped further, so now…").
-- Order selected_move_ids best-first (most important / highest-leverage first).`;
+- Select at most 6 ids, ordered best-first.
+- The menu shows each move's SOLO odds: what that move alone would achieve, from the
+  project's current figure. They do not add up, and two moves on the same project
+  largely overlap. When choosing, prefer in order: a move that lifts a project from
+  below 60% to above it; then the move on the project with the lowest current odds;
+  then the move touching the fewest tasks. Never select two moves for the same project
+  unless the second addresses a different constraint.
+- An empty menu means the engine has no move it can make. That has two very different
+  causes, and you must tell them apart: if nothing is at risk, this is simply the
+  on-track case (on_track=true). If something IS at risk and the menu is still empty,
+  set on_track=false with an empty selection and say plainly that nothing the engine can
+  automate will fix it — name what the user would have to change.
+- The assessment reasons across ALL projects together, including hobby work that still
+  competes for the hours, and references the time drift you were given.
+- If the user turn says there is no previous strategy on record, do not refer to any
+  earlier advice and do not use the words "last time". Otherwise note the continuity
+  between what was suggested before and what has changed since.`;
+
+export const SYNTHESIS_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["on_track", "assessment", "selected_move_ids"],
+  properties: {
+    on_track: { type: "boolean" },
+    assessment: {
+      type: "string",
+      description:
+        "2 to 4 sentences across the whole portfolio, plain language, no bullet points.",
+    },
+    selected_move_ids: {
+      type: "array",
+      items: { type: "integer" },
+      description: "Menu ids, ordered best-first. Empty when on_track is true.",
+    },
+  },
+};
 
 interface RawSynthesis {
   on_track?: unknown;
@@ -959,14 +1119,17 @@ async function synthesize(args: {
   prev: PortfolioStrategy | null;
   candidates: Candidate[];
 }): Promise<SynthesisResult> {
-  const { callOpenRouterJSON } = await import("./openrouter");
+  const { callFoundryJSON } = await import("./foundry");
 
   const messages: ChatMessage[] = [
     { role: "system", content: SYNTHESIS_SYSTEM_PROMPT },
     { role: "user", content: buildSynthesisPrompt(args) },
   ];
 
-  const raw = await callOpenRouterJSON<RawSynthesis>(messages, {
+  const raw = await callFoundryJSON<RawSynthesis>(messages, {
+    schema: SYNTHESIS_SCHEMA,
+    schemaName: "portfolio_synthesis",
+    reasoningEffort: "medium",
     validate: (r) => Array.isArray(r.selected_move_ids),
   });
 
@@ -976,12 +1139,17 @@ async function synthesize(args: {
         .filter((n) => Number.isInteger(n) && n >= 0 && n < args.candidates.length)
     : [];
   const seen = new Set<number>();
-  const ordered = selectedIds.filter((id) =>
-    seen.has(id) ? false : (seen.add(id), true),
-  );
+  const ordered = selectedIds
+    .filter((id) => (seen.has(id) ? false : (seen.add(id), true)))
+    // The LLM path was the only one with no cap; every deterministic path already
+    // bounds itself by JOINT_MOVE_CAP, and a 30-move strategy card is not a strategy.
+    .slice(0, JOINT_MOVE_CAP);
 
   return {
-    onTrack: raw.on_track === true,
+    // A cross-field invariant no schema can express, and the prompt alone was not
+    // enough: {on_track: true, selected_move_ids: [0,3,7]} used to render a card that
+    // said "hold course" above three recommended moves.
+    onTrack: raw.on_track === true && ordered.length === 0,
     assessment:
       typeof raw.assessment === "string" && raw.assessment.trim()
         ? raw.assessment.trim()
@@ -1400,7 +1568,10 @@ export async function generatePortfolioStrategy(
     });
   } catch (err) {
     console.error("Portfolio synthesis failed:", err);
-    return deterministicFallback(scorer, candidates, fingerprint, generatedAt);
+    // allCandidates, not candidates: the generative moves have already been produced,
+    // validated and forecast-scored, and throwing them away because the SELECTION step
+    // failed loses work that is still perfectly usable.
+    return deterministicFallback(scorer, allCandidates, fingerprint, generatedAt);
   }
 
   // B4 — map selected ids back to moves (dropping any unknown id). The LLM still

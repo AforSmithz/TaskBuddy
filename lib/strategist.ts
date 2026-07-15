@@ -14,7 +14,7 @@ import type {
   TaskModification,
 } from "./types";
 import type { Task } from "./types";
-import type { ChatMessage } from "./openrouter";
+import type { ChatMessage } from "./foundry";
 import { isLLMConfigured } from "./extraction";
 import {
   getRecoveryContext,
@@ -41,36 +41,34 @@ const GAP_KINDS: GapKind[] = ["rework", "unblock", "de_risk"];
 // Keep the proposal tight — a recovery shouldn't bury the user in new work.
 const MAX_SUGGESTIONS = 4;
 
+// Every level of every factor is spelled out. The old version gave endpoints and an
+// ellipsis for five of the six, and these numbers feed computePriority directly, so the
+// undefined middle was where all the run-to-run variance lived.
+const FACTOR_RUBRIC = `Score each 1-5 factor. Use the whole scale.
+- Urgency: 5=due today or tomorrow, 4=due this week, 3=due this month, 2=has a deadline beyond a month, 1=no deadline.
+- Impact: 5=directly unblocks the deliverable, 4=materially advances it, 3=useful supporting work, 2=nice to have, 1=optional.
+- Dependency: 5=blocks several other tasks, 4=blocks one major task, 3=blocks one minor task, 2=loosely coupled, 1=independent.
+- Risk: 5=delay seriously hurts the deadline, 4=delay causes visible slippage, 3=delay is recoverable, 2=minor consequence, 1=little consequence.
+- Effort: 5=more than 4h, 4=2-4h, 3=1-2h, 2=30-60min, 1=under 30min.
+- Confidence: 5=clearly needed, 4=very likely needed, 3=probably needed, 2=a guess with some support, 1=speculative.`;
+
+// Scoped to the fields a number could actually land in. The old blanket "NEVER output a
+// probability" was a no-op against a schema with no numeric probability field, while the
+// real leak vector — a percentage inside the free text — went unnamed. The user prompt
+// hands the model the current probability as context, so a blanket ban was also friction.
+const NO_ODDS_RULE = `- Do not put a probability, percentage or odds language inside "rationale", "description" or "priority_reason". Those strings are shown beside TaskBuddy's own computed probability and must not compete with it. The current probability is given to you as context only.`;
+
 const SYSTEM_PROMPT = `You are TaskBuddy's recovery strategist. A project is off track and
 the deterministic engine has already tried rearranging the existing work (deferring,
 re-dating, re-sequencing). Your job is the one thing it can't do: propose NET-NEW tasks
 that fill genuine holes reality created.
 
-Return ONLY a JSON object with this exact shape (no markdown, no commentary):
-
-{
-  "rationale": string,             // one sentence: the gap these tasks fill
-  "tasks": [{
-    "title": string,
-    "description": string,
-    "estimated_minutes": number,
-    "due_date": string|null,       // ISO date YYYY-MM-DD or null
-    "blocked_by": string|null,     // short note if this new task is itself blocked
-    "gap_kind": "rework"|"unblock"|"de_risk",
-    "urgency": number,             // 1-5
-    "impact": number,              // 1-5
-    "dependency": number,          // 1-5
-    "risk": number,                // 1-5
-    "effort": number,              // 1-5
-    "confidence": number,          // 1-5
-    "priority_reason": string      // one sentence explaining the priority
-  }]
-}
-
 Rules:
 - Propose tasks ONLY for genuine gaps. If nothing is truly missing — the work just
   needs reordering or the deadline moving — return an EMPTY tasks array. Adding
   busywork makes the plan worse, not better.
+- If the open-task list is "(no open tasks)" or the off-track reasons are "(none)",
+  return an empty tasks array. There is no gap to fill in an empty plan.
 - gap_kind must be one of:
   - "rework": corrective work after a failed/at-risk review (e.g. "Address review
     feedback on X").
@@ -78,18 +76,197 @@ Rules:
     from Y", "Provision the staging DB").
   - "de_risk": work to harden a task that is overrunning its estimate (e.g. "Write a
     spike to de-risk the migration").
+  Every task must fit one of these three. If a task you were going to propose fits none
+  of them, do not propose it.
+- Propose at most ${MAX_SUGGESTIONS} tasks, most important first. If more than
+  ${MAX_SUGGESTIONS} genuine gaps exist, keep the ones that most improve the chance of
+  hitting the deadline: rank by what blocks the most other work, then by soonest deadline
+  impact, then by smallest effort.
 - Do NOT re-create tasks that already exist. Do NOT split or reshape existing tasks
   (that is a separate move). Only add work that is currently absent.
-- Score each 1-5 factor honestly:
-  Urgency: 5=due today/tomorrow ... 1=no deadline.
-  Impact: 5=directly unblocks the deliverable ... 1=optional.
-  Dependency: 5=blocks multiple tasks ... 1=independent.
-  Risk: 5=delay seriously hurts the deadline ... 1=little consequence.
-  Effort: 5=>4h, 4=2-4h, 3=1-2h, 2=30-60min, 1=<30min.
-  Confidence: 5=clearly needed ... 1=speculative.
+- due_date must be on or after today and on or before the goal deadline, or null if the
+  task has no date of its own.
+- blocked_by is a short human-readable note naming what blocks this new task ("waiting on
+  the vendor contract"), never a task ref. null when nothing blocks it.
 - Keep titles concise and actionable. Estimate minutes realistically.
-- NEVER output a probability, percentage, or likelihood. You propose the work;
-  TaskBuddy scores the odds.`;
+${NO_ODDS_RULE}
+
+${FACTOR_RUBRIC}`;
+
+// --- Strict response schemas -------------------------------------------------
+//
+// These replace the prose shape blocks the three prompts used to carry. What a
+// schema CANNOT express stays in prose AND in the normalizers, which remain
+// load-bearing: the scope_down/split arithmetic, cross-item ref uniqueness, date
+// validity, and the two deterministic forecast gates that keep the model out of the
+// probability business. `maxItems` is deliberately not used — it truncates the array
+// without telling the model, so it crams the discarded content into the last element
+// instead of planning for the cap.
+
+const FACTOR = { type: "integer", enum: [1, 2, 3, 4, 5] };
+const FACTOR_KEYS = [
+  "urgency",
+  "impact",
+  "dependency",
+  "risk",
+  "effort",
+  "confidence",
+];
+const FACTOR_PROPS = {
+  urgency: FACTOR,
+  impact: FACTOR,
+  dependency: FACTOR,
+  risk: FACTOR,
+  effort: FACTOR,
+  confidence: FACTOR,
+};
+
+/** The task object shared by Generate and Re-route. Only Generate carries gap_kind. */
+function taskObject(withGapKind: boolean) {
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: [
+      "title",
+      "description",
+      "estimated_minutes",
+      "due_date",
+      "blocked_by",
+      ...(withGapKind ? ["gap_kind"] : []),
+      ...FACTOR_KEYS,
+      "priority_reason",
+    ],
+    properties: {
+      title: { type: "string" },
+      description: { type: "string" },
+      estimated_minutes: { type: "integer" },
+      due_date: {
+        type: ["string", "null"],
+        description: "YYYY-MM-DD between today and the goal deadline, or null.",
+      },
+      blocked_by: {
+        type: ["string", "null"],
+        description:
+          "Short note naming what blocks this task, never a task ref. null when nothing does.",
+      },
+      ...(withGapKind
+        ? { gap_kind: { type: "string", enum: [...GAP_KINDS] } }
+        : {}),
+      ...FACTOR_PROPS,
+      priority_reason: { type: "string", description: "One sentence." },
+    },
+  };
+}
+
+export const GENERATE_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["rationale", "tasks"],
+  properties: {
+    rationale: { type: "string", description: "One sentence: the gap these tasks fill." },
+    tasks: { type: "array", items: taskObject(true) },
+  },
+};
+
+/** Built per request so `task_ref` is a closed set — an invented ref becomes impossible
+ *  rather than silently dropped by `normalizeModifications`. */
+export function modifySchema(refs: string[]) {
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: ["rationale", "modifications"],
+    properties: {
+      rationale: {
+        type: "string",
+        description: "One sentence naming the overall strategy across all modifications.",
+      },
+      modifications: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["task_ref", "kind", "rationale", "replacements"],
+          properties: {
+            task_ref: refs.length
+              ? { type: "string", enum: refs }
+              : { type: "string" },
+            kind: { type: "string", enum: ["scope_down", "split"] },
+            rationale: {
+              type: "string",
+              description:
+                "One sentence naming what THIS reshape buys, in minutes or risk.",
+            },
+            replacements: {
+              type: "array",
+              description: "Exactly 1 item for scope_down, 2 to 4 for split.",
+              items: {
+                type: "object",
+                additionalProperties: false,
+                required: [
+                  "title",
+                  "description",
+                  "estimated_minutes",
+                  ...FACTOR_KEYS,
+                  "priority_reason",
+                ],
+                properties: {
+                  title: { type: "string" },
+                  description: { type: "string" },
+                  estimated_minutes: { type: "integer" },
+                  ...FACTOR_PROPS,
+                  priority_reason: { type: "string", description: "One sentence." },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+  };
+}
+
+/** Built per request so `criterion_id` is a closed set of C1..Cn handles. This ends the
+ *  bracket ambiguity that used to lose degraded-criteria notes silently: the user prompt
+ *  renders `- [C1] "text"`, the prompt's example was unbracketed, and the normalizer does
+ *  an exact lookup, so `[C1]` matched nothing. */
+export function rerouteSchema(handles: string[]) {
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: ["approach", "rationale", "tasks", "degraded_criteria"],
+    properties: {
+      approach: {
+        type: "string",
+        description:
+          'Short name of the alternative, e.g. "Use a managed auth provider". Empty string when abstaining.',
+      },
+      rationale: {
+        type: "string",
+        description: "One sentence: how it differs and why it fits the budget.",
+      },
+      tasks: { type: "array", items: taskObject(false) },
+      degraded_criteria: {
+        type: "array",
+        description:
+          "Empty when the route preserves the full definition of done, or none was given.",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["criterion_id", "note"],
+          properties: {
+            criterion_id: handles.length
+              ? { type: "string", enum: handles }
+              : { type: "string" },
+            note: {
+              type: "string",
+              description: 'How it is lowered, e.g. "managed provider, no SSO".',
+            },
+          },
+        },
+      },
+    },
+  };
+}
 
 interface RawSuggestion {
   rationale?: unknown;
@@ -110,8 +287,8 @@ export async function generateCorrectiveTasks(
   const ctx = await getRecoveryContext(projectId);
   if (!ctx) return null;
 
-  // Imported lazily so the app loads without an OpenRouter key configured.
-  const { callOpenRouterJSON } = await import("./openrouter");
+  // Imported lazily so the app loads without Foundry configured.
+  const { callFoundryJSON } = await import("./foundry");
 
   const messages: ChatMessage[] = [
     { role: "system", content: SYSTEM_PROMPT },
@@ -120,9 +297,13 @@ export async function generateCorrectiveTasks(
 
   let raw: RawSuggestion;
   try {
-    raw = await callOpenRouterJSON<RawSuggestion>(messages, {
+    raw = await callFoundryJSON<RawSuggestion>(messages, {
+      schema: GENERATE_SCHEMA,
+      schemaName: "corrective_tasks",
+      // Rubric scoring and a genuine-gap judgement, not transcription.
+      reasoningEffort: "medium",
       // An empty tasks array is a valid answer ("no gap"); only a missing/
-      // non-array tasks field is a failure worth advancing the model chain.
+      // non-array tasks field is a failure worth advancing the deployment chain.
       validate: (r) => Array.isArray(r.tasks),
     });
   } catch (err) {
@@ -267,42 +448,28 @@ You have two moves per task:
   even when the minutes are similar. The steps' total MUST NOT exceed the
   original estimate.
 
-Return ONLY a JSON object with this exact shape (no markdown, no commentary):
-
-{
-  "rationale": string,               // one sentence: the reshaping strategy
-  "modifications": [{
-    "task_ref": string,              // the "T#" ref of the existing task to reshape
-    "kind": "scope_down"|"split",
-    "rationale": string,             // one sentence: why this reshape helps
-    "replacements": [{               // 1 item for scope_down, 2-4 for split
-      "title": string,
-      "description": string,
-      "estimated_minutes": number,
-      "urgency": number,             // 1-5
-      "impact": number,              // 1-5
-      "dependency": number,          // 1-5
-      "risk": number,                // 1-5
-      "effort": number,              // 1-5
-      "confidence": number,          // 1-5
-      "priority_reason": string      // one sentence
-    }]
-  }]
-}
-
 Rules:
 - Reshape ONLY tasks where it genuinely helps the budget. If the work simply
   needs doing as-is, return an EMPTY modifications array. Don't pad estimates or
   invent steps — a reshape that doesn't shrink the work or the risk is noise.
-- Only reference tasks by their given "T#" ref. Never invent a ref.
-- Reshape at most ${MAX_MODIFICATIONS} tasks — pick the ones with the most slack
-  to recover (usually the largest or most uncertain).
+- Reshape at most ${MAX_MODIFICATIONS} tasks. Rank candidates by estimated_minutes
+  descending; break ties in favour of tasks that are blocked or whose title is vague.
+  Reshape the top ${MAX_MODIFICATIONS} only.
+- At most one modification per task. Never emit two entries with the same "task_ref" —
+  choose scope_down or split, not both.
+- "replacements" holds exactly 1 item for scope_down, and 2 to 4 for split.
+- Each task's current estimate is shown in the request as "(NNNm)". Before answering,
+  check: a scope_down replacement's minutes are less than NNN, and a split's step minutes
+  sum to no more than NNN. A modification that fails this check is discarded entirely, so
+  do not emit it.
 - Prefer scope_down for oversized but clear work; split for big/vague/stuck work.
 - Keep titles concise and actionable; estimate minutes realistically.
-- Score each 1-5 factor honestly (urgency, impact, dependency, risk, effort,
-  confidence), same scale as the original tasks.
-- NEVER output a probability, percentage, or likelihood. You propose the reshape;
-  TaskBuddy scores the odds.`;
+- The top-level "rationale" names the overall strategy across all modifications. Each
+  modification's own "rationale" names what that specific reshape buys, in minutes or
+  risk. Do not repeat the top-level sentence.
+${NO_ODDS_RULE}
+
+${FACTOR_RUBRIC}`;
 
 interface RawModifications {
   rationale?: unknown;
@@ -323,7 +490,7 @@ export async function generateTaskModifications(
   const ctx = await getRecoveryContext(projectId);
   if (!ctx) return null;
 
-  const { callOpenRouterJSON } = await import("./openrouter");
+  const { callFoundryJSON } = await import("./foundry");
 
   const messages: ChatMessage[] = [
     { role: "system", content: MODIFY_SYSTEM_PROMPT },
@@ -332,7 +499,12 @@ export async function generateTaskModifications(
 
   let raw: RawModifications;
   try {
-    raw = await callOpenRouterJSON<RawModifications>(messages, {
+    raw = await callFoundryJSON<RawModifications>(messages, {
+      schema: modifySchema([...taskRefs(ctx.openTasks).keys()]),
+      schemaName: "task_modifications",
+      // The two arithmetic checks in the prompt are the reasoning-heaviest thing
+      // any strategist move asks for.
+      reasoningEffort: "medium",
       validate: (r) => Array.isArray(r.modifications),
     });
   } catch (err) {
@@ -505,58 +677,35 @@ const REROUTE_MIN_GAIN = 0.05;
 
 const REROUTE_SYSTEM_PROMPT = `You are TaskBuddy's recovery strategist. A project is off track because its
 current plan — the approach itself — won't fit the time budget before the
-deadline. The deterministic engine has already tried rearranging the work, and
-the other strategist moves add or reshape individual tasks. Your job is the
-boldest move: propose a COMPLETE alternative plan that hits the SAME deliverable
-by a fundamentally DIFFERENT approach that takes materially less work.
+deadline. Your job is the boldest move: propose a COMPLETE alternative plan that
+hits the SAME deliverable by a fundamentally DIFFERENT approach that takes
+materially less work.
 
 Think buy-vs-build: a managed service instead of a custom one, a template or
 library instead of from-scratch, a narrower good-enough cut of the goal. The new
 plan replaces the entire current plan.
 
-Return ONLY a JSON object with this exact shape (no markdown, no commentary):
-
-{
-  "approach": string,            // short name of the alternative (e.g. "Use a managed auth provider")
-  "rationale": string,           // one sentence: how it differs and why it fits the budget
-  "tasks": [{
-    "title": string,
-    "description": string,
-    "estimated_minutes": number,
-    "due_date": string|null,     // ISO date YYYY-MM-DD or null
-    "blocked_by": string|null,   // short note if this task is itself blocked
-    "urgency": number,           // 1-5
-    "impact": number,            // 1-5
-    "dependency": number,        // 1-5
-    "risk": number,              // 1-5
-    "effort": number,            // 1-5
-    "confidence": number,        // 1-5
-    "priority_reason": string    // one sentence explaining the priority
-  }],
-  "degraded_criteria": [{        // OPTIONAL — only if the lighter route lowers a stated definition-of-done item
-    "criterion_id": string,      // the id (e.g. "C2") of the compromised criterion, from the list in the request
-    "note": string               // short phrase: how it's lowered (e.g. "managed provider, no SSO")
-  }]
-}
-
 Rules:
 - Propose a re-route ONLY when a genuinely different approach exists that takes
   materially less work. If the current tasks just need trimming, splitting, or
-  reordering, return an EMPTY tasks array — that is a different move, not yours.
+  reordering, that is a different move, not yours. In that case return "tasks": [],
+  "degraded_criteria": [], "approach": "", and a one-sentence "rationale" explaining why
+  the current approach is already the right one.
 - The new plan must reach the SAME deliverable. Don't quietly drop the goal.
-- The new plan's total estimated time must be clearly less than the current
-  plan's, or the re-route is pointless.
-- Keep it to a handful of concrete, actionable tasks. Estimate minutes honestly.
-- Score each 1-5 factor (urgency, impact, dependency, risk, effort, confidence),
-  same scale as the original tasks.
-- HONESTY: if a definition-of-done list is given in the request and your lighter
-  route lowers any of those items, you MUST name each compromised one in
-  "degraded_criteria" by its id with a short note on how it's lowered. If the
-  route preserves the full definition of done, return an empty list. Only ever
-  reference ids from the provided list — never invent one. This makes the cost of
-  the cut honest; it is not optional when you genuinely lower the bar.
-- NEVER output a probability, percentage, or likelihood. You propose the route;
-  TaskBuddy scores the odds.`;
+- The request states the current plan's total in minutes and the target your plan must
+  come in under. Meet that target; a re-route that does not is pointless.
+- At most ${MAX_REROUTE_TASKS} tasks, in the order they would be executed. Estimate
+  minutes honestly.
+- due_date must be on or after today and on or before the goal deadline, or null.
+- HONESTY: "degraded_criteria" is always present. If a definition-of-done list is given
+  in the request and your lighter route lowers any of those items, name each compromised
+  one by its handle exactly as listed — "C1", "C2", without the square brackets — with a
+  short note on how it is lowered. If the route preserves the full definition of done, or
+  no definition of done was given, return an empty list. This makes the cost of the cut
+  honest; it is not optional when you genuinely lower the bar.
+${NO_ODDS_RULE}
+
+${FACTOR_RUBRIC}`;
 
 interface RawReroute {
   approach?: unknown;
@@ -580,7 +729,7 @@ export async function generateReroute(
   const ctx = await getRecoveryContext(projectId);
   if (!ctx) return null;
 
-  const { callOpenRouterJSON } = await import("./openrouter");
+  const { callFoundryJSON } = await import("./foundry");
 
   const messages: ChatMessage[] = [
     { role: "system", content: REROUTE_SYSTEM_PROMPT },
@@ -589,7 +738,10 @@ export async function generateReroute(
 
   let raw: RawReroute;
   try {
-    raw = await callOpenRouterJSON<RawReroute>(messages, {
+    raw = await callFoundryJSON<RawReroute>(messages, {
+      schema: rerouteSchema(ctx.criteria.map((_, i) => criterionHandle(i))),
+      schemaName: "reroute_plan",
+      reasoningEffort: "medium",
       validate: (r) => Array.isArray(r.tasks),
     });
   } catch (err) {
@@ -651,13 +803,19 @@ function buildReroutePrompt(ctx: RecoveryContext): string {
   const dod = ctx.criteria.length
     ? [
         ``,
-        `The goal's definition of done — if your lighter route lowers any of these, you MUST list it in "degraded_criteria" by its id:`,
+        `The goal's definition of done — if your lighter route lowers any of these, you MUST list it in "degraded_criteria" by its handle (the bare "C1" form, without the brackets):`,
         ...ctx.criteria.map(
           (c, i) =>
             `- [${criterionHandle(i)}] "${c.text}"${c.met ? " (already met)" : ""}`,
         ),
       ].join("\n")
-    : "";
+    : `\nNo definition of done is recorded for this goal; return an empty "degraded_criteria" list.`;
+
+  // The model used to be told its plan must be "clearly less" than the current one while
+  // being scored against an entirely different, invisible bar. State the number instead,
+  // so it optimises the thing it is judged on.
+  const currentTotal = estimateTotal(ctx);
+  const target = Math.round(currentTotal * 0.6);
 
   return [
     `Today's date is ${today}.`,
@@ -666,6 +824,7 @@ function buildReroutePrompt(ctx: RecoveryContext): string {
     deficitH > 0
       ? `The current plan is roughly ${deficitH}h more work than the budget allows — a re-route must claw most of that back.`
       : `The current plan narrowly fits but is at risk; a lighter route buys real margin.`,
+    `The current plan totals ${currentTotal} minutes. Your plan's total must be at most ${target} minutes.`,
     ``,
     `The current plan (this is what a re-route would replace):`,
     open,
@@ -699,7 +858,13 @@ function normalizeDegradedCriteria(
   for (const item of raw) {
     if (typeof item !== "object" || item === null) continue;
     const r = item as Record<string, unknown>;
-    const handle = typeof r.criterion_id === "string" ? r.criterion_id.trim() : "";
+    // Brackets stripped defensively: the user prompt renders the handle as `[C1]`, so a
+    // model echoing the rendered form used to miss this exact lookup and lose the note.
+    // The per-request enum now prevents it, but the guard costs nothing.
+    const handle =
+      typeof r.criterion_id === "string"
+        ? r.criterion_id.trim().replace(/^\[|\]$/g, "")
+        : "";
     const note = typeof r.note === "string" ? r.note.trim() : "";
     const c = byHandle.get(handle);
     if (!c || !note || seen.has(c.id)) continue;

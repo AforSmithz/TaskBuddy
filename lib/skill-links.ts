@@ -1,5 +1,5 @@
 import type { ExtractedLink, LinkSuggestion, LinkVerdict, SkillNode, Task } from "./types";
-import type { ChatMessage } from "./openrouter";
+import type { ChatMessage } from "./foundry";
 import { isLLMConfigured } from "./checkin";
 import { skillProgress } from "./skill";
 
@@ -16,50 +16,56 @@ import { skillProgress } from "./skill";
 // The model proposes pairs + prose. It never outputs a score, a probability, or an
 // ordering — `forecast()` remains the sole owner of odds (§0).
 //
-// No `server-only` directive and no static `openrouter` import: the client is pulled in
+// No `server-only` directive and no static `foundry` import: the client is pulled in
 // dynamically inside the one async call, exactly as `checkin.ts` does it, so the pure
 // half (`sanitizeLinks`, `pairKey`) stays importable from a plain-Node test harness.
+//
+// The wire shape is an ARRAY, not the task-keyed map it used to be. The map bought a
+// structural one-skill-per-task guarantee for free (unique JSON keys), but strict
+// structured outputs need an enumerated `properties` set, so preserving it would mean a
+// fresh 60-property schema on every call. `bestPerTask` is now the ONLY fan-out defence
+// — it was already written to be, for the legacy-array branch, and it collapses
+// deterministically by is_checkpoint, then depth, then order.
+//
+// What the schema buys back is bigger than what it cost: `task_key` and `node_key` are
+// per-request ENUMS built from the handles actually shipped, so a hallucinated handle is
+// structurally impossible rather than filtered out after the fact.
 
 /** Cap what the model sees, so a large workspace can't blow the context window. */
 const MAX_NODES = 40;
 const MAX_TASKS = 60;
 /** Cap what it can propose in one pass — a linker that returns 50 pairs is guessing. */
-const MAX_LINKS = 12;
+export const MAX_LINKS = 12;
+/** Judge calls run concurrently, but not unboundedly: a 429 becomes a dropped pair. */
+const JUDGE_CONCURRENCY = 4;
 
-const SYSTEM_PROMPT = `You are TaskBuddy's work linker. You are given SKILLS (capabilities
-someone is learning) and TASKS (concrete work they have to do). A few tasks, when done,
-DEMONSTRATE one of the skills — the same effort proves both. Your job is to find those.
+const SYSTEM_PROMPT = `You are given SKILLS (capabilities someone is learning) and TASKS
+(concrete work they have to do). A few tasks, when done, DEMONSTRATE one of the skills —
+the same effort proves both. Find those, and only those.
 
-For EACH task, name the single skill it most directly demonstrates, or null if none.
-
-Return ONLY a JSON object with this exact shape (no markdown, no commentary):
-
-{
-  "links": {
-    "T1": {"node_key": "N2", "rationale": "one short sentence: why doing T1 shows N2"},
-    "T2": null
-  }
-}
+Emit an entry ONLY for a task that genuinely demonstrates a skill. Emit nothing for the
+rest. If no task on the list demonstrates any skill, return {"links": []} — that is the
+expected outcome for most inputs.
 
 Rules:
-- One skill per task, at most. If a task seems to demonstrate several skills, it is broad
-  practice rather than proof — name the single most specific skill it shows, or null.
-  One band rehearsal brushes against tuning, rhythm and improvisation; crediting all three
-  would hand over a syllabus for one evening's work.
-- Ask of each pair: "having done this task, is THIS skill now demonstrated?" If the honest
-  answer is "it helped, a bit", the answer is null.
+- Ask of each pair: would someone carrying out this task unavoidably exercise this skill
+  along the way? If the honest answer is "it helped, a bit" or "it might", the answer is no.
+- One skill per task, at most. Each task_key may appear at most once. If a task seems to
+  demonstrate several skills, it is broad practice rather than proof — name the single most
+  specific skill, or none. One band rehearsal brushes against tuning, rhythm and
+  improvisation; crediting all three would hand over a syllabus for one evening's work.
+- "Most specific" means: prefer a skill that is a verifiable milestone over a practice
+  drill. If still tied, prefer the one with more prerequisite skills behind it.
 - Do NOT link on topic overlap alone. "Buy a new capo" and "Play barre chords" are both
   guitar, but buying gear demonstrates no technique.
-- A skill may be demonstrated by more than one task. Most tasks link to nothing; null is
-  the common, correct answer.
+- A skill may be demonstrated by more than one task. Most tasks link to nothing.
 - Most SKILLS will have no task at all. Leaving a skill unused is the normal, correct
-  outcome — do not try to find a home for every skill on the list. A list of five skills
-  and no suitable tasks should produce five nulls.
-- Skills and tasks may belong to different goals. A task from an unrelated-sounding goal
-  can still be the very work that demonstrates a skill.
-- Every link is shown to the user for confirmation before it does anything. You are
-  drafting a shortlist for review, not making an irreversible decision.
-- At most ${MAX_LINKS} non-null links.
+  outcome — do not try to find a home for every skill on the list.
+- Judge each pair on the acts themselves. A task whose title sounds unrelated can still be
+  exactly the work that demonstrates a skill, and two titles sharing words often are not.
+- A wrong link costs the user more than a missing one: a confirmed link can silently close
+  a task. When unsure, omit.
+- At most ${MAX_LINKS} links.
 - rationale is one plain sentence. Never include numbers, scores, percentages, or
   estimates of any kind.
 
@@ -68,23 +74,66 @@ Worked example.
 SKILLS:
 N1: Play a song end-to-end from memory
 N2: Read standard notation
+N3: Improvise over a 12-bar blues
 TASKS:
 T1: Record a demo track
 T2: Buy a new capo
-T3: Sight-read one etude each morning
+T3: Watch a documentary about jazz
+T4: Book a rehearsal room
+T5: Restring the guitar
+T6: Update the setlist spreadsheet
 
 Correct answer:
-{"links":{
-  "T1": {"node_key":"N1","rationale":"Recording a take means playing the song straight through from memory."},
-  "T2": null,
-  "T3": {"node_key":"N2","rationale":"Sight-reading an etude is reading standard notation."}
-}}`;
+{"links":[
+  {"task_key":"T1","node_key":"N1","rationale":"Recording a take means playing the song straight through from memory."}
+]}
 
-/** Reject a response that carries no `links` container, so the model chain advances to
- *  the fallback model. Both the task-keyed map and the legacy array are usable. */
+Five of the six tasks link to nothing, which is normal. T3 is passive exposure, not
+playing. T2, T4, T5 and T6 are about the music without being the music. N2 and N3 go
+unused because no task on this list exercises them.`;
+
+/**
+ * Reject a response the pipeline cannot use. Under a strict schema `links` is guaranteed
+ * to be an array, so this is now a cheap assertion rather than a chain-advancing filter —
+ * an EMPTY array is the expected, correct answer most of the time and must pass.
+ */
 function isUsable(d: LinkSuggestion): boolean {
   const links = (d as { links?: unknown })?.links;
   return Array.isArray(links) || (typeof links === "object" && links !== null);
+}
+
+/**
+ * Built per request so `task_key` and `node_key` are closed sets. This is the single
+ * biggest win in the migration for this file: the model cannot name a handle that was not
+ * shipped, which turns `sanitizeLinks`' hallucinated-handle filter from a safety mechanism
+ * into a redundant assertion. Note the schema string differs every call, so there is no
+ * server-side schema caching to expect.
+ */
+export function linkSchema(taskKeys: string[], nodeKeys: string[]) {
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: ["links"],
+    properties: {
+      links: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["task_key", "node_key", "rationale"],
+          properties: {
+            task_key: { type: "string", enum: taskKeys },
+            node_key: { type: "string", enum: nodeKeys },
+            rationale: {
+              type: "string",
+              description:
+                "One plain sentence on why doing the task demonstrates the skill. No numbers.",
+            },
+          },
+        },
+      },
+    },
+  };
 }
 
 /**
@@ -160,27 +209,46 @@ Question: does carrying out that task NECESSARILY involve performing that skill?
 "could it", not "does it help" — would someone doing this task unavoidably exercise this
 skill along the way?
 
-Return ONLY a JSON object (no markdown, no commentary):
-
-{"demonstrates": true, "why": "one short sentence"}
-
-Answer TRUE when the skill is unavoidably exercised by doing the task. A conversation
-lesson necessarily involves greeting the other person, so "Take a weekly lesson" does
-involve "Use common greetings".
-
 Answer FALSE when:
-- The skill is only OPTIONALLY exercised. That same lesson might never touch the past
+- The skill is only OPTIONALLY exercised. A conversation lesson might never touch the past
   tense, so it does not involve "Talk about past experiences".
 - The task is passive exposure (watching, reading, listening) and the skill is a
   productive ability (speaking, writing, building something).
 - The task is ABOUT the goal rather than doing it: planning, scheduling, setting
   milestones, reviewing progress, buying equipment, choosing materials.
-- The link rests on a phrase appearing in both. "Setting milestones for next month" is
-  not "expressing future plans" in a foreign language; the words match, the acts do not.
+- The link rests on a phrase appearing in both; the words match, the acts do not.
+- The task title is too vague or generic to tell. Absence of evidence is a FALSE here,
+  not a maybe.
+
+Answer TRUE only when the skill is unavoidably exercised by doing the task.
+
+Two worked cases.
+
+FALSE — TASK: "Set measurable milestones for conversation goal" / SKILL: "Express future
+plans and intentions". Planning your study in English is not expressing future plans in
+Spanish. The phrase overlaps; the act does not.
+
+TRUE — TASK: "Take a weekly lesson" / SKILL: "Use common greetings". A conversation lesson
+necessarily begins by greeting the other person.
 
 You are not judging mastery. You are judging whether the act contains the act.
 
-Never include numbers, scores, percentages, or estimates.`;
+Write "why" first and let it decide the verdict, not the other way round. "why" contains
+no numbers, scores, percentages or estimates.`;
+
+// `why` is deliberately FIRST in the property list: structured outputs generate in schema
+// order, so the sentence conditions the boolean instead of rationalising one already
+// chosen. It was optional in LinkVerdict and never read; it is now required and logged on
+// a FALSE verdict, so a dropped pair is diagnosable.
+export const VERDICT_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["why", "demonstrates"],
+  properties: {
+    why: { type: "string", description: "One short sentence, written before deciding." },
+    demonstrates: { type: "boolean" },
+  },
+} as const;
 
 /** How a single pair is judged. Injected so the filter is testable without a network. */
 export type LinkJudge = (taskTitle: string, skillTitle: string) => Promise<boolean>;
@@ -189,18 +257,29 @@ export type LinkJudge = (taskTitle: string, skillTitle: string) => Promise<boole
  *  errors drops the suggestion rather than admitting an unchecked link. The cost of a
  *  false negative is a missing suggestion; of a false positive, a wrong credit. */
 async function llmJudge(taskTitle: string, skillTitle: string): Promise<boolean> {
-  const { callOpenRouterJSON } = await import("./openrouter");
+  const { callFoundryJSON } = await import("./foundry");
   const messages: ChatMessage[] = [
     { role: "system", content: VERIFY_SYSTEM_PROMPT },
     { role: "user", content: `TASK: ${taskTitle}\nSKILL: ${skillTitle}` },
   ];
   try {
-    const verdict = await callOpenRouterJSON<LinkVerdict>(messages, {
-      validate: (d) => typeof d?.demonstrates === "boolean",
+    const verdict = await callFoundryJSON<LinkVerdict>(messages, {
+      schema: VERDICT_SCHEMA as unknown as Record<string, unknown>,
+      schemaName: "link_verdict",
+      // A single yes/no with two titles in context.
+      reasoningEffort: "low",
     });
-    return verdict.demonstrates === true;
+    if (verdict.demonstrates !== true) {
+      // Logged so a good suggestion killed by the judge is diagnosable, and so a
+      // "could not judge" is distinguishable from a considered no.
+      console.debug(
+        `link judged false: "${taskTitle}" / "${skillTitle}" — ${verdict.why ?? "(no reason)"}`,
+      );
+      return false;
+    }
+    return true;
   } catch (err) {
-    console.error("link verification failed, dropping the pair:", err);
+    console.error("link verification errored, dropping the pair:", err);
     return false;
   }
 }
@@ -208,6 +287,10 @@ async function llmJudge(taskTitle: string, skillTitle: string): Promise<boolean>
 /**
  * Drop every proposed link the judge won't vouch for. Pairs are judged concurrently but
  * independently — no pair ever sees another, which is the entire point.
+ *
+ * Concurrency is capped. One click used to fire up to MAX_LINKS judge calls at once, and
+ * because the judge fails CLOSED, a burst of 429s silently deleted good suggestions
+ * rather than surfacing an error.
  */
 export async function filterVerified(
   links: ProposedLink[],
@@ -216,13 +299,28 @@ export async function filterVerified(
   judge: LinkJudge,
 ): Promise<ProposedLink[]> {
   if (links.length === 0) return [];
-  const verdicts = await Promise.all(
-    links.map((l) => {
+  const verdicts = new Array<boolean>(links.length).fill(false);
+  let cursor = 0;
+  const worker = async (): Promise<void> => {
+    while (cursor < links.length) {
+      const i = cursor++;
+      const l = links[i];
       const node = nodeById.get(l.skill_node_id);
       const task = taskById.get(l.task_id);
-      if (!node || !task) return Promise.resolve(false);
-      return judge(task.title, node.title);
-    }),
+      if (!node || !task) continue;
+      try {
+        verdicts[i] = await judge(task.title, node.title);
+      } catch (err) {
+        // Fail closed per pair, not per batch. `llmJudge` already catches its
+        // own errors, but an injected judge (or a future one) must not be able
+        // to take the whole linker down with it.
+        console.error("link verification errored, dropping the pair:", err);
+        verdicts[i] = false;
+      }
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(JUDGE_CONCURRENCY, links.length) }, worker),
   );
   return links.filter((_, i) => verdicts[i]);
 }
@@ -272,14 +370,21 @@ export async function suggestSkillTaskLinks(
   const skillLines = [...nodeByKey].map(([k, n]) => `${k}: ${n.title}`).join("\n");
   const taskLines = [...taskByKey].map(([k, t]) => `${k}: ${t.title}`).join("\n");
 
-  const { callOpenRouterJSON } = await import("./openrouter");
+  const { callFoundryJSON } = await import("./foundry");
   const messages: ChatMessage[] = [
     { role: "system", content: SYSTEM_PROMPT },
     { role: "user", content: `SKILLS:\n${skillLines}\n\nTASKS:\n${taskLines}` },
   ];
 
   try {
-    const result = await callOpenRouterJSON<LinkSuggestion>(messages, { validate: isUsable });
+    const result = await callFoundryJSON<LinkSuggestion>(messages, {
+      schema: linkSchema([...taskByKey.keys()], [...nodeByKey.keys()]),
+      schemaName: "skill_task_links",
+      // The assignment pass compares every task against every skill and applies the
+      // checkpoint/depth tie-break. The isolated judge below stays cheap.
+      reasoningEffort: "medium",
+      validate: isUsable,
+    });
     const proposed = sanitizeLinks(result.links, nodeByKey, taskByKey, existingPairs, byId);
     // Second pass: re-judge each surviving pair alone. The first call is an assignment
     // problem and the model will empty the menu into it; this one is a yes/no with
@@ -298,8 +403,13 @@ export async function suggestSkillTaskLinks(
  * persistence honest regardless of what the model returns.
  *
  * `nodeByKey` contains ONLY the unlocked frontier, so a locked node is unreachable here
- * even if the model invents its handle. Fan-out is bounded structurally: the task-keyed
- * map has unique keys, and a legacy array is collapsed one-per-task by `bestPerTask`.
+ * even if the model invents its handle — and under the per-request `node_key` enum it
+ * cannot invent one at all.
+ *
+ * The ARRAY is now the shape the prompt asks for; the task-keyed map is the legacy branch,
+ * kept because it costs nothing and a non-strict caller could still produce it. Fan-out is
+ * no longer bounded by unique JSON keys, so `bestPerTask` is the only thing standing
+ * between a fanned-out response and the review surface. Do not remove it.
  */
 export function sanitizeLinks(
   links: Record<string, ExtractedLink | null> | ExtractedLink[],
@@ -314,8 +424,12 @@ export function sanitizeLinks(
     if (!raw) return;
     const node = nodeByKey.get(raw.node_key ?? "");
     if (!node || !taskByKey.has(taskKey)) return;
-    const rationale = (raw.rationale ?? "").trim();
+    const rationale = (raw.rationale ?? "").trim().slice(0, 160);
     if (!rationale) return;
+    // `forecast()` is the sole owner of odds (§0). The prompt forbids numbers in the
+    // rationale, but this string is persisted and shown verbatim on the confirm surface,
+    // so a prose-only invariant is not an invariant.
+    if (/\d|%/.test(rationale)) return;
     candidates.push({ taskKey, node, rationale, order });
   };
 
