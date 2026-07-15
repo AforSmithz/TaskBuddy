@@ -13,6 +13,7 @@ import {
   upgradePasswordHash,
 } from "./db/auth-queries";
 import { DUMMY_HASH, hash, needsRehash, verify } from "./password";
+import { isRateLimited } from "./rate-limit";
 import {
   COOKIE_OPTS,
   SESSION_COOKIE,
@@ -74,6 +75,15 @@ export async function loginAction(
     return { error: "No database is configured on this deployment." };
   }
 
+  // BEFORE the database lookup and the bcrypt below, which is the entire point.
+  // Every request through here costs a deliberate cost-12 hash (~290ms) whether
+  // or not the account exists; this is what stops that being a free CPU sink.
+  // Ten attempts a minute is far above any human and far below anything worth
+  // paying for. See lib/rate-limit.ts for what this does and does not cover.
+  if (await isRateLimited("login", 10)) {
+    return { error: "Too many attempts. Wait a minute and try again." };
+  }
+
   try {
     const user = await findUserForLogin(email);
 
@@ -129,6 +139,15 @@ export async function signupAction(
   }
   if (!isDbConfigured()) {
     return { error: "No database is configured on this deployment." };
+  }
+
+  // Ahead of the invite-code check, not after it, so that GUESSING the code is
+  // throttled too. `secretsMatch` is constant-time and leaks nothing, but
+  // nothing else here makes an attacker pay for attempts. Five a minute; real
+  // signups on this deployment are rare enough that a stricter limit than
+  // login costs nobody anything.
+  if (await isRateLimited("signup", 5)) {
+    return { error: "Too many attempts. Wait a minute and try again." };
   }
 
   // There is no email provider and no verification step, so signup is
