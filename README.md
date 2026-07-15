@@ -1,12 +1,20 @@
 # TaskBuddy
 
-An AI-powered **meeting-to-execution dashboard**. Paste messy meeting notes and
-TaskBuddy turns them into a structured plan: summary, decisions, open questions,
-blockers, prioritised tasks, a recommended schedule, and a Kanban workflow.
+An adaptive goal-planning app. You state a goal, TaskBuddy breaks it into tasks,
+schedules everything into one timeline across all your goals, and tells you the
+probability you actually finish on time. When reality diverges from the plan, it
+proposes a recovery strategy instead of quietly going red.
 
-> **Design philosophy:** the LLM is used for _understanding_ (extraction,
-> summaries, follow-up messages). Prioritisation and scheduling use
-> **transparent, deterministic formulas** - so the workflow is explainable.
+> **Design philosophy:** the LLM is used for *understanding* (turning messy notes
+> into structured tasks, reading a written check-in). Every number, the priority
+> score, the schedule, the completion odds, the recommended move, comes from
+> deterministic code you can read. No probability is ever produced by a model.
+
+## Stack
+
+Next.js 16 (App Router), React 19, TypeScript, Tailwind CSS v4, Azure Database
+for PostgreSQL, self-hosted session auth, Microsoft Foundry for the LLM layer.
+Deployed on Vercel.
 
 ## Getting started
 
@@ -17,66 +25,89 @@ pnpm dev
 
 Open <http://localhost:3000>.
 
-### Demo mode (no setup required)
-
-Out of the box TaskBuddy runs in **demo mode**:
-
-- **Data** is stored in an in-memory store, seeded with two sample meetings.
-- **Extraction** uses an offline heuristic parser instead of an LLM.
-
-Everything works - create meetings, score tasks, build schedules, use the
-Kanban board - but data resets when the server restarts. The sidebar shows a
+With no environment configured, the app runs in demo mode: an in-memory store
+seeded with sample data, and an offline heuristic parser instead of the LLM.
+Everything works, but data resets when the server restarts. The sidebar shows a
 "Demo mode" badge while keys are missing.
 
 ## Going live
 
-Add a `.env.local` file (copy `.env.local.example`) and fill in:
+Copy `.env.local.example` to `.env.local` and fill it in. That file documents
+every variable and the reasoning behind it; the short version:
 
-### 1. Supabase (persistent storage)
+| Variable | Purpose |
+| --- | --- |
+| `DATABASE_URL` | Azure Postgres, as the `taskbuddy_app` role. Unset means demo mode. |
+| `SESSION_SECRET` | Signing key for the session cookie. Minimum 32 bytes. |
+| `SIGNUP_CODE` | Required to create an account. There is no email verification. |
+| `AZURE_FOUNDRY_ENDPOINT` / `AZURE_FOUNDRY_API_KEY` | LLM extraction. Unset means the heuristic extractor. |
 
-1. Create a project at <https://supabase.com>.
-2. In the SQL Editor, run [`supabase/schema.sql`](./supabase/schema.sql).
-3. From **Project Settings → API**, copy into `.env.local`:
-   - `NEXT_PUBLIC_SUPABASE_URL`
-   - `SUPABASE_SERVICE_ROLE_KEY` (server-only - never exposed to the browser)
+Apply the schema with `azure/apply-sql.sh`, which runs `azure/sql/01_schema.sql`,
+`02_grants.sql` and `03_auth.sql` in order and then verifies them.
 
-### 2. Microsoft Foundry (LLM extraction)
+Each layer degrades on its own. No database means the in-memory store; no
+Foundry credentials means the heuristic extractor; a failed LLM call falls back
+to the heuristic rather than erroring the request.
 
-1. Provision the Foundry resource and its two model deployments - the exact
-   `az` commands are in `azure/FOUNDRY.md` §6.
-2. Set `AZURE_FOUNDRY_ENDPOINT` and `AZURE_FOUNDRY_API_KEY`.
-
-Once both are present, TaskBuddy switches that layer over automatically - no
-code change. If an LLM call fails, it falls back to the heuristic extractor.
-
-The primary deployment is `gpt-5-mini` and the fallback is `gpt-4.1-mini`, both
-in `koreacentral`. That region is not a preference: `eastasia`, where the
-database lives, has zero model quota on this subscription.
-
-## How it works
+## Architecture
 
 ```
-Paste notes → LLM/heuristic extraction → deterministic scoring → schedule → Kanban
+notes or goal -> extraction -> priority scoring -> allocation -> forecast -> strategy
 ```
 
-| Layer            | Powered by        | Files                                  |
-| ---------------- | ----------------- | -------------------------------------- |
-| Extraction       | LLM or heuristic  | `lib/extraction.ts`, `lib/heuristic.ts`|
-| Priority scoring | Deterministic     | `lib/priority.ts`                      |
-| Scheduling       | Deterministic     | `lib/schedule.ts`                      |
-| Data layer       | Supabase / memory | `lib/store.ts`                         |
-| Mutations        | Server Actions    | `lib/actions.ts`                       |
+| Layer | What it does | Where |
+| --- | --- | --- |
+| Extraction | Notes into structured tasks, via LLM or offline heuristic | `lib/extraction.ts`, `lib/heuristic.ts` |
+| Priority | Deterministic six-factor score | `lib/priority.ts` |
+| Scheduling | Dependency ordering, day packing, within-day arrangement | `lib/schedule.ts`, `lib/allocate.ts`, `lib/arrange.ts` |
+| Forecast | Monte Carlo completion probability against real availability | `lib/forecast.ts` |
+| Strategy | Cross-goal recovery moves when the odds drop | `lib/portfolio-strategist.ts`, `lib/strategist.ts` |
+| Data | Query layer over node-postgres, with an in-memory fallback | `lib/store.ts`, `lib/db/` |
+| Auth | bcrypt passwords, signed session cookies, RLS per request | `lib/auth.ts`, `lib/session.ts`, `lib/password.ts` |
+| LLM client | Foundry calls with strict JSON schemas | `lib/foundry.ts` |
+| Mutations | Server Actions | `lib/actions.ts` |
 
-**Priority score** = `Urgency·0.30 + Impact·0.25 + Dependency·0.20 +
-Risk·0.15 + Confidence·0.10 − Effort·0.10`, mapped to Critical / High / Medium /
-Low / Backlog bands.
+**Priority score** = `Urgency*0.30 + Impact*0.25 + Dependency*0.20 + Risk*0.15 +
+Confidence*0.10 - Effort*0.10`, mapped to Critical / High / Medium / Low /
+Backlog bands.
+
+Every row is read through Postgres row-level security. The app connects as an
+unprivileged role and sets the current user id per transaction, so a query
+cannot return another account's data even if the application logic is wrong.
 
 ## Routes
 
-- `/` - workload dashboard, recommended next task, end-of-day summary
-- `/meetings/new` - paste meeting notes
-- `/meetings/[id]` - summary, decisions, questions, tasks, schedule, planner
-- `/board` - global Kanban board (drag or use the status menu)
+| Route | What it is |
+| --- | --- |
+| `/` | Today: agenda, time budget, completion odds, current strategy |
+| `/strategy` | Cross-goal strategy, recovery moves, plan history |
+| `/board` | Kanban board across every goal |
+| `/projects` | Goals, each with its own forecast |
+| `/activities` | Routines and recurring commitments |
+| `/create` | New entry, paste notes or state a goal |
+| `/settings` | Value model, availability, weekly capacity |
+| `/login`, `/signup` | Self-hosted email and password auth |
+
+## Infrastructure
+
+The whole Azure stack is defined as Bicep in `azure/infra/`. Read
+`azure/infra/README.md` before deploying: several properties are immutable after
+creation, so a careless apply can replace a resource rather than update it. A
+GitHub Actions workflow posts a what-if plan on
+any PR touching infrastructure, authenticating through OIDC federation with a
+`Reader` role, so CI can show the blast radius without holding credentials that
+could change anything.
+
+On Vercel the app authenticates to Foundry with a federated workload identity
+exchanged from a per-invocation OIDC assertion, so no long-lived Azure secret is
+stored in the deployment.
+
+Further reading:
+
+- `azure/README.md` for the migration and its live verification
+- `azure/FOUNDRY.md` for model choice, region and quota
+- `azure/VERCEL.md` for deployment and firewall configuration
+- `azure/SPEC.md` for the full specification
 
 ## Scripts
 
@@ -86,8 +117,3 @@ pnpm build    # production build
 pnpm start    # serve the production build
 pnpm lint     # ESLint
 ```
-
-## Stack
-
-Next.js 16 (App Router) · React 19 · TypeScript · Tailwind CSS v4 ·
-lucide-react · Azure PostgreSQL · Microsoft Foundry.
