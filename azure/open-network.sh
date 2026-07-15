@@ -48,6 +48,25 @@ az postgres flexible-server firewall-rule create \
   --start-ip-address "$MYIP" --end-ip-address "$MYIP" -o none
 
 if [ "${OPEN_TO_VERCEL:-0}" = "1" ]; then
+  # PRECONDITION, not a courtesy check. Every other defence on this server
+  # (TLS verification, the generated password, nobypassrls, RLS on every table)
+  # only engages AFTER a connection authenticates. connection_throttle is the
+  # one control that costs an attacker something for guessing, and port 5432 on
+  # *.postgres.database.azure.com is continuously scanned. Opening the range
+  # without it is the one combination that is meaningfully unsafe, so this
+  # refuses rather than warns.
+  echo "==> checking brute-force protection before opening the range"
+  THROTTLE=$(az postgres flexible-server parameter show \
+    -g "$RG" -s "$SRV" --name connection_throttle.enable --query value -o tsv)
+  if [ "$THROTTLE" != "on" ]; then
+    echo "REFUSING: connection_throttle.enable is '$THROTTLE', expected 'on'." >&2
+    echo "Fix it first:" >&2
+    echo "  az postgres flexible-server parameter set -g $RG -s $SRV \\" >&2
+    echo "    --name connection_throttle.enable --value on" >&2
+    exit 1
+  fi
+  echo "    connection_throttle.enable = on"
+
   echo "==> allowing the whole IPv4 range (for Vercel)"
   az postgres flexible-server firewall-rule create \
     -g "$RG" -s "$SRV" -n allow-vercel \

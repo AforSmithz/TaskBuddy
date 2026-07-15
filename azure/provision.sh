@@ -92,6 +92,33 @@ az postgres flexible-server parameter set \
 az postgres flexible-server parameter set \
   -g "$RG" -s "$SRV" --name statement_timeout --value 15000 -o none
 
+# BRUTE-FORCE PROTECTION. Off by default, and it is the only control here that
+# resists an attacker who has NOT authenticated yet. TLS verification, the
+# generated password, nobypassrls and RLS all assume the connection already got
+# in; this is what makes guessing expensive. Non-negotiable once the firewall
+# admits the whole IPv4 range — see open-network.sh, which refuses to open
+# without it.
+az postgres flexible-server parameter set \
+  -g "$RG" -s "$SRV" --name connection_throttle.enable --value on -o none
+
+# Observability. Without these a slow dashboard is visible as "slow" and nothing
+# more. pg_stat_statements is already in shared_preload_libraries on Flexible
+# Server; azure.extensions is the separate allowlist that permits CREATE
+# EXTENSION. 2s is well above every normal statement here, so the slow-query log
+# stays quiet until something is genuinely wrong.
+az postgres flexible-server parameter set \
+  -g "$RG" -s "$SRV" --name azure.extensions --value pg_stat_statements -o none
+az postgres flexible-server parameter set \
+  -g "$RG" -s "$SRV" --name log_min_duration_statement --value 2000 -o none
+az postgres flexible-server parameter set \
+  -g "$RG" -s "$SRV" --name track_io_timing --value on -o none
+
+# Maintenance restarts the instance, and on Burstable that is not instant.
+# Unpinned, Azure picks; Sunday 18:00 UTC is 01:00 Monday in Jakarta.
+echo "==> 5b. maintenance window"
+az postgres flexible-server update \
+  -g "$RG" -n "$SRV" --maintenance-window Sun:18:00 -o none
+
 echo "==> 6. verify limits"
 echo -n "max_connections = "
 az postgres flexible-server parameter show \
