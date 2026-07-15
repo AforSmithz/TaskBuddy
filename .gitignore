@@ -52,3 +52,13 @@ CLAUDE.md
 AGENTS.md
 HANDOFF.md
 OVERHAUL.md
+TODO.md
+STRATEGY.md
+JOINT_STRATEGY.md
+PITWALL.md
+design/
+azure/README.md
+azure/SPEC.md
+azure/FOUNDRY.md
+azure/VERCEL.md
+azure/infra/README.md
