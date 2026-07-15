@@ -1,5 +1,13 @@
 # Secrets and carried-over credential material. Never commit these.
+#
+# secrets.sh is NOT here on purpose: it contains no secrets, it fetches them
+# from Key Vault with an interactive Entra login. It is meant to be committed,
+# and it is what replaces env.sh below.
 env.sh
 seed_users.sql
 seed-users.sh
 *.pem
+
+# Written at runtime by the tsx harnesses to stub Next's `server-only` alias,
+# which plain Node cannot resolve.
+harness/.server-only-shim.js

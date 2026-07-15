@@ -22,10 +22,42 @@
 -- Set the password before running:
 --   \set app_password 'the-generated-password'
 -- or replace :'app_password' inline. Use a generated value: it is the
--- credential the Next.js app on Vercel connects with, stored as DATABASE_URL
--- in the Vercel project's environment variables. Not Key Vault — reading a
--- secret from Key Vault needs an Azure credential, which would itself have to
--- live in a Vercel env var, so it only moves the problem.
+-- credential the Next.js app on Vercel connects with.
+--
+-- WHERE THAT CREDENTIAL LIVES, AND A REVERSED DECISION.
+--
+-- This comment used to end: "stored as DATABASE_URL in the Vercel project's
+-- environment variables. Not Key Vault — reading a secret from Key Vault needs
+-- an Azure credential, which would itself have to live in a Vercel env var, so
+-- it only moves the problem."
+--
+-- That argument was correct, and it is worth keeping rather than quietly
+-- deleting, because the reason it stopped being correct is the interesting
+-- part. It describes a bootstrap loop: to read secret X you need credential Y,
+-- and Y now sits exactly where X used to. Adding a vault under those conditions
+-- removes no secrets at all.
+--
+-- Workload identity federation (azure/identity.sh) breaks the loop by making
+-- the root credential stop being a secret. Vercel mints a short-lived OIDC
+-- assertion per invocation; Entra trusts that issuer and subject and exchanges
+-- it for an access token. There is no first secret for the chain to bottom out
+-- in, so Key Vault now terminates the chain instead of extending it:
+--
+--   OIDC assertion (per invocation, never stored)
+--     -> Entra access token
+--       -> Key Vault -> DATABASE_URL
+--
+-- The premise changed, so the conclusion changed. The vault is
+-- taskbuddy-kv-3d2b5c and the app reads it as "Key Vault Secrets User", which
+-- is read-only: a compromised function cannot rotate or delete a secret.
+--
+-- WHAT DID NOT CHANGE. The app still authenticates to Postgres with THIS
+-- password, not with an Entra token, even though the server now accepts both.
+-- See azure/identity.sh step 4 for why: lib/db/pool.ts sets
+-- idleTimeoutMillis to 10s, so connections are created constantly and each new
+-- one would need a live token. That is a new failure mode on the hottest path
+-- in the system, bought for a credential that is already strong, already
+-- scoped by the grants below, and already rotatable by re-running this file.
 
 -- ---------------------------------------------------------------------------
 -- The role.

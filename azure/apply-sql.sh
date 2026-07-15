@@ -1,7 +1,16 @@
 #!/usr/bin/env bash
 # Apply the schema to Azure, in order, as the server admin.
 #
-#   bash azure/apply-sql.sh
+#   source azure/secrets.sh && bash azure/apply-sql.sh   # passwordless, preferred
+#   bash azure/apply-sql.sh                              # falls back to azure/env.sh
+#
+# CREDENTIALS. Prefer `azure/secrets.sh`: it authenticates with a Microsoft
+# Entra token and pulls the app role password from Key Vault, so no password
+# touches the disk. It leaves `ADMIN_URL` empty and sets the libpq PG*
+# variables instead, which is why every psql invocation below quotes
+# `${ADMIN_URL:-}` — an empty conninfo string is valid and means "use the
+# environment". Sourcing `azure/env.sh` sets a real URL and still works, which
+# is the break-glass path for when Entra is the thing that is broken.
 #
 # ORDER MATTERS AND SO DOES RE-RUNNING. 02 issues a blanket table-level
 # `grant select, insert, update, delete on all tables`, and 03 then revokes
@@ -12,21 +21,24 @@
 set -eu
 
 cd "$(dirname "$0")/.."
-. azure/env.sh
+# Only load the plaintext file when secrets.sh has not already set things up.
+if [ -z "${PGUSER:-}" ] && [ -z "${ADMIN_URL:-}" ]; then
+  . azure/env.sh
+fi
 
 echo "==> 01_schema.sql"
-psql "$ADMIN_URL" -v ON_ERROR_STOP=1 -f azure/sql/01_schema.sql
+psql "${ADMIN_URL:-}" -v ON_ERROR_STOP=1 -f azure/sql/01_schema.sql
 
 echo "==> 02_grants.sql"
-psql "$ADMIN_URL" -v ON_ERROR_STOP=1 \
+psql "${ADMIN_URL:-}" -v ON_ERROR_STOP=1 \
   -v app_password="$APP_PW" -v db_name="$DB" -f azure/sql/02_grants.sql
 
 echo "==> 03_auth.sql   (must follow 02, always)"
-psql "$ADMIN_URL" -v ON_ERROR_STOP=1 -f azure/sql/03_auth.sql
+psql "${ADMIN_URL:-}" -v ON_ERROR_STOP=1 -f azure/sql/03_auth.sql
 
 echo
 echo "==> verification"
-psql "$ADMIN_URL" -v ON_ERROR_STOP=1 <<'SQL'
+psql "${ADMIN_URL:-}" -v ON_ERROR_STOP=1 <<'SQL'
 \echo '-- tables with RLS off (expect zero rows) --'
 select relname from pg_class c join pg_namespace n on n.oid = c.relnamespace
 where n.nspname = 'public' and c.relkind = 'r' and not c.relrowsecurity;
