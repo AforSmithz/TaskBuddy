@@ -1,130 +1,213 @@
 import type { EntryKind, ExtractionResult } from "./types";
-import type { ChatMessage } from "./openrouter";
+import type { ChatMessage } from "./foundry";
 import { heuristicExtract, heuristicPlan } from "./heuristic";
 
 // Meeting extraction orchestrator.
-// Uses OpenRouter when configured; otherwise falls back to the offline
+// Uses Microsoft Foundry when configured; otherwise falls back to the offline
 // heuristic extractor so the app is fully usable without any API keys.
 
-export function isLLMConfigured(): boolean {
-  return Boolean(process.env.OPENROUTER_API_KEY);
-}
+// Re-exported from the provider module so there is exactly one definition of
+// "is the LLM layer configured". Nine modules and three route components import
+// it from here, including app/(app)/layout.tsx, which uses it to decide demo
+// mode — a second, drifting copy would silently flip half the app.
+export { isLLMConfigured } from "./foundry-config";
+import { isLLMConfigured } from "./foundry-config";
 
-const SYSTEM_PROMPT = `You are TaskBuddy's meeting analyst. You convert messy meeting
-notes, transcripts, or chat logs into a structured execution plan.
+// The 1-5 rubric is shared by both prompts. It used to live only in the meeting
+// prompt, and the plan prompt referred to it as "the same rubrics as meeting
+// extraction" — a dangling cross-reference, because exactly one of the two
+// prompts is ever sent. Every level is now enumerated: these six numbers feed
+// computePriority directly, so an undefined middle level is where all the
+// run-to-run variance came from.
+const FACTOR_RUBRIC = `Score each 1-5 factor. Use the whole scale.
+- Urgency: 5=due today or tomorrow, 4=due in 2-3 days, 3=due this week, 2=due next week, 1=no deadline.
+- Impact: 5=directly changes a deliverable or a stakeholder decision, 4=materially improves the deliverable, 3=useful supporting work, 2=nice to have, 1=optional.
+- Dependency: 5=blocks several other tasks, 4=blocks one major task, 3=blocks one minor task, 2=loosely coupled to other work, 1=independent.
+- Risk: 5=delay seriously hurts the deadline or quality, 4=delay causes visible slippage, 3=delay is recoverable, 2=minor consequence, 1=little consequence.
+- Effort: 5=more than 4h, 4=2-4h, 3=1-2h, 2=30-60min, 1=under 30min.
+- Confidence: 5=explicitly stated, 4=strongly implied, 3=reasonable suggestion, 2=a guess with some support, 1=uncertain.
+estimated_minutes must fall inside the Effort bucket you chose.`;
 
-Return ONLY a JSON object with this exact shape (no markdown, no commentary):
+// Constraints a JSON Schema cannot carry, shared by both prompts.
+const SHARED_RULES = `- key is a short slug unique within this response, e.g. "t1".
+- depends_on may only contain keys of other tasks in this same response. Never a task's own key, and never a cycle. If in doubt, leave it empty.
+- Resolve every relative date against the Today's date given in the user message. due_date is YYYY-MM-DD and is never earlier than today.
+- At most 15 tasks. At most 8 items in each of discussion_points, key_deliverables, assumptions, risks, decisions and open_questions. If the input yields more, merge the least important.
+- On tasks, confidence is a 1-5 number. On decisions and open_questions it is "High", "Medium" or "Low".`;
 
-{
-  "title": string,
-  "summary": string,
-  "suggested_area": string,        // best life-area for the whole entry
-  "suggested_project": string|null,// concise project name grouping these tasks, or null
-  "discussion_points": string[],
-  "stakeholders": string[],
-  "daily_objective": string,
-  "key_deliverables": string[],
-  "assumptions": string[],
-  "risks": string[],
-  "decisions": [{ "decision": string, "source_quote": string|null, "confidence": "High"|"Medium"|"Low" }],
-  "open_questions": [{ "question": string, "related_stakeholder": string|null, "source_quote": string|null, "confidence": "High"|"Medium"|"Low" }],
-  "tasks": [{
-    "key": string,                 // unique slug, e.g. "t1", used by depends_on
-    "title": string,
-    "description": string,
-    "owner": string|null,
-    "category": string|null,
-    "due_date": string|null,       // ISO date YYYY-MM-DD or null
-    "estimated_minutes": number,
-    "source_quote": string|null,   // null for AI-suggested tasks
-    "is_ai_suggested": boolean,
-    "blocked_by": string|null,     // short note if blocked
-    "depends_on": string[],        // keys of prerequisite tasks
-    "urgency": number,             // 1-5
-    "impact": number,              // 1-5
-    "dependency": number,          // 1-5
-    "risk": number,                // 1-5
-    "effort": number,              // 1-5
-    "confidence": number,          // 1-5
-    "priority_reason": string      // one sentence explaining the priority
-  }]
-}
+const SYSTEM_PROMPT = `Convert messy meeting notes, transcripts or chat logs into a structured execution plan.
 
 Rules:
-- suggested_area: the single life-area that best fits the entry as a whole. Prefer
-  one of "Work", "Personal", "Hobby"; only invent a new concise area if none fit.
-  Classify by the nature of the activity, not the words used — e.g. learning an
-  instrument or a sport is "Hobby", not "Work".
-- suggested_project: a short project name that groups these tasks when they form an
-  ongoing initiative or goal; otherwise null. If an existing project is provided
-  and clearly fits, reuse its exact name.
-- Extract tasks EXPLICITLY mentioned, AND suggest missing tasks needed to reach the
-  objective (set is_ai_suggested true, source_quote null for those).
-- Score each 1-5 factor honestly using these rubrics:
-  Urgency: 5=due today/tomorrow, 4=2-3 days, 3=this week, 2=next week, 1=no deadline.
-  Impact: 5=directly affects deliverable/stakeholder decision ... 1=optional.
-  Dependency: 5=blocks multiple tasks, 4=blocks one major task ... 1=independent.
-  Risk: 5=delay seriously hurts deadline/quality ... 1=little consequence.
-  Effort: 5=>4h, 4=2-4h, 3=1-2h, 2=30-60min, 1=<30min.
-  Confidence: 5=explicitly stated, 4=strongly implied, 3=reasonable suggestion ... 1=uncertain.
-- Separate decisions (choices made) from tasks (work to do).
-- Open questions are unresolved points that need follow-up.
-- Keep titles concise. Be faithful to the source; do not invent owners or dates.`;
+- suggested_area: the single life-area that best fits the entry as a whole. Prefer one of "Work", "Personal", "Hobby"; only invent a new concise area if none fit. Classify by the nature of the activity, not the words used: learning an instrument or a sport is "Hobby", not "Work".
+- suggested_project: a short project name that groups these tasks when they form an ongoing initiative or goal; otherwise null. If an existing project is provided and clearly fits, reuse its exact name.
+- Extract tasks EXPLICITLY mentioned, AND suggest missing tasks needed to reach the objective. For a suggested task set is_ai_suggested true and source_quote null.
+- source_quote must be copied character-for-character from the input, at most 160 characters. If you cannot copy it verbatim, use null. A paraphrased quote is worse than none, because it looks citable.
+- Separate decisions (choices made) from tasks (work to do). If an item is both a decision and work to do, emit it in BOTH, with the task's source_quote matching the decision's. If an item is both an open question and work to do, emit it only as a task whose title is the investigation.
+- blocked_by is a short human-readable note naming what blocks the task ("waiting on the vendor contract"), never a task key. null when nothing blocks it.
+- Always return at least one task. If the input contains no actionable work, return exactly one task naming the clarification needed, with is_ai_suggested true, confidence 1, source_quote null, and a priority_reason saying what is missing.
+- Be faithful to the source. Do not invent owners or dates. Keep titles concise.
+${SHARED_RULES}
 
-const PLAN_SYSTEM_PROMPT = `You are TaskBuddy's planning coach. You convert a personal
-goal or freeform note into a realistic, actionable plan.
+${FACTOR_RUBRIC}`;
 
-Return ONLY a JSON object with this exact shape (no markdown, no commentary):
-
-{
-  "title": string,                 // a short name for the goal
-  "summary": string,                // a brief overview of the plan
-  "suggested_area": string,          // best life-area: "Work", "Personal", "Hobby", ...
-  "suggested_project": string,       // a concise project name for this goal
-  "discussion_points": [],           // leave empty
-  "stakeholders": [],                // leave empty
-  "daily_objective": string,         // restate the goal as a clear objective
-  "key_deliverables": string[],      // the milestones that mark real progress
-  "assumptions": string[],           // assumptions the plan relies on
-  "risks": string[],                 // things that could derail the plan
-  "decisions": [],                   // leave empty
-  "open_questions": [],              // leave empty
-  "tasks": [{
-    "key": string,                 // unique slug, e.g. "t1", used by depends_on
-    "title": string,
-    "description": string,
-    "owner": null,
-    "category": string|null,
-    "due_date": string|null,       // ISO date YYYY-MM-DD or null
-    "estimated_minutes": number,
-    "source_quote": null,
-    "is_ai_suggested": true,        // every task in a plan is AI-suggested
-    "blocked_by": string|null,
-    "depends_on": string[],        // keys of prerequisite tasks
-    "urgency": number,             // 1-5
-    "impact": number,              // 1-5
-    "dependency": number,          // 1-5
-    "risk": number,                // 1-5
-    "effort": number,              // 1-5
-    "confidence": number,          // 1-5
-    "priority_reason": string
-  }]
-}
+const PLAN_SYSTEM_PROMPT = `Convert a personal goal or freeform note into a realistic, actionable plan.
 
 Rules:
-- suggested_area: the life-area that best fits this goal. Prefer one of "Work",
-  "Personal", "Hobby"; classify by the nature of the activity — learning an
-  instrument, a craft, or a sport is "Hobby", not "Work".
-- suggested_project: always propose a short project name for this goal (e.g.
-  "Learning Guitar"). If an existing project is provided and clearly fits, reuse
-  its exact name.
-- Break the goal into concrete, sequenced steps a person can actually do.
-- Sequence the steps with depends_on so prerequisite steps run first (e.g. you
-  must acquire an instrument before you can practice it).
-- Spread due dates sensibly across the goal's timeframe (e.g. "this week").
-- Score each 1-5 factor using the same rubrics as meeting extraction.
-- Every task is AI-suggested: set is_ai_suggested true and source_quote null.
-- Keep titles concise and motivating.`;
+- suggested_area: the life-area that best fits this goal. Prefer one of "Work", "Personal", "Hobby". Classify by the nature of the activity: learning an instrument, a craft or a sport is "Hobby", not "Work".
+- suggested_project: always propose a short project name for this goal, e.g. "Learning Guitar". If an existing project is provided and clearly fits, reuse its exact name.
+- discussion_points, stakeholders, decisions and open_questions must be empty arrays. This is a plan, not a meeting.
+- Every task is AI-suggested: is_ai_suggested true, source_quote null, owner null.
+- Break the goal into concrete, sequenced steps a person can actually do, and sequence them with depends_on so prerequisites run first. You must acquire an instrument before you can practise it.
+- Spread due dates evenly across the goal's stated timeframe. If the input states no timeframe, spread them over the next 30 days.
+- If the input is empty or is not a goal at all, return exactly one task asking for the goal to be restated, with confidence 1.
+- Keep titles concise and motivating.
+${SHARED_RULES}
+
+${FACTOR_RUBRIC}`;
+
+// Strict JSON Schema for ExtractionResult. One schema serves BOTH prompts —
+// the fields are identical, only the population rules differ, and the plan-only
+// invariants (owner/source_quote null, is_ai_suggested true) are enforced in
+// normalize() rather than by forking the schema.
+//
+// Strict mode requires every property in `required` and additionalProperties
+// false on every object; optionality is a ["string","null"] union, never an
+// omitted key. Caps stay in prose: maxItems is enforced by truncating the
+// decoder rather than by telling the model, which makes it cram the discarded
+// content into the last surviving element.
+const CONFIDENCE_ENUM = { type: "string", enum: ["High", "Medium", "Low"] };
+const FACTOR = { type: "integer", enum: [1, 2, 3, 4, 5] };
+
+const EXTRACTION_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: [
+    "title",
+    "summary",
+    "suggested_area",
+    "suggested_project",
+    "discussion_points",
+    "stakeholders",
+    "daily_objective",
+    "key_deliverables",
+    "assumptions",
+    "risks",
+    "decisions",
+    "open_questions",
+    "tasks",
+  ],
+  properties: {
+    title: { type: "string" },
+    summary: { type: "string" },
+    suggested_area: {
+      type: ["string", "null"],
+      description: 'Best life-area for the whole entry: "Work", "Personal", "Hobby", or a new concise area.',
+    },
+    suggested_project: {
+      type: ["string", "null"],
+      description: "Concise project name grouping these tasks, or null.",
+    },
+    discussion_points: { type: "array", items: { type: "string" } },
+    stakeholders: { type: "array", items: { type: "string" } },
+    daily_objective: { type: "string" },
+    key_deliverables: { type: "array", items: { type: "string" } },
+    assumptions: { type: "array", items: { type: "string" } },
+    risks: { type: "array", items: { type: "string" } },
+    decisions: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["decision", "source_quote", "confidence"],
+        properties: {
+          decision: { type: "string" },
+          source_quote: {
+            type: ["string", "null"],
+            description: "Verbatim substring of the input, at most 160 chars, or null.",
+          },
+          confidence: CONFIDENCE_ENUM,
+        },
+      },
+    },
+    open_questions: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["question", "related_stakeholder", "source_quote", "confidence"],
+        properties: {
+          question: { type: "string" },
+          related_stakeholder: { type: ["string", "null"] },
+          source_quote: {
+            type: ["string", "null"],
+            description: "Verbatim substring of the input, at most 160 chars, or null.",
+          },
+          confidence: CONFIDENCE_ENUM,
+        },
+      },
+    },
+    tasks: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: [
+          "key",
+          "title",
+          "description",
+          "owner",
+          "category",
+          "due_date",
+          "estimated_minutes",
+          "source_quote",
+          "is_ai_suggested",
+          "blocked_by",
+          "depends_on",
+          "urgency",
+          "impact",
+          "dependency",
+          "risk",
+          "effort",
+          "confidence",
+          "priority_reason",
+        ],
+        properties: {
+          key: { type: "string", description: 'Short slug unique in this response, e.g. "t1".' },
+          title: { type: "string" },
+          description: { type: "string" },
+          owner: { type: ["string", "null"] },
+          category: { type: ["string", "null"] },
+          due_date: {
+            type: ["string", "null"],
+            description: "YYYY-MM-DD, never earlier than today, or null.",
+          },
+          estimated_minutes: { type: "integer" },
+          source_quote: {
+            type: ["string", "null"],
+            description: "Verbatim substring of the input, or null for an AI-suggested task.",
+          },
+          is_ai_suggested: { type: "boolean" },
+          blocked_by: {
+            type: ["string", "null"],
+            description: "Short note naming what blocks this task, never a task key.",
+          },
+          depends_on: {
+            type: "array",
+            items: { type: "string" },
+            description: "Keys of prerequisite tasks in this same response.",
+          },
+          urgency: FACTOR,
+          impact: FACTOR,
+          dependency: FACTOR,
+          risk: FACTOR,
+          effort: FACTOR,
+          confidence: FACTOR,
+          priority_reason: { type: "string", description: "One sentence." },
+        },
+      },
+    },
+  },
+} as const;
 
 const HEURISTIC = {
   meeting: heuristicExtract,
@@ -136,9 +219,15 @@ const USER_LABEL: Record<EntryKind, string> = {
   plan: "Goal or note",
 };
 
-// A flaky free model can return an empty or unusable response on any given
-// call, so the LLM extraction is retried this many times before giving up.
-const MAX_LLM_ATTEMPTS = 3;
+// A strict schema removes the malformed-JSON and fenced-output failure modes
+// entirely, so only truncation, refusal and 429 remain. Two attempts is enough;
+// this was 3 when the fallback was a flaky free-tier model.
+const MAX_LLM_ATTEMPTS = 2;
+
+// Prose caps the model is asked to respect. Enforced here too, because a cap
+// the model ignores must not reach the database.
+const MAX_TASKS = 15;
+const MAX_LIST_ITEMS = 8;
 
 /**
  * Extract a structured plan from raw input. `kind` selects the meeting
@@ -158,8 +247,9 @@ export async function extractEntry(
     return { result: HEURISTIC[kind](rawInput), source: "heuristic" };
   }
 
-  // Imported lazily so the app loads without an OpenRouter key configured.
-  const { callOpenRouterJSON } = await import("./openrouter");
+  // Imported lazily so the app loads without Foundry configured; lib/foundry.ts
+  // is server-only.
+  const { callFoundryJSON } = await import("./foundry");
   const projectHint = context.projectNames?.length
     ? `\n\nExisting projects you may reuse by exact name: ${context.projectNames.join(", ")}.`
     : "";
@@ -169,6 +259,8 @@ export async function extractEntry(
       content: kind === "plan" ? PLAN_SYSTEM_PROMPT : SYSTEM_PROMPT,
     },
     {
+      // The variable parts stay in the user message so the system prefix is
+      // byte-stable and cacheable. Do not move the date into the system prompt.
       role: "user",
       content: `Today's date is ${new Date()
         .toISOString()
@@ -178,13 +270,16 @@ export async function extractEntry(
 
   for (let attempt = 1; attempt <= MAX_LLM_ATTEMPTS; attempt++) {
     try {
-      const result = await callOpenRouterJSON<ExtractionResult>(messages, {
-        // An extraction with no tasks is unusable: reject it so the model
-        // fallback chain advances, and so this whole attempt counts as a
-        // failure worth retrying.
+      const result = await callFoundryJSON<ExtractionResult>(messages, {
+        schema: EXTRACTION_SCHEMA as unknown as Record<string, unknown>,
+        schemaName: "extraction_result",
+        // Extraction is largely transcription; the judgement is in the scoring.
+        reasoningEffort: "low",
+        // The schema guarantees `tasks` is an array but not that it is
+        // non-empty, and an extraction with no tasks is unusable downstream.
         validate: (r) => Array.isArray(r.tasks) && r.tasks.length > 0,
       });
-      return { result: normalize(result), source: "llm" };
+      return { result: normalize(result, kind, rawInput), source: "llm" };
     } catch (err) {
       console.error(
         `LLM extraction attempt ${attempt}/${MAX_LLM_ATTEMPTS} failed:`,
@@ -199,9 +294,21 @@ export async function extractEntry(
   return { result: HEURISTIC[kind](rawInput), source: "heuristic" };
 }
 
-/** Defensive normalisation in case the model omits arrays or mistypes fields. */
-function normalize(r: ExtractionResult): ExtractionResult {
+/**
+ * Enforces what the schema provably cannot: the list caps, the plan-only
+ * invariants, `depends_on` referential integrity, and the verbatim-quote rule.
+ * The `arr()` / `?? null` guards below are unreachable under a strict schema
+ * but are kept as cheap defence for the heuristic path and any future
+ * non-strict caller.
+ */
+function normalize(
+  r: ExtractionResult,
+  kind: EntryKind,
+  rawInput: string,
+): ExtractionResult {
   const arr = <T>(x: T[] | undefined | null): T[] => (Array.isArray(x) ? x : []);
+  const cap = <T>(x: T[] | undefined | null): T[] =>
+    arr(x).slice(0, MAX_LIST_ITEMS);
   // Clamp a 1-5 factor score; default to the neutral 3 when missing/invalid.
   const score = (n: unknown): number => {
     const v = Math.round(Number(n));
@@ -212,39 +319,70 @@ function normalize(r: ExtractionResult): ExtractionResult {
     const v = typeof x === "string" ? x.trim() : "";
     return v.length > 0 ? v : null;
   };
+  // Provenance is the whole point of source_quote, so a quote that is not
+  // actually in the input is dropped rather than shown as citable.
+  const haystack = rawInput.toLowerCase();
+  const quote = (x: unknown): string | null => {
+    const v = str(x);
+    if (!v) return null;
+    return haystack.includes(v.toLowerCase()) ? v : null;
+  };
+
+  const isPlan = kind === "plan";
+  const tasks = arr(r.tasks).slice(0, MAX_TASKS);
+  // depends_on may only point at keys that exist in this response, and only
+  // backwards, which makes a cycle unrepresentable.
+  const seen = new Set<string>();
+
   return {
     title: r.title || "Untitled entry",
     summary: r.summary || "",
     suggested_area: str(r.suggested_area),
     suggested_project: str(r.suggested_project),
-    discussion_points: arr(r.discussion_points),
-    stakeholders: arr(r.stakeholders),
+    discussion_points: isPlan ? [] : cap(r.discussion_points),
+    stakeholders: isPlan ? [] : cap(r.stakeholders),
     daily_objective: r.daily_objective || "",
-    key_deliverables: arr(r.key_deliverables),
-    assumptions: arr(r.assumptions),
-    risks: arr(r.risks),
-    decisions: arr(r.decisions),
-    open_questions: arr(r.open_questions),
-    tasks: arr(r.tasks).map((t, i) => ({
-      ...t,
-      key: t.key || `t${i + 1}`,
-      title: t.title || "Untitled task",
-      description: t.description || "",
-      owner: t.owner ?? null,
-      category: t.category ?? null,
-      due_date: t.due_date ?? null,
-      source_quote: t.source_quote ?? null,
-      blocked_by: t.blocked_by ?? null,
-      priority_reason: t.priority_reason || "",
-      depends_on: arr(t.depends_on),
-      estimated_minutes: Number(t.estimated_minutes) || 30,
-      is_ai_suggested: Boolean(t.is_ai_suggested),
-      urgency: score(t.urgency),
-      impact: score(t.impact),
-      dependency: score(t.dependency),
-      risk: score(t.risk),
-      effort: score(t.effort),
-      confidence: score(t.confidence),
-    })),
+    key_deliverables: cap(r.key_deliverables),
+    assumptions: cap(r.assumptions),
+    risks: cap(r.risks),
+    decisions: isPlan
+      ? []
+      : cap(r.decisions).map((d) => ({ ...d, source_quote: quote(d.source_quote) })),
+    open_questions: isPlan
+      ? []
+      : cap(r.open_questions).map((q) => ({
+          ...q,
+          source_quote: quote(q.source_quote),
+        })),
+    tasks: tasks.map((t, i) => {
+      const key = t.key || `t${i + 1}`;
+      const dependsOn = arr(t.depends_on).filter(
+        (k) => k !== key && seen.has(k),
+      );
+      seen.add(key);
+      return {
+        ...t,
+        key,
+        title: t.title || "Untitled task",
+        description: t.description || "",
+        // A plan has no meeting behind it, so these three are structural, not
+        // stylistic. Prose asks for them; this guarantees them.
+        owner: isPlan ? null : (t.owner ?? null),
+        source_quote: isPlan ? null : quote(t.source_quote),
+        is_ai_suggested: isPlan ? true : Boolean(t.is_ai_suggested),
+        category: t.category ?? null,
+        due_date: t.due_date ?? null,
+        blocked_by: t.blocked_by ?? null,
+        priority_reason: t.priority_reason || "",
+        depends_on: dependsOn,
+        estimated_minutes: Number(t.estimated_minutes) || 30,
+        urgency: score(t.urgency),
+        impact: score(t.impact),
+        dependency: score(t.dependency),
+        risk: score(t.risk),
+        effort: score(t.effort),
+        confidence: score(t.confidence),
+      };
+    }),
   };
 }

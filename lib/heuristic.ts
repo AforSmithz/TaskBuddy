@@ -1,7 +1,7 @@
 import type { ExtractionResult, ExtractedTask, Confidence } from "./types";
 
 // Offline heuristic extractor.
-// Used when OpenRouter is not configured so the full pipeline still works.
+// Used when Foundry is not configured so the full pipeline still works.
 // It is intentionally rule-based — good enough to demo the workflow end to end.
 
 const WEEKDAYS = [
