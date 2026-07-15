@@ -146,6 +146,13 @@ create table if not exists decisions (
   created_at   timestamptz not null default now()
 );
 
+-- This table has no user_id; decisions_owner scopes it with an EXISTS subquery
+-- through entry_id. That subquery runs on EVERY access, not just on explicit
+-- joins, so the FK needs its own index or the policy costs a sequential scan
+-- each time. Storage here is P4 at 120 IOPS, which punishes scans out of
+-- proportion to table size.
+create index if not exists decisions_entry_id_idx on decisions(entry_id);
+
 -- ---------------------------------------------------------------------------
 -- Open questions: unresolved points needing follow-up.
 -- ---------------------------------------------------------------------------
@@ -159,6 +166,10 @@ create table if not exists open_questions (
   status              text not null default 'open', -- open | resolved
   created_at          timestamptz not null default now()
 );
+
+-- Same reason as decisions_entry_id_idx: open_questions_owner is an EXISTS
+-- policy through entry_id.
+create index if not exists open_questions_entry_id_idx on open_questions(entry_id);
 
 -- ---------------------------------------------------------------------------
 -- Tasks: explicit + AI-suggested action items with scoring.
@@ -214,6 +225,15 @@ create table if not exists task_dependencies (
   reason              text,
   unique (task_id, depends_on_task_id)
 );
+
+-- The unique constraint above already indexes task_id, but only as the LEADING
+-- column, so it does nothing for the reverse-edge lookup ("what depends on this
+-- task?") that dependency-graph walks and cascade deletes both perform. entry_id
+-- gets its own index for the same EXISTS-policy reason as the two above.
+create index if not exists task_dependencies_entry_id_idx
+  on task_dependencies(entry_id);
+create index if not exists task_dependencies_depends_on_idx
+  on task_dependencies(depends_on_task_id);
 
 -- ---------------------------------------------------------------------------
 -- Goal criteria: the definition-of-done checklist for a goal.
