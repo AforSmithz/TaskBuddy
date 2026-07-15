@@ -9,8 +9,8 @@ import type {
 // Deterministic schedule generator.
 // Orders tasks by dependency first, then by a schedule score derived from
 // priority, and packs them across real days using the same deployable-hours
-// model the forecast uses — so the plan respects your actual availability
-// (weekends, day capacities, commitments) instead of a fictional 9–5.
+// model the forecast uses - so the plan respects your actual availability
+// (weekends, day capacities, commitments) instead of a fictional 9 - 5.
 //
 // The output is a *derived view*: it carries no wall-clock times (we only know
 // hours per day, not when you sit down) and is recomputed from live tasks +
@@ -30,7 +30,7 @@ export interface DependencyEdge {
   depends_on_task_id: string;
 }
 
-/** One task's slot within a day — a duration, not a clock range. */
+/** One task's slot within a day - a duration, not a clock range. */
 export interface ScheduledBlock {
   task_id: string | null;
   label: string;
@@ -184,7 +184,7 @@ export interface DayCapacity {
 /** One time-of-day SEGMENT of a day's capacity (OVERHAUL S3b Pillar 2): the slice
  *  of the day's minutes that falls in one of the five S2 windows, plus that window's
  *  net velocity multiplier. A windowed forecast flows across these instead of whole
- *  days — but the deadline check stays day-granular (every segment carries its `iso`).
+ *  days - but the deadline check stays day-granular (every segment carries its `iso`).
  *  Built by `arrange.ts windowCapacities`; a flat/unlearned split sums per day to the
  *  whole-day capacity with `netMultiplier === 1`, so it degrades to today bit-for-bit. */
 export interface WindowCapacity {
@@ -200,13 +200,13 @@ export interface WindowCapacity {
  * Deployable minutes for each day from `anchorDate` forward across `horizonDays`:
  * (override ?? weekday template) − commitments, floored at 0. Zero-capacity days
  * (weekends / fully-committed) are kept so a caller can index by day offset. This
- * is the same per-day math the forecast's `deployableMinutes` sums — exposed here
+ * is the same per-day math the forecast's `deployableMinutes` sums - exposed here
  * as a per-day series the packer and the global Monte Carlo both walk.
  */
 /** Signed, UNFLOORED per-day slack in hours: availability − all consumed (incl. the
  *  recurring drain folded into `commitments`). `dayCapacities` is just its non-negative
  *  floor; the strategy review screen ships the signed value so a multi-skip re-solve can
- *  add freed drain back and apply the floor ONCE — composing any subset of skips exactly,
+ *  add freed drain back and apply the floor ONCE - composing any subset of skips exactly,
  *  even on a day whose drain already exceeds availability (where per-skip floored vectors
  *  would under-count). */
 export interface DaySlack {
@@ -269,7 +269,7 @@ function firstOpenDay(capacities: DayCapacity[], from: number): number {
  * with capacity; an item larger than a whole day stays on a fresh day and overruns
  * it (never loops). Items that run past the horizon pin to the last day.
  *
- * Pure numbers, no allocation beyond the result — this is the hot path the global
+ * Pure numbers, no allocation beyond the result - this is the hot path the global
  * Monte Carlo calls once per iteration, so it takes raw durations (the caller
  * decides any flooring/defaulting) and never builds block objects.
  */
@@ -281,7 +281,7 @@ export function packOffsets(
   if (capacities.length === 0) return offsets;
 
   let dayIdx = firstOpenDay(capacities, 0);
-  // No deployable time anywhere — everything lands on the final day (overrun).
+  // No deployable time anywhere - everything lands on the final day (overrun).
   if (dayIdx >= capacities.length) return offsets.fill(capacities.length - 1);
 
   let used = 0;
@@ -296,7 +296,7 @@ export function packOffsets(
         dayIdx = next;
         used = 0;
       }
-      // else: past the horizon — stay on the current day and overrun it.
+      // else: past the horizon - stay on the current day and overrun it.
     }
     offsets[k] = dayIdx;
     used += duration;
@@ -309,7 +309,7 @@ export function packOffsets(
  * single-day assignment, but ALSO meter each day's HARD-work minutes (`hardMinutes[k]` =
  * a task's difficulty-weighted minutes) against a soft daily `comfortCap`. A hard task
  * rolls to the next open day when the current day already holds hard work and this task
- * would push it past the cap — so deep work spreads across days instead of cramming one.
+ * would push it past the cap - so deep work spreads across days instead of cramming one.
  * The total per-day capacity still bounds placement. With `comfortCap === Infinity` (or
  * all `hardMinutes === 0`) it never rolls for the cap ⇒ byte-identical to `packOffsets`.
  */
@@ -338,7 +338,7 @@ export function packOffsetsComfort(
         used = 0;
         hardUsed = 0;
       }
-      // else: past the horizon — stay on the current day and overrun it.
+      // else: past the horizon - stay on the current day and overrun it.
     }
     offsets[k] = dayIdx;
     used += durations[k];
@@ -349,7 +349,7 @@ export function packOffsetsComfort(
 
 /**
  * Time-accurate finish offsets: walk `durations` (in order) and flow each task's
- * minutes across day capacities as a continuous resource — a task longer than a
+ * minutes across day capacities as a continuous resource - a task longer than a
  * day's remaining time spills into the following days, finishing on the day its
  * last minute lands. This is the multi-day generalisation of "does the work fit
  * in the budget?" the forecast needs (unlike `packOffsets`, which keeps an
@@ -373,7 +373,7 @@ export function flowFinishOffsets(
     while (need > remaining) {
       const next = firstOpenDay(capacities, dayIdx + 1);
       if (next >= capacities.length) {
-        // Out of budget — this task and everything after it spill past the horizon.
+        // Out of budget - this task and everything after it spill past the horizon.
         for (let j = k; j < durations.length; j++) offsets[j] = capacities.length - 1;
         return offsets;
       }
@@ -393,12 +393,12 @@ export function flowFinishOffsets(
  * than a day spills into following days), but ALSO meter each day's HARD-work minutes
  * (`hardMinutes[k]` = a task's difficulty-weighted minutes) against a soft daily
  * `comfortCap`. Before a hard task starts, if the current day already holds hard work and
- * adding it would exceed the cap, it rolls to the next open day first — spreading deep
+ * adding it would exceed the cap, it rolls to the next open day first - spreading deep
  * work across days. Hard load is booked on the day the task lands; a single task bigger
  * than the cap can't be split, so it overruns the cap on its own day (the cap is soft).
  *
  * No-regret: with `comfortCap === Infinity` (or every `hardMinutes === 0`) it NEVER rolls
- * for the cap, so it is byte-identical to `flowFinishOffsets` — the regression the harness
+ * for the cap, so it is byte-identical to `flowFinishOffsets` - the regression the harness
  * pins. The deadline check stays day-granular (returns finish-day offsets), so the gate is
  * apples-to-apples against the canonical (uncapped) forecast.
  */
@@ -478,17 +478,17 @@ function firstOpenLane(lanes: FlowLane[], from: number): number {
  * the `dayOffset` of the lane its last minute lands on. A lane with multiplier `m` and
  * `remaining` wall-clock capacity absorbs `remaining / m` estimated minutes, so a task
  * that begins in a fast window but spills into a slow one is priced part-fast,
- * part-slow — not wholly at its start rate (the OVERHAUL S3b Phase-4 refinement over the
+ * part-slow - not wholly at its start rate (the OVERHAUL S3b Phase-4 refinement over the
  * original start-window pricing).
  *
  * With one lane per day and `netMultiplier === 1` it is byte-identical to
- * `flowFinishOffsets` — the no-regret anchor the harness proves (`× 1.0` and `/ 1.0` are
+ * `flowFinishOffsets` - the no-regret anchor the harness proves (`× 1.0` and `/ 1.0` are
  * exact, so the per-fraction form collapses to the day-granular flow bit-for-bit). The
  * windowed series is a safe superset: lanes summing to a day's capacity, filled in clock
  * order, consume exactly that capacity before crossing to the next day, so a flat,
  * unlearned split returns the same finish DAY for every task. The lane is advanced past
  * any exhausted segment only for real work (a zero-minute task never advances the cursor
- * — that keeps the daily path bit-identical) before its first fraction is priced.
+ * - that keeps the daily path bit-identical) before its first fraction is priced.
  */
 export function flowFinishOffsetsLanes(
   durations: number[],
@@ -536,7 +536,7 @@ export function flowFinishOffsetsLanes(
   return offsets;
 }
 
-/** First lane strictly after the current day with any capacity — the comfort roll's
+/** First lane strictly after the current day with any capacity - the comfort roll's
  *  target (deep work spreads across DAYS, so a hard-cap roll skips the rest of today's
  *  windows). Skips same-day-or-earlier lanes and exhausted ones. */
 function firstOpenLaneNextDay(lanes: FlowLane[], from: number, currentDay: number): number {
@@ -551,12 +551,12 @@ function firstOpenLaneNextDay(lanes: FlowLane[], from: number, currentDay: numbe
  * The comfort × window COMPOSITION (OVERHAUL S3b Phase 4): flow `durations` across window
  * LANES (each fraction charged at the lane it occupies, window-spanning, exactly as
  * `flowFinishOffsetsLanes`) AND meter each DAY's HARD-work minutes against a soft
- * `comfortCap` (exactly as `flowFinishOffsetsComfort`) — so a learned-fast window shrinks
+ * `comfortCap` (exactly as `flowFinishOffsetsComfort`) - so a learned-fast window shrinks
  * effective work WHILE deep work still spreads across days. The two objectives compose
  * instead of one taking precedence (the Phase-3 limitation this lifts).
  *
  * The comfort roll is per-DAY (a hard task that would bust the current day's cap waits for
- * the next open day — skipping the rest of today's windows), while the capacity flow is
+ * the next open day - skipping the rest of today's windows), while the capacity flow is
  * per-LANE; hard load is booked on the finish day (a task that spills to a later day resets
  * that day's hard tally to its own load), mirroring `flowFinishOffsetsComfort` exactly.
  *
@@ -634,7 +634,7 @@ export function flowFinishOffsetsComfortLanes(
     remaining -= est * lanes[i].netMultiplier;
     const finishDay = lanes[i].dayOffset;
     // Hard load counts on the finish day; a task that spilled to a later day is the first
-    // hard work there (reset), else it adds to the running tally — mirrors the day flow.
+    // hard work there (reset), else it adds to the running tally - mirrors the day flow.
     hardUsed = finishDay !== startDay ? hard : hardUsed + hard;
     currentDay = finishDay;
     offsets[k] = finishDay;
@@ -661,7 +661,7 @@ export interface PackResult {
 
 /**
  * Pack `items` into real days using `packOffsets`, building the rich
- * `ScheduleDay[]` view. `durationOf` supplies each item's minutes — a point
+ * `ScheduleDay[]` view. `durationOf` supplies each item's minutes - a point
  * estimate for a deterministic schedule, a sampled duration inside a simulation.
  * With `reviewBuffer`, a closing buffer caps the last day with work. With `comfort`,
  * the display mirrors the comfort-capped flow (OVERHAUL S3b Phase 3): each item's hard
@@ -677,7 +677,7 @@ export function packBlocks(
     comfort?: { difficulty: number[]; comfortCap: number };
   } = {},
 ): PackResult {
-  // No deployable time anywhere in the horizon — no schedule to show.
+  // No deployable time anywhere in the horizon - no schedule to show.
   if (items.length === 0 || firstOpenDay(capacities, 0) >= capacities.length) {
     return { days: [], finishOffsetByTask: new Map() };
   }

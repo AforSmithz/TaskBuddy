@@ -23,7 +23,7 @@ const MOD_LABEL: Record<ModificationKind, string> = {
 /**
  * Reshaping only recovers the *forecast* when the deadline itself is in jeopardy
  * (over budget / at risk). A project flagged only for a blocked or overdue task
- * is on time — its fix is Generate's unblock, not reshaping the plan.
+ * is on time - its fix is Generate's unblock, not reshaping the plan.
  */
 function hasModifySignals(plan: RecoveryPlan): boolean {
   return plan.reasons.some((r) => r.severity === "critical");
@@ -33,7 +33,7 @@ type Phase = "loading" | "ready" | "empty";
 
 /**
  * The Modify half of the recovery callout (Step 2): fires the strategist in the
- * background to reshape existing tasks — scope a task down or split a monolith —
+ * background to reshape existing tasks - scope a task down or split a monolith - 
  * so the plan fits the budget. The user accepts explicitly; the preview
  * probability is the deterministic forecast's, never the LLM's.
  */

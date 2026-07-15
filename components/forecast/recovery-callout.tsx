@@ -194,7 +194,7 @@ export function RecoveryCallout({ plan }: { plan: RecoveryPlan }) {
         </p>
       )}
 
-      {/* Overdue tasks — reschedule the due date or mark done, inline. */}
+      {/* Overdue tasks - reschedule the due date or mark done, inline. */}
       {plan.overdue.length > 0 && (
         <div className="mt-3.5 space-y-1.5">
           <p className="text-[11px] font-medium uppercase tracking-wide text-[var(--color-fg-subtle)]">
@@ -206,7 +206,7 @@ export function RecoveryCallout({ plan }: { plan: RecoveryPlan }) {
         </div>
       )}
 
-      {/* Blocked tasks — clear the blocker, inline. */}
+      {/* Blocked tasks - clear the blocker, inline. */}
       {plan.blocked.length > 0 && (
         <div className="mt-3.5 space-y-1.5">
           <p className="text-[11px] font-medium uppercase tracking-wide text-[var(--color-fg-subtle)]">
@@ -218,20 +218,20 @@ export function RecoveryCallout({ plan }: { plan: RecoveryPlan }) {
         </div>
       )}
 
-      {/* No automatic move recovers it — tell the user what's left to do. */}
+      {/* No automatic move recovers it - tell the user what's left to do. */}
       {noRecovery && (
         <p className="mt-3.5 text-[12px] text-[var(--color-fg-muted)]">
           No single move recovers this automatically — add hours or split the work.
         </p>
       )}
 
-      {/* LLM-proposed corrective tasks — loads in the background, user-approved. */}
+      {/* LLM-proposed corrective tasks - loads in the background, user-approved. */}
       <RecoverySuggestions plan={plan} />
 
-      {/* LLM-reshaped existing tasks (scope down / split) — also user-approved. */}
+      {/* LLM-reshaped existing tasks (scope down / split) - also user-approved. */}
       <RecoveryModifications plan={plan} />
 
-      {/* LLM whole-plan re-route (a different approach) — the boldest move, last. */}
+      {/* LLM whole-plan re-route (a different approach) - the boldest move, last. */}
       <RecoveryReroute plan={plan} />
 
       {/* Advisory re-sequence */}

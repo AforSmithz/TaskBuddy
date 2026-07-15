@@ -9,13 +9,13 @@ import {
 } from "./lib/session";
 
 // Proxy (Next.js 16's renamed Middleware). Runs before every page request: it
-// verifies the session cookie and gates access — signed-out visitors are sent to
+// verifies the session cookie and gates access - signed-out visitors are sent to
 // /login, signed-in visitors are kept out of the auth pages.
 //
 // IT IMPORTS lib/session.ts AND NOTHING ELSE FROM THE AUTH STACK. No `pg`, no
 // `bcryptjs`. In 16.2.6 the proxy runs on Node.js always (the `runtime` option is
 // not configurable here and setting it throws), so those would not be a *build*
-// error — they would be a runtime disaster. The proxy fires on every route
+// error - they would be a runtime disaster. The proxy fires on every route
 // including prefetches, and a database round trip per invocation would burn
 // through the ~35 usable connections the Burstable tier allows.
 //
@@ -39,7 +39,7 @@ export async function proxy(request: NextRequest): Promise<NextResponse> {
   // Offline demo mode has no accounts at all, so there is nothing to gate.
   //
   // This has to be an explicit opt-in. The previous version inferred it from
-  // missing env vars — "no Supabase configured, don't gate anything" — which
+  // missing env vars - "no Supabase configured, don't gate anything" - which
   // meant one absent variable in Vercel would silently make the entire app
   // public. An insecure state must be asked for, never fallen into.
   if (process.env.TASKBUDDY_DEMO === "1") {
@@ -55,7 +55,7 @@ export async function proxy(request: NextRequest): Promise<NextResponse> {
     const res = NextResponse.redirect(new URL("/login", request.url));
     // Expired or tampered token: clear it on the way out, so the browser stops
     // re-sending a cookie that can never work again. `clearSessionCookie`, not
-    // `res.cookies.delete` — see lib/session.ts for why delete() is broken for
+    // `res.cookies.delete` - see lib/session.ts for why delete() is broken for
     // `__Host-` cookies.
     clearSessionCookie(res.cookies);
     return res;
@@ -71,7 +71,7 @@ export async function proxy(request: NextRequest): Promise<NextResponse> {
   //
   // Server Actions POST to the route they are invoked from, so the proxy runs on
   // them too. `logoutAction` POSTs to `/`, where the claims are still valid and
-  // the path is not public — so an unguarded rotation would attach a fresh
+  // the path is not public - so an unguarded rotation would attach a fresh
   // 7-day Set-Cookie to the very response that carries the logout clear, with
   // unspecified ordering. That can resurrect the session the user just ended.
   // Restricting to GET also keeps Set-Cookie off prefetch and cacheable traffic.

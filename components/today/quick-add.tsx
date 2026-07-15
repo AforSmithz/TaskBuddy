@@ -11,7 +11,7 @@ const inputCls =
 
 /**
  * Quick-capture a one-off errand ("groceries tomorrow") straight into today's
- * queue — a plain task under the reserved Errands project, no project or LLM
+ * queue - a plain task under the reserved Errands project, no project or LLM
  * extraction needed. Recurring routines/goals are set up on the Routines page.
  */
 export function QuickAdd() {

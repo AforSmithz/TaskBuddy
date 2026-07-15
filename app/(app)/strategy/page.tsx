@@ -46,7 +46,7 @@ export default async function StrategyPage() {
   const { forecasts, recoveries, pitWall, globalPlan, tuning } = dashboard;
   const tasksById = new Map(tasks.map((t) => [t.id, t]));
 
-  // "Why your plan changed" (S3c-3) — narrate each roll server-side by diffing it against the
+  // "Why your plan changed" (S3c-3) - narrate each roll server-side by diffing it against the
   // roll it superseded (the next-older one; the list is newest-first, so index+1). Pure and
   // odds-free; the timeline renders the shipped string, computing nothing client-side.
   const rollCauses: Record<string, string> = {};
@@ -57,7 +57,7 @@ export default async function StrategyPage() {
     ).summary;
   }
 
-  // "Your reliable hours" (S2 slice C) — per-window velocity over real sessions,
+  // "Your reliable hours" (S2 slice C) - per-window velocity over real sessions,
   // calibrated to the same estimation bias the forecast uses. Empty until sessions
   // accrue, so only surface the card once there's at least one to read.
   const energy = energyWindows(
@@ -66,7 +66,7 @@ export default async function StrategyPage() {
   );
   const totalSessions = energy.reduce((n, w) => n + w.sampleSize, 0);
   // taskId → project name (every open task is in the global order) so the card can
-  // tag deferred tasks with their project — needed for cross-project triage.
+  // tag deferred tasks with their project - needed for cross-project triage.
   const projectNames = Object.fromEntries(
     globalPlan.order.map((o) => [o.taskId, o.projectName]),
   );
@@ -93,7 +93,7 @@ export default async function StrategyPage() {
         />
       </Reveal>
 
-      {/* The synthesized recommendation — same card as Today, with refresh. */}
+      {/* The synthesized recommendation - same card as Today, with refresh. */}
       <Reveal delay={0.05} className="mt-7">
         <StrategyCard
           strategy={strategy}
@@ -105,12 +105,12 @@ export default async function StrategyPage() {
         />
       </Reveal>
 
-      {/* The pit wall — cross-project contention + the Auto/Manual toggle. */}
+      {/* The pit wall - cross-project contention + the Auto/Manual toggle. */}
       <Reveal delay={0.1} className="mt-7">
         <PitWallCallout pitWall={pitWall} autoStrategy={autoStrategy} />
       </Reveal>
 
-      {/* Per-project breakdown — each off-track project's full recovery options,
+      {/* Per-project breakdown - each off-track project's full recovery options,
           collapsed by default (expanding one mounts its heavy AI tools). */}
       <Reveal delay={0.15} className="mt-7">
         <Card>
@@ -139,7 +139,7 @@ export default async function StrategyPage() {
         </Card>
       </Reveal>
 
-      {/* Your reliable hours (S2 §5a) — per-window velocity from real sessions.
+      {/* Your reliable hours (S2 §5a) - per-window velocity from real sessions.
           Surfaced beside the strategist that uses the same read to temper its
           cause diagnosis; shown only once there's at least one session. */}
       {totalSessions > 0 && (
@@ -148,7 +148,7 @@ export default async function StrategyPage() {
         </Reveal>
       )}
 
-      {/* How your plan is tuned to you (S3c-5 §5a) — the calibrated arrangement dials, plan
+      {/* How your plan is tuned to you (S3c-5 §5a) - the calibrated arrangement dials, plan
           stickiness, and recovery taste, learned from your drags, roll-undos, and the moves
           you keep vs decline. Shown once ANY tier has signal; each section shows its own
           still-learning state otherwise. */}
@@ -160,7 +160,7 @@ export default async function StrategyPage() {
         </Reveal>
       )}
 
-      {/* Plan history — every applied bundle and every automatic roll, newest first,
+      {/* Plan history - every applied bundle and every automatic roll, newest first,
           each with its own undo (vision §1.3). Shown only once there's something to record. */}
       {(planVersions.length > 0 || planRolls.length > 0) && (
         <Reveal delay={0.25} className="mt-7">

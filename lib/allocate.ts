@@ -10,18 +10,18 @@ import {
   type ScheduleDay,
 } from "./schedule";
 
-// The pit-wall allocator — the single deterministic pass that turns all open
+// The pit-wall allocator - the single deterministic pass that turns all open
 // work across every project into ONE global order and ONE unified day schedule
 // over the shared hour-budget. Pure: given the same gather it always produces
 // the same plan. The forecast, daily agenda, recommendation, and recovery all
 // derive from this (Phase 3, locked decision #1).
 //
 // Two ideas drive the order:
-//   - Cost of delay: how much it hurts to put a task off — its intrinsic value
+//   - Cost of delay: how much it hurts to put a task off - its intrinsic value
 //     (impact/urgency/risk, the same 1-5 factors `computePriority` already uses)
 //     plus a term that grows as its project's deadline nears.
 //   - WSJF (cost of delay ÷ estimate): value *density*. Used as the tiebreak
-//     while there's slack, and as the primary key under overload — sheddng the
+//     while there's slack, and as the primary key under overload - sheddng the
 //     lowest-density work first instead of letting EDF dominoes sink everything.
 //
 // The stored `priority_score` is never touched; the global order is a derived
@@ -51,7 +51,7 @@ function daysBetween(a: string, b: string): number {
 }
 
 /**
- * A task's cognitive-load weight in `[0,1]` from its 1-5 `effort` factor — the
+ * A task's cognitive-load weight in `[0,1]` from its 1-5 `effort` factor - the
  * "hard work" axis the S3b comfort cap meters (OVERHAUL §5a Phase 3). Productivity
  * research caps *sustainable focused work* at ~3-4 h/day; `effort` is the dedicated
  * difficulty factor, so a task's **hard minutes** = `difficulty × estimatedMinutes`.
@@ -84,7 +84,7 @@ export interface AllocTask {
   risk: number;
   /**
    * Value-Model importance multiplier on this task's cost-of-delay (its area's
-   * weight; OVERHAUL §5.1). Optional — synthetic recurring lanes omit it and read
+   * weight; OVERHAUL §5.1). Optional - synthetic recurring lanes omit it and read
    * as neutral (1), so they keep their existing weight.
    */
   importance?: number;
@@ -93,20 +93,20 @@ export interface AllocTask {
    * sigma)`, attached in `buildAllocTasks` from `Task.area`. Carried verbatim into
    * the order entry so the joint forecast samples each task by its own velocity;
    * synthetic/skill lanes omit it and fall back to the global scalar. Affects only
-   * the sampler — never the ordering (cost-of-delay / WSJF ignore it).
+   * the sampler - never the ordering (cost-of-delay / WSJF ignore it).
    */
   model?: SegmentModel;
   /**
-   * Cognitive-load weight in `[0,1]` (OVERHAUL S3b Phase 3 — the comfort cap's "hard
+   * Cognitive-load weight in `[0,1]` (OVERHAUL S3b Phase 3 - the comfort cap's "hard
    * work" axis; see `effortToDifficulty`). Carried verbatim onto the order entry so the
-   * comfort-capped flow can meter hard minutes per day. Optional — absent ⇒ unmetered
+   * comfort-capped flow can meter hard minutes per day. Optional - absent ⇒ unmetered
    * (0), so a plan with no difficulty signal degrades to today (no comfort capping).
    */
   difficulty?: number;
   /**
-   * Life-area (OVERHAUL S3b Phase-4 refinement — domain-axis grouping): carried verbatim
+   * Life-area (OVERHAUL S3b Phase-4 refinement - domain-axis grouping): carried verbatim
    * onto the order entry so `arrange.ts` keeps same-area work adjacent within a day (a
-   * coarser grouping axis than `projectId`). Optional — synthetic/skill lanes omit it and
+   * coarser grouping axis than `projectId`). Optional - synthetic/skill lanes omit it and
    * read as no-area (the domain term is inert for them), like `importance`/`model`.
    */
   area?: string;
@@ -126,7 +126,7 @@ export interface GlobalPlanInput {
   /**
    * Optional ordering-ONLY deadline override (defaults to `deadlineByProject`).
    * Lets a lane be ranked as if due on a date without entering overload
-   * detection or the forecast — used to float today's due recurring instances to
+   * detection or the forecast - used to float today's due recurring instances to
    * the top of the AGENDA order while the forecast still gates on real deadlines.
    */
   orderingDeadlineByProject?: Map<string, string | null>;
@@ -177,7 +177,7 @@ export function costOfDelay(
   return (value + proximity * PROXIMITY_WEIGHT) * importance;
 }
 
-/** WSJF — cost of delay per minute of work (value density). Higher = do sooner. */
+/** WSJF - cost of delay per minute of work (value density). Higher = do sooner. */
 export function wsjf(task: AllocTask, deadline: string | null, today: string): number {
   return costOfDelay(task, deadline, today) / Math.max(task.estimatedMinutes, WSJF_EPSILON);
 }
@@ -185,7 +185,7 @@ export function wsjf(task: AllocTask, deadline: string | null, today: string): n
 // --- The global order -------------------------------------------------------
 
 /**
- * Is the deadlined work infeasible — does it exceed the deployable hours before
+ * Is the deadlined work infeasible - does it exceed the deployable hours before
  * the last deadline? Drives the adaptive switch from EDF to WSJF (locked
  * decision #3): EDF is optimal while slack exists, but collapses into a domino
  * of misses under overload, where shedding the lowest-density work first is the
@@ -289,7 +289,7 @@ export function effectiveOrder(
         const need = prereqs.get(t.id);
         return !need || [...need].every((d) => placed.has(d) || !byId.has(d));
       });
-    // A dependency cycle can leave nothing ready — fall back to all remaining.
+    // A dependency cycle can leave nothing ready - fall back to all remaining.
     const pool = ready.length > 0 ? ready : [...remaining].map((id) => byId.get(id)!);
     pool.sort(compare);
     const next = pool[0];
@@ -368,7 +368,7 @@ function reasonFor(
  * Pack the global order across the real shared days, tagging every block with
  * its project. Generalises `generateSchedule` (already wall-clock-free): same
  * greedy day-packing, one budget shared by all projects. With `comfortCapMinutes`
- * (OVERHAUL S3b Phase 3) the display mirrors the comfort-capped flow — hard work is
+ * (OVERHAUL S3b Phase 3) the display mirrors the comfort-capped flow - hard work is
  * spread across days so the shown plan matches its comfort-priced odds; null ⇒ today's pack.
  */
 export function packGlobal(
@@ -418,7 +418,7 @@ export function buildGlobalPlan(input: GlobalPlanInput): GlobalPlan {
 /**
  * Where a deadlined project lands in the point-estimate global plan vs. where
  * its deadline falls. `overBy > 0` means the project's last task finishes that
- * many days *after* its deadline once it has competed for the shared hours — the
+ * many days *after* its deadline once it has competed for the shared hours - the
  * core "can't make it" signal the pit wall reports.
  */
 export interface ProjectFinish {
@@ -435,7 +435,7 @@ export interface ProjectFinish {
 /**
  * Each deadlined project's point-estimate finish vs. its deadline, under the one
  * global order. Uses `flowFinishOffsets` (the time-accurate carry the forecast
- * uses), NOT the display packer — an oversized task must spill across days here,
+ * uses), NOT the display packer - an oversized task must spill across days here,
  * or a project would falsely "finish" on time. Pure given the order + capacities.
  */
 export function projectFinishes(
@@ -479,7 +479,7 @@ export function projectFinishes(
  * The pit-wall conflicts in the current global plan: deadlined projects that
  * can't finish in time once they've competed for the shared hours. Troubled
  * projects whose deadlines fall within `COLLISION_WINDOW_DAYS` of each other are
- * reported as a `deadline_collision` (they're fighting for the same days — the
+ * reported as a `deadline_collision` (they're fighting for the same days - the
  * case that may need a human call); a lone troubled project is `infeasible`.
  * Pure given the plan order + capacities.
  */
@@ -491,7 +491,7 @@ export function detectConflicts(
 ): Conflict[] {
   const troubled = projectFinishes(order, capacities, deadlineByProject, today)
     .filter((f) => f.overBy > 0)
-    // Earliest deadline first — the most urgent collision reads first.
+    // Earliest deadline first - the most urgent collision reads first.
     .sort((a, b) => a.deadlineOffset - b.deadlineOffset);
   if (troubled.length === 0) return [];
 
@@ -528,12 +528,12 @@ export interface TriageCandidate {
 
 /**
  * The shed order: open work of the conflicted (over-budget) projects, lowest
- * value-density first — the lowest-WSJF "doomed" work whose hours are best spent
+ * value-density first - the lowest-WSJF "doomed" work whose hours are best spent
  * rescuing higher-value projects (locked decision #3). Blocked/done work excluded.
  *
  * A learning goal's skill lanes compete in the same shed order as real tasks
  * (cross-project skill triage), but a `skill:`-prefixed synthetic has no task row,
- * so parking one must go through `skill_nodes.deferred` — and only *sheddable*
+ * so parking one must go through `skill_nodes.deferred` - and only *sheddable*
  * nodes may be parked (non-checkpoint leaves; see `sheddableSkillNodes`). The
  * caller passes `sheddableSkillIds` (the eligible `skill:<nodeId>` ids) and the
  * persist layer routes those to `setSkillNodeDeferred`. A skill lane not in the
@@ -562,7 +562,7 @@ export function triageCandidates(
 }
 
 /**
- * Total cost-of-delay a project carries across its open tasks — its aggregate
+ * Total cost-of-delay a project carries across its open tasks - its aggregate
  * value, used to decide whether a collision is a genuine comparable-value tie
  * that must escalate (vs. one project clearly worth protecting). Pure.
  */

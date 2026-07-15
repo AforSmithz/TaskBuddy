@@ -8,7 +8,7 @@ import { formatPct } from "@/components/forecast/forecast-meter";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
 
-/** Compact "2h ago" stamp — history rows don't need the full timestamp. */
+/** Compact "2h ago" stamp - history rows don't need the full timestamp. */
 function relativeTime(iso: string): string {
   const mins = Math.round((Date.now() - new Date(iso).getTime()) / 60000);
   if (mins < 1) return "just now";
@@ -25,7 +25,7 @@ type TimelineEntry =
   | { type: "apply"; at: string; version: PlanVersion }
   | { type: "roll"; at: string; roll: PlanRoll };
 
-/** Neutral, structural label per roll kind — WHAT changed, not WHY. The causal line
+/** Neutral, structural label per roll kind - WHAT changed, not WHY. The causal line
  *  ("Pulled Recital forward to protect its deadline") is S3c-3's `diagnoseRoll`, computed
  *  server-side and passed in as `rollCauses`; this map is the defensive fallback when a
  *  summary is absent. */
@@ -35,7 +35,7 @@ const ROLL_LABEL: Record<PlanRollKind, string> = {
   initial: "Initial plan",
 };
 
-/** The task a roll's arrangement leads with (lowest rank) — the near horizon in one line.
+/** The task a roll's arrangement leads with (lowest rank) - the near horizon in one line.
  *  The stored order is a historical snapshot, shown under a timestamp, so a since-completed
  *  task here is honest record, not a live claim. */
 function leadTask(roll: PlanRoll): string | null {
@@ -143,7 +143,7 @@ export function PlanHistory({
 }: {
   versions: PlanVersion[];
   rolls: PlanRoll[];
-  /** Server-diagnosed "why it changed" line per roll id (S3c-3 `diagnoseRoll`). Optional —
+  /** Server-diagnosed "why it changed" line per roll id (S3c-3 `diagnoseRoll`). Optional - 
    *  a roll with no entry falls back to the neutral structural label. */
   rollCauses?: Record<string, string>;
 }) {

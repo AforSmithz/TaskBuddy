@@ -4,10 +4,10 @@ import { ALL_WINDOWS, type TimeWindow } from "./velocity";
 //
 // By default the windowed forecast DERIVES how a day's hours split across the five
 // time-of-day windows from observed `work_sessions` (a shrunk session share). This lets a
-// user instead PIN that split — "I work mornings and evenings, never afternoons" — when the
+// user instead PIN that split - "I work mornings and evenings, never afternoons" - when the
 // inferred share is wrong or sparse. It is an OPTIONAL override, never a prerequisite: the
 // objective ships on the derived model, and pinning the share only bounds how much work can
-// claim each window's *learned velocity* — it authors no probability. With no velocity
+// claim each window's *learned velocity* - it authors no probability. With no velocity
 // learned the profile is still null (a share without a multiplier is byte-identical-neutral),
 // so a pin has no effect until the window velocity is earned. Pure / client-safe.
 
@@ -15,7 +15,7 @@ export const WINDOW_AVAILABILITY_VERSION = 1;
 
 /** Per-user explicit window availability: a relative WEIGHT per window (≥ 0). All-zero ⇒
  *  unset (fall back to the derived share). The weights are normalised to a share when
- *  applied, so only their RATIO matters — "morning 2, evening 1" = morning gets twice the
+ *  applied, so only their RATIO matters - "morning 2, evening 1" = morning gets twice the
  *  capacity of evening, afternoon none. */
 export interface WindowAvailability {
   version: number;
@@ -32,7 +32,7 @@ function zeroWeights(): Record<TimeWindow, number> {
   return w;
 }
 
-/** The unset default — all weights 0 ⇒ use the derived share. */
+/** The unset default - all weights 0 ⇒ use the derived share. */
 export const EMPTY_WINDOW_AVAILABILITY: WindowAvailability = {
   version: WINDOW_AVAILABILITY_VERSION,
   weights: zeroWeights(),
@@ -60,8 +60,8 @@ export function normalizeWindowAvailability(raw: unknown): WindowAvailability {
 }
 
 /** The explicit share override for the windowed forecast, or null when unset (all weights
- *  ≤ 0 ⇒ fall back to the derived share). Normalises the weights to sum 1 — the same shape
- *  `observedWindowShare` returns — so `windowProfileFromEnergy` can drop it straight in. Pure. */
+ *  ≤ 0 ⇒ fall back to the derived share). Normalises the weights to sum 1 - the same shape
+ *  `observedWindowShare` returns - so `windowProfileFromEnergy` can drop it straight in. Pure. */
 export function windowShareOverride(
   avail: WindowAvailability | null | undefined,
 ): Record<TimeWindow, number> | null {

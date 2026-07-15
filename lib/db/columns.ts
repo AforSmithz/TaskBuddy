@@ -1,7 +1,7 @@
 // The jsonb columns, per table. This is the only schema knowledge the shim
 // holds, and it exists to defend against one specific node-postgres behaviour.
 //
-// `prepareValue` turns a JS array into a **PostgreSQL array literal** — `{a,b}` —
+// `prepareValue` turns a JS array into a **PostgreSQL array literal** - `{a,b}` - 
 // not JSON. Objects it happens to `JSON.stringify`, so object-valued jsonb works
 // by accident while array-valued jsonb breaks silently: the insert either errors
 // with "malformed array literal" or, worse, stores something that reads back as
@@ -11,7 +11,7 @@
 // `$n::jsonb` explicitly, regardless of whether it is an array or an object.
 //
 // `plan_versions.restore` is the one that is easy to miss. It holds a
-// `RowSnapshot` *object* today, so it would survive a partial list by accident —
+// `RowSnapshot` *object* today, so it would survive a partial list by accident - 
 // until the day it doesn't, and undo is the feature the whole `plan_versions`
 // table exists for.
 //

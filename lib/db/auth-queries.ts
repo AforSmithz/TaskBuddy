@@ -25,7 +25,7 @@ export function normalizeEmail(email: string): string {
  *
  * MUST go through `app.login_lookup`. `users_self` is `id = app.uid()` and
  * `app.uid()` is NULL before a session exists, so a direct SELECT here returns
- * zero rows every single time — the failure looks exactly like "wrong password"
+ * zero rows every single time - the failure looks exactly like "wrong password"
  * for every user in the database, forever.
  */
 export async function findUserForLogin(
@@ -55,8 +55,8 @@ export class EmailTakenError extends Error {
  * INSERT runs, which is what makes the `users_self` WITH CHECK (`id = app.uid()`)
  * pass without needing another definer function.
  *
- * There is no plain `UNIQUE(email)` constraint — uniqueness is a functional
- * index on `lower(email)` — so `ON CONFLICT (email)` would fail with "no unique
+ * There is no plain `UNIQUE(email)` constraint - uniqueness is a functional
+ * index on `lower(email)` - so `ON CONFLICT (email)` would fail with "no unique
  * or exclusion constraint matching". A functional unique index still raises
  * 23505, so that is what we catch.
  */
@@ -85,7 +85,7 @@ export async function createUser(user: {
       (err as { code?: unknown }).code === "23505"
     ) {
       // RLS hides the conflicting row from us, so we cannot check first and we
-      // do not want to — checking first is a race anyway.
+      // do not want to - checking first is a race anyway.
       throw new EmailTakenError();
     }
     throw err;
@@ -110,7 +110,7 @@ export async function touchLastLogin(id: string): Promise<void> {
 /**
  * Replace a user's password hash. Used for the transparent cost upgrade on
  * login. Goes through the definer function because the app role has no direct
- * UPDATE privilege on `password_hash` — that is the whole point of `03_auth.sql`.
+ * UPDATE privilege on `password_hash` - that is the whole point of `03_auth.sql`.
  */
 export async function upgradePasswordHash(
   id: string,

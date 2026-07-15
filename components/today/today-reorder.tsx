@@ -25,10 +25,10 @@ function taskOrder(blocks: ScheduledBlock[]): string[] {
 
 /**
  * Today's plan, reorderable by drag (OVERHAUL §5a substrate S3c-5 §6). Native HTML5 DnD over the
- * real-task blocks only (buffers stay put — they're computed slack, not user-orderable), mirroring
+ * real-task blocks only (buffers stay put - they're computed slack, not user-orderable), mirroring
  * the kanban's drag pattern with no new dependency. A drop optimistically resequences the list and
- * calls `reorderTodayAction`, which honors the order as a preference seed and — when it's
- * odds-neutral — teaches the arrangement weights. The client computes NO odds: it records an order,
+ * calls `reorderTodayAction`, which honors the order as a preference seed and - when it's
+ * odds-neutral - teaches the arrangement weights. The client computes NO odds: it records an order,
  * the server re-prices and gates (Hard Rule §2.8 / design invariant 3). Upcoming days stay
  * display-only (`ScheduleTimeline`); v1 reorders today only.
  */
@@ -47,7 +47,7 @@ export function TodayReorder({
   const buffers = blocks.filter((b) => b.task_id === null);
 
   // The displayed order. Seeded from the server's blocks and reset whenever the committed order
-  // changes (a new server render) — an optimistic drop updates this immediately, and the following
+  // changes (a new server render) - an optimistic drop updates this immediately, and the following
   // revalidation either confirms it or corrects it (e.g. a task went stale).
   const serverOrder = taskOrder(blocks);
   const [order, setOrder] = useState<string[]>(serverOrder);
@@ -72,7 +72,7 @@ export function TodayReorder({
     setNote(null);
     startTransition(async () => {
       const { oddsCost } = await reorderTodayAction(todayISO, next);
-      // Server signal only — the client never computes the odds, it just surfaces the note.
+      // Server signal only - the client never computes the odds, it just surfaces the note.
       setNote(oddsCost ? "This order costs some odds." : null);
     });
   }
@@ -155,7 +155,7 @@ export function TodayReorder({
           );
         })}
 
-        {/* Buffers are computed slack, not user-orderable — shown static, after the tasks. */}
+        {/* Buffers are computed slack, not user-orderable - shown static, after the tasks. */}
         {buffers.map((block, i) => (
           <li
             key={`buffer-${i}`}

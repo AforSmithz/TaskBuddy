@@ -9,13 +9,13 @@ import { heuristicExtract, heuristicPlan } from "./heuristic";
 // Re-exported from the provider module so there is exactly one definition of
 // "is the LLM layer configured". Nine modules and three route components import
 // it from here, including app/(app)/layout.tsx, which uses it to decide demo
-// mode — a second, drifting copy would silently flip half the app.
+// mode - a second, drifting copy would silently flip half the app.
 export { isLLMConfigured } from "./foundry-config";
 import { isLLMConfigured } from "./foundry-config";
 
 // The 1-5 rubric is shared by both prompts. It used to live only in the meeting
 // prompt, and the plan prompt referred to it as "the same rubrics as meeting
-// extraction" — a dangling cross-reference, because exactly one of the two
+// extraction" - a dangling cross-reference, because exactly one of the two
 // prompts is ever sent. Every level is now enumerated: these six numbers feed
 // computePriority directly, so an undefined middle level is where all the
 // run-to-run variance came from.
@@ -65,7 +65,7 @@ ${SHARED_RULES}
 
 ${FACTOR_RUBRIC}`;
 
-// Strict JSON Schema for ExtractionResult. One schema serves BOTH prompts —
+// Strict JSON Schema for ExtractionResult. One schema serves BOTH prompts - 
 // the fields are identical, only the population rules differ, and the plan-only
 // invariants (owner/source_quote null, is_ai_suggested true) are enforced in
 // normalize() rather than by forking the schema.
@@ -233,7 +233,7 @@ const MAX_LIST_ITEMS = 8;
  * Extract a structured plan from raw input. `kind` selects the meeting
  * transcript prompt or the goal-planning prompt.
  *
- * The LLM call is retried up to MAX_LLM_ATTEMPTS times — a response with no
+ * The LLM call is retried up to MAX_LLM_ATTEMPTS times - a response with no
  * tasks is treated as a failure, since a fresh attempt often succeeds. If
  * every attempt fails, falls back to the offline heuristic so the user always
  * gets a usable result instead of an empty review page.

@@ -151,7 +151,7 @@ function auditSchema(
   return acc;
 }
 
-/** Keywords we deliberately never emit — see azure/FOUNDRY.md §4 for why. */
+/** Keywords we deliberately never emit - see azure/FOUNDRY.md §4 for why. */
 const BANNED = [
   "minItems",
   "maxItems",
@@ -195,7 +195,7 @@ assertSchema("skill_task_links", linkSchema(["T1", "T2"], ["N1", "N2"]));
 // The extraction, decomposer and strategist schemas live in modules that are
 // `server-only` or pull in `server-only` transitively, so they cannot be
 // imported here. They are audited by the same `assertSchema` in the LIVE
-// harness, which shims that import — see azure/harness/foundry-live.ts.
+// harness, which shims that import - see azure/harness/foundry-live.ts.
 
 // `why` must precede `demonstrates`: structured outputs generate in schema
 // order, so the sentence conditions the verdict rather than rationalising it.
@@ -233,7 +233,7 @@ const n3 = node("id3", "Hold a 5-minute conversation", { ckpt: true, prereqs: ["
 const n4 = node("id4", "Conjugate present tense", { prereqs: ["id1"] });
 const byId = new Map([n1, n2, n3, n4].map((n) => [n.id, n]));
 
-// Eight skills fanned onto one task, emitted in plain graph order — which is
+// Eight skills fanned onto one task, emitted in plain graph order - which is
 // exactly why "keep the first" is the wrong collapse: it would keep the most
 // foundational, least specific one.
 const fanned = [n1, n4, n2, n3].map((n, i) => ({

@@ -10,11 +10,11 @@ import { skillProgress } from "./skill";
 // task as an ACTION ("Take weekly italki lesson"). Those describe the same evening and
 // share no words. Measured over the real workspace: 0 of 81 node×task pairs cleared the
 // fuzzy title matcher's bar, while the matcher scored a hand-written matching pair at
-// 1.00 — it works, it just cannot see this relation. So the edge is proposed
+// 1.00 - it works, it just cannot see this relation. So the edge is proposed
 // semantically, confirmed by the user, and only then read by spillover.
 //
 // The model proposes pairs + prose. It never outputs a score, a probability, or an
-// ordering — `forecast()` remains the sole owner of odds (§0).
+// ordering - `forecast()` remains the sole owner of odds (§0).
 //
 // No `server-only` directive and no static `foundry` import: the client is pulled in
 // dynamically inside the one async call, exactly as `checkin.ts` does it, so the pure
@@ -24,7 +24,7 @@ import { skillProgress } from "./skill";
 // structural one-skill-per-task guarantee for free (unique JSON keys), but strict
 // structured outputs need an enumerated `properties` set, so preserving it would mean a
 // fresh 60-property schema on every call. `bestPerTask` is now the ONLY fan-out defence
-// — it was already written to be, for the legacy-array branch, and it collapses
+// - it was already written to be, for the legacy-array branch, and it collapses
 // deterministically by is_checkpoint, then depth, then order.
 //
 // What the schema buys back is bigger than what it cost: `task_key` and `node_key` are
@@ -34,7 +34,7 @@ import { skillProgress } from "./skill";
 /** Cap what the model sees, so a large workspace can't blow the context window. */
 const MAX_NODES = 40;
 const MAX_TASKS = 60;
-/** Cap what it can propose in one pass — a linker that returns 50 pairs is guessing. */
+/** Cap what it can propose in one pass - a linker that returns 50 pairs is guessing. */
 export const MAX_LINKS = 12;
 /** Judge calls run concurrently, but not unboundedly: a 429 becomes a dropped pair. */
 const JUDGE_CONCURRENCY = 4;
@@ -94,7 +94,7 @@ unused because no task on this list exercises them.`;
 
 /**
  * Reject a response the pipeline cannot use. Under a strict schema `links` is guaranteed
- * to be an array, so this is now a cheap assertion rather than a chain-advancing filter —
+ * to be an array, so this is now a cheap assertion rather than a chain-advancing filter - 
  * an EMPTY array is the expected, correct answer most of the time and must pass.
  */
 function isUsable(d: LinkSuggestion): boolean {
@@ -137,7 +137,7 @@ export function linkSchema(taskKeys: string[], nodeKeys: string[]) {
 }
 
 /**
- * Longest path from a root, over the goal's own prerequisite DAG — a node's specificity.
+ * Longest path from a root, over the goal's own prerequisite DAG - a node's specificity.
  * Foundations sit at depth 0; a capstone with three layers of prerequisites at depth 3.
  * Cycle-safe (the decomposer's `sanitizeSkills` already strips them, but a hand-edited
  * graph must not hang this). Used only to break a tie between two candidate skills.
@@ -167,7 +167,7 @@ export function nodeDepth(node: SkillNode, byId: Map<string, SkillNode>): number
  * plain graph order (N1, N2, … N8), so "keep the first" would have kept the two most
  * FOUNDATIONAL, least specific skills. In a well-formed run it led with the most advanced.
  * Same code, opposite meaning. So the tiebreak is explicit: a checkpoint (the decomposer
- * defines those as milestones you could prove to someone — exactly demonstration) beats a
+ * defines those as milestones you could prove to someone - exactly demonstration) beats a
  * drill; deeper in the DAG beats shallower; the model's order decides only a true tie.
  */
 export function bestPerTask(
@@ -199,7 +199,7 @@ export function bestPerTask(
  * fluently inside the assignment prompt: "Watch a Spanish show" → "Describe daily routines
  * with present tense verbs" (passive exposure standing in for a productive skill), and
  * "Set measurable milestones for conversation goal" → "Express future plans and intentions"
- * (a pun — planning your study in English is not expressing future plans in Spanish).
+ * (a pun - planning your study in English is not expressing future plans in Spanish).
  * Alone, with nothing to assign, each is easy to reject.
  */
 const VERIFY_SYSTEM_PROMPT = `You are checking ONE claim, in isolation. You are given a
@@ -253,7 +253,7 @@ export const VERDICT_SCHEMA = {
 /** How a single pair is judged. Injected so the filter is testable without a network. */
 export type LinkJudge = (taskTitle: string, skillTitle: string) => Promise<boolean>;
 
-/** The live judge: one isolated LLM call per pair. Fails CLOSED — a verification that
+/** The live judge: one isolated LLM call per pair. Fails CLOSED - a verification that
  *  errors drops the suggestion rather than admitting an unchecked link. The cost of a
  *  false negative is a missing suggestion; of a false positive, a wrong credit. */
 async function llmJudge(taskTitle: string, skillTitle: string): Promise<boolean> {
@@ -286,7 +286,7 @@ async function llmJudge(taskTitle: string, skillTitle: string): Promise<boolean>
 
 /**
  * Drop every proposed link the judge won't vouch for. Pairs are judged concurrently but
- * independently — no pair ever sees another, which is the entire point.
+ * independently - no pair ever sees another, which is the entire point.
  *
  * Concurrency is capped. One click used to fire up to MAX_LINKS judge calls at once, and
  * because the judge fails CLOSED, a burst of 429s silently deleted good suggestions
@@ -325,7 +325,7 @@ export async function filterVerified(
   return links.filter((_, i) => verdicts[i]);
 }
 
-/** `${nodeId}:${taskId}` — the pair identity used to skip already-known links. */
+/** `${nodeId}:${taskId}` - the pair identity used to skip already-known links. */
 export function pairKey(nodeId: string, taskId: string): string {
   return `${nodeId}:${taskId}`;
 }
@@ -339,16 +339,16 @@ export interface ProposedLink {
 /**
  * Propose skill-node ↔ task links. `existingPairs` holds every pair already on record
  * in ANY status, so a dismissed pair is never resurrected and a confirmed one is never
- * duplicated. Returns [] when no LLM is configured — the offline fallback for this
+ * duplicated. Returns [] when no LLM is configured - the offline fallback for this
  * feature is *nothing*, deliberately: the only offline matcher available is the title
  * similarity that this whole edge exists to work around, so a heuristic here would
  * manufacture links it cannot justify.
  *
  * Only the **unlocked frontier** is offered as a link target (`skillProgress().unlocked`
- * — unattained nodes whose prerequisites are all attained). A link is a device for
+ * - unattained nodes whose prerequisites are all attained). A link is a device for
  * *inferring* an attainment, and inference may only walk the graph one node at a time;
  * without this the linker happily proposed a capstone three unmet prerequisites deep,
- * and spillover credited it. Saying "I can do X" outright is unaffected — assertion may
+ * and spillover credited it. Saying "I can do X" outright is unaffected - assertion may
  * jump the graph, inference may not.
  */
 export async function suggestSkillTaskLinks(
@@ -403,7 +403,7 @@ export async function suggestSkillTaskLinks(
  * persistence honest regardless of what the model returns.
  *
  * `nodeByKey` contains ONLY the unlocked frontier, so a locked node is unreachable here
- * even if the model invents its handle — and under the per-request `node_key` enum it
+ * even if the model invents its handle - and under the per-request `node_key` enum it
  * cannot invent one at all.
  *
  * The ARRAY is now the shape the prompt asks for; the task-keyed map is the legacy branch,

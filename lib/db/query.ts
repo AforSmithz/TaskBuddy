@@ -8,8 +8,8 @@ import { isJsonbColumn } from "./columns";
 // supplies a real one.
 //
 // The split is not decoration. The SQL this file generates is the part that can
-// be wrong in ways nothing else notices — an off-by-one in `.range()` deletes
-// live undo history, a missed jsonb cast breaks undo silently — and keeping it
+// be wrong in ways nothing else notices - an off-by-one in `.range()` deletes
+// live undo history, a missed jsonb cast breaks undo silently - and keeping it
 // free of server-only imports is what lets `azure/harness/` assert the exact
 // SQL text offline, with no database and no Next runtime.
 //
@@ -40,7 +40,7 @@ export interface ShimResult {
 
 /**
  * Runs one statement and returns its rows. `null` instead of an executor means
- * "no session" — see {@link QueryBuilder.execute} for why that must not run.
+ * "no session" - see {@link QueryBuilder.execute} for why that must not run.
  */
 export type Executor = (text: string, values: unknown[]) => Promise<Row[]>;
 
@@ -112,7 +112,7 @@ function makeBinder(): Binder {
     values,
     bind(table, column, value) {
       // jsonb needs an explicit stringify and cast. node-postgres' prepareValue
-      // turns a JS array into a PostgreSQL array literal — `{a,b}` — rather than
+      // turns a JS array into a PostgreSQL array literal - `{a,b}` - rather than
       // JSON, so object-valued jsonb survives by accident while array-valued
       // jsonb breaks silently. See ./columns.ts.
       if (isJsonbColumn(table, column)) {
@@ -163,7 +163,7 @@ export class QueryBuilder implements PromiseLike<ShimResult> {
   /**
    * The SQL this chain would run, without running it. Exists for the harness in
    * `azure/harness/`, which asserts the exact text and parameter list for every
-   * chain shape store.ts uses — and for anyone debugging a query at 2am.
+   * chain shape store.ts uses - and for anyone debugging a query at 2am.
    */
   toSQL(): { text: string; values: unknown[] } | null {
     return this.build();
@@ -187,7 +187,7 @@ export class QueryBuilder implements PromiseLike<ShimResult> {
 
   // Payloads are typed `object`, not `Record<string, unknown>`, on purpose.
   // store.ts passes domain interfaces (`Task`, `SkillNode`, …) straight in, and
-  // a TypeScript interface has no implicit index signature — so the stricter
+  // a TypeScript interface has no implicit index signature - so the stricter
   // type would reject every real call site and force edits to a file this
   // migration exists to leave alone.
   insert<T extends object>(values: T | T[]): this {
@@ -277,7 +277,7 @@ export class QueryBuilder implements PromiseLike<ShimResult> {
     onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null,
   ): PromiseLike<TResult1 | TResult2> {
     // Thenable rather than a promise-returning terminal, because builders are
-    // stored un-awaited in arrays and resolved by Promise.all — `store.ts:1182`
+    // stored un-awaited in arrays and resolved by Promise.all - `store.ts:1182`
     // (4 builders) and `:2827` (3 builders).
     this.settled ??= this.execute();
     return this.settled.then(onfulfilled, onrejected);
@@ -286,7 +286,7 @@ export class QueryBuilder implements PromiseLike<ShimResult> {
   private async execute(): Promise<ShimResult> {
     // No session: do not execute. This is not defensive tidiness. Thirteen
     // `.select()` chains carry no filter at all, and four prune DELETEs
-    // (`store.ts:1732`, `:1907`, `:2014`, `:2595`) carry none either — their
+    // (`store.ts:1732`, `:1907`, `:2014`, `:2595`) carry none either - their
     // entire scoping is `app.user_id`. Running any of them with the GUC unset is
     // a cross-tenant read at best and a cross-tenant DELETE at worst.
     if (!this.exec) {
@@ -372,7 +372,7 @@ export class QueryBuilder implements PromiseLike<ShimResult> {
         // (`store.ts:2971`) has no empty-patch guard, unlike `updateTask`, and
         // `updateActivityAction` feeds it a caller-supplied patch. PostgREST
         // answered 200 with no change; `UPDATE t SET  WHERE id = $1` is a
-        // syntax error. Resolve as the no-op the caller already expects — its
+        // syntax error. Resolve as the no-op the caller already expects - its
         // own comment documents `null` as "no row matched the id".
         if (entries.length === 0) return null;
         if (this.filters.length === 0) {
@@ -464,7 +464,7 @@ export class QueryBuilder implements PromiseLike<ShimResult> {
    *
    * Postgres raises "ON CONFLICT DO UPDATE command cannot affect row a second
    * time" if one statement touches the same key twice. Only `availability`
-   * upserts multiple rows, and its single caller passes one row today — so this
+   * upserts multiple rows, and its single caller passes one row today - so this
    * is latent rather than live, which is exactly when it is cheapest to fix.
    */
   private dedupeByConflictKey(rows: Row[]): Row[] {

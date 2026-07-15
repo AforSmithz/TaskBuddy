@@ -3,7 +3,7 @@ import { headers } from "next/headers";
 // A small fixed-window limiter for the two unauthenticated Server Actions.
 //
 // WHAT THIS IS FOR, specifically. `loginAction` runs a real cost-12 bcrypt on
-// EVERY request, including ones whose email does not exist — that is deliberate
+// EVERY request, including ones whose email does not exist - that is deliberate
 // (lib/password.ts DUMMY_HASH), because answering a miss in 1 ms and a hit in
 // 290 ms is a free account-enumeration oracle. The cost of keeping that
 // property is that an unauthenticated endpoint burns ~290 ms of CPU per hit.
@@ -20,13 +20,13 @@ import { headers } from "next/headers";
 //     spreading load across instances gets a multiple of the limit.
 //   - It resets when an instance is recycled.
 //   - It cannot stop the request reaching the function at all, so the
-//     invocation is still billed — just not the bcrypt inside it.
+//     invocation is still billed - just not the bcrypt inside it.
 //
 // The real fix for all three is the Vercel Firewall rate-limit rule in
 // azure/VERCEL.md, which rejects at the edge before any function runs. This is
 // defence in depth underneath it, and the half worth having on its own: it is
 // the part that protects the expensive operation rather than the cheap one.
-// Deliberately no Redis or KV — a second network dependency on the login path
+// Deliberately no Redis or KV - a second network dependency on the login path
 // would cost more availability than it buys.
 
 interface Window {
@@ -39,7 +39,7 @@ const WINDOW_MS = 60_000;
 
 /**
  * Cap on tracked keys. Without it, a spray across many source addresses turns
- * the limiter itself into unbounded memory growth on a 1 vCore instance — a
+ * the limiter itself into unbounded memory growth on a 1 vCore instance - a
  * denial of service delivered through the thing meant to prevent one.
  */
 const MAX_KEYS = 5_000;
@@ -69,7 +69,7 @@ function sweep(now: number): void {
  * `x-vercel-forwarded-for` is set by the platform and cannot be spoofed by the
  * client; `x-forwarded-for` can be, so it is only a local-development
  * fallback. When neither is present every caller collapses onto one bucket,
- * which fails toward over-limiting rather than under-limiting — the right
+ * which fails toward over-limiting rather than under-limiting - the right
  * direction for a control that guards an expensive operation.
  */
 async function clientKey(): Promise<string> {
@@ -122,7 +122,7 @@ export const __MAX_KEYS = MAX_KEYS;
  * Consume one unit against `bucket` for the calling client.
  *
  * Returns true when the caller is over its limit and the work should be
- * skipped. Call this BEFORE anything expensive — the whole point is to not
+ * skipped. Call this BEFORE anything expensive - the whole point is to not
  * reach the bcrypt.
  */
 export async function isRateLimited(

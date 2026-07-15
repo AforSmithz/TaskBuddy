@@ -1,10 +1,10 @@
-// The calibration seam — substrate S3c-5 (OVERHAUL §5a). The shared, reusable
+// The calibration seam - substrate S3c-5 (OVERHAUL §5a). The shared, reusable
 // empirical-Bayes core that turns fixed soft-knob constants (the churn hysteresis
 // `STABILITY_MARGIN`/`CHURN_COST`, the arrangement `ArrangeWeights`) into values
 // LEARNED from the user's own behaviour, without ever starting worse than the
 // constant.
 //
-// Pure + deterministic, ZERO imports (numbers in, numbers out) — the calibration
+// Pure + deterministic, ZERO imports (numbers in, numbers out) - the calibration
 // side of §0's propose/dispose, NEVER the LLM, never the DB. It authors no odds:
 // every knob it returns feeds the SOFT layer only (the churn hysteresis and the
 // arrangement `J`), which the odds gate already dominates (design §3, invariant 2).
@@ -14,17 +14,17 @@
 //
 // The one idea, in two shapes:
 //
-//     B = n / (n + κ)                    // EB / James–Stein shrinkage weight
-//     scalar:  x̂ = x₀ + B·(x̄ − x₀)       (§4a — a rate → a knob: hysteresis)
-//     vector:  ŵ = w₀ + B·(w_raw − w₀)    (§4b — preference pairs → weights: arrange)
+//     B = n / (n + κ)                    // EB / James - Stein shrinkage weight
+//     scalar:  x̂ = x₀ + B·(x̄ − x₀)       (§4a - a rate → a knob: hysteresis)
+//     vector:  ŵ = w₀ + B·(w_raw − w₀)    (§4b - preference pairs → weights: arrange)
 //
 // No-regret is STRUCTURAL: n = 0 ⇒ B = 0 ⇒ x̂ = x₀ and ŵ = w₀ = today's constant,
 // bit-for-bit. It can only sharpen off real evidence; it can never start below the
-// prior. Sparse/noisy evidence stays near the prior (large κ) — the same safety
+// prior. Sparse/noisy evidence stays near the prior (large κ) - the same safety
 // `fitVelocityModel` relies on. Any non-finite input falls back to the prior.
 
 /**
- * The empirical-Bayes shrinkage weight `B = n/(n+κ)` — "how many of its OWN
+ * The empirical-Bayes shrinkage weight `B = n/(n+κ)` - "how many of its OWN
  * observations a statistic needs to earn half its weight" (at `n = κ`, `B = 0.5`).
  * `n ≤ 0` ⇒ 0 (no evidence ⇒ pure prior). `κ` non-finite ⇒ 0 (disabled ⇒ prior).
  * `κ ≤ 0` ⇒ 1 (no shrinkage ⇒ trust the observation fully). Always in `[0, 1]`.
@@ -61,7 +61,7 @@ export function shrinkScalar(
 }
 
 /**
- * Shrink each component of a learned vector toward a prior vector — the §4b tail.
+ * Shrink each component of a learned vector toward a prior vector - the §4b tail.
  * Length-mismatched or non-finite inputs fall back to a copy of the prior (no-regret
  * under any malformation). `n` is the shared evidence count (number of preference
  * pairs); every component shrinks by the same `B`, preserving the vector's direction
@@ -131,7 +131,7 @@ export interface WeightFitOptions {
 }
 
 /**
- * Default shrinkage strength κ for the calibration seam — deliberately STRONGER
+ * Default shrinkage strength κ for the calibration seam - deliberately STRONGER
  * (prior-favouring) than velocity's 8, because a preference/policy signal is noisier
  * than a duration residual: ~12 observations for half weight, ~36 for 75%. So the
  * dials have to CLEARLY and REPEATEDLY be argued against before they move off the
@@ -139,7 +139,7 @@ export interface WeightFitOptions {
  */
 export const CALIBRATE_KAPPA = 12;
 
-/** Perceptron step size — small, so one drag is a gentle nudge, not a lurch. */
+/** Perceptron step size - small, so one drag is a gentle nudge, not a lurch. */
 export const PERCEPTRON_ETA = 0.1;
 
 /** Contrast margin before a nudge fires (0 = nudge on any strict violation). */
@@ -157,9 +157,9 @@ export const WEIGHT_MAX = 4;
  *   1. `w_raw ← prior`; for each pair, `Δ = φ(solver) − φ(user)`. We want the user's
  *      order to score no worse, i.e. `w·Δ ≥ 0`. On a violation (`w_raw·Δ < margin`)
  *      nudge `w_raw += η · Δ/‖Δ‖`. The unit-normalised step makes each preference a
- *      bounded, scale-consistent contribution — a big-magnitude feature (the integer
+ *      bounded, scale-consistent contribution - a big-magnitude feature (the integer
  *      switch count) can't dominate the bounded energy/buffer terms.
- *   2. `w_deployed = shrinkVector(w_raw, prior, n=pairs.length, κ)` — sparse/noisy
+ *   2. `w_deployed = shrinkVector(w_raw, prior, n=pairs.length, κ)` - sparse/noisy
  *      evidence stays near the prior.
  *   3. clamp each component to `[lo, hi]`.
  *

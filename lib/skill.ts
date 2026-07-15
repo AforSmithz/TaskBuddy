@@ -1,7 +1,7 @@
 import type { SkillNode, SkillProgress } from "./types";
 
 /**
- * Derive a learning goal's progress from its skill nodes. Pure — nothing is
+ * Derive a learning goal's progress from its skill nodes. Pure - nothing is
  * stored, so it can't drift from the rows.
  *
  * The point of §5.3b is that two kinds of progress are NOT the same and we keep
@@ -11,7 +11,7 @@ import type { SkillNode, SkillProgress } from "./types";
  *    a milestone). When a plan has no checkpoints we fall back to nodes attained,
  *    so skillPct is always defined.
  * They diverge exactly when you've ground out hours on prep without yet clearing a
- * milestone — which is the signal worth surfacing.
+ * milestone - which is the signal worth surfacing.
  *
  * `unlocked` is the actionable frontier: unattained nodes whose prerequisites are
  * all attained.

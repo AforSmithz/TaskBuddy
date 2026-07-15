@@ -1,6 +1,6 @@
 // The portfolio's forecast-domain state + the pure move-patch engine (OVERHAUL
 // substrate S1). Extracted out of the server-only `store.ts` so it is genuinely
-// CLIENT-SAFE — it imports no DB, no `server-only`, and no gather machinery. This
+// CLIENT-SAFE - it imports no DB, no `server-only`, and no gather machinery. This
 // is the single abstraction the vision's two related features ride on: live
 // re-solve on the review screen (vision §8.2) and whole-strategy undo / plan
 // version history (vision §1.3). See `design/s1-patch-snapshot-model.md`.
@@ -9,7 +9,7 @@
 // renders/processes (the seeded `forecast.ts` Monte Carlo guarantees it), and
 // nothing mutates the base gather. The functions take a NARROW slice of the
 // gather (`MovePatchContext` / `JointForecastContext`) rather than the full
-// server-side `ForecastGather`, which structurally satisfies them — that is what
+// server-side `ForecastGather`, which structurally satisfies them - that is what
 // lets this module stay free of the gather type (and thus of `server-only`).
 
 import type {
@@ -46,7 +46,7 @@ export interface MovePatchContext {
   today: string;
 }
 
-/** The slice of the server gather the joint re-solve reads — a superset of
+/** The slice of the server gather the joint re-solve reads - a superset of
  *  `MovePatchContext` (it folds moves in, then re-runs the joint forecast). The
  *  full `ForecastGather` structurally satisfies this too, so the extraction
  *  needs no change at the call sites. */
@@ -56,40 +56,40 @@ export interface JointForecastContext extends MovePatchContext {
   overrides: AvailabilityOverride[];
   realCommitments: Commitment[];
   model: EstimationModel;
-  /** OVERHAUL S3b Phase 2 — the per-window velocity profile (null when unlearned).
+  /** OVERHAUL S3b Phase 2 - the per-window velocity profile (null when unlearned).
    *  When present, the joint re-solve flows over window segments derived from THIS
    *  pass's capacities, so a move preview prices time-of-day velocity exactly as the
    *  dashboard headline does. `ForecastGather` structurally satisfies it. */
   windowProfile?: WindowProfile | null;
-  /** OVERHAUL S3b Phase 3 slice 2 — the one comfort cap (hard minutes/day) the scorer
+  /** OVERHAUL S3b Phase 3 slice 2 - the one comfort cap (hard minutes/day) the scorer
    *  decided on the base order, or null when no humaner pace was afforded. When set it
    *  meters every joint re-solve (base + move probes) so the strategy page quotes the same
    *  comfort-capped plan the dashboard headline shows; COMPOSES with `windowProfile` (Phase 4
-   *  — both applied when both are in force, mirroring the forecast's in-loop composition). The
-   *  scorer threads it on an augmented context — a post-gather decision, not a `ForecastGather`
+   * - both applied when both are in force, mirroring the forecast's in-loop composition). The
+   *  scorer threads it on an augmented context - a post-gather decision, not a `ForecastGather`
    *  field. */
   comfortCapMinutes?: number | null;
-  /** OVERHAUL S3b Phase 3 slice 3 — when set, replay the within-day reorder the scorer
+  /** OVERHAUL S3b Phase 3 slice 3 - when set, replay the within-day reorder the scorer
    *  decided on the base order: after building this subset's order, re-sequence it with
    *  the deterministic `arrangeOrder` (group projects + slot hard work into fast windows)
    *  before pricing. Decided once on the base (like the comfort cap), not re-gated per
    *  subset; false ⇒ the canonical order, bit-for-bit. */
   arrangeReorder?: boolean;
-  /** OVERHAUL S3b Phase 3 `w_buffer` lever (graded, S3b Phase 4) — projectId → thin-buffer
+  /** OVERHAUL S3b Phase 3 `w_buffer` lever (graded, S3b Phase 4) - projectId → thin-buffer
    *  URGENCY `(0,1]` under the base plan. The reorder biases an at-risk project's work into
    *  the day's fast windows in proportion to how thin it is (protect the thinnest deadline
-   *  most). Decided once on the base (like `arrangeReorder`) — it can't be recomputed from
-   *  this context's data — and read by `arrangeOrder`; absent ⇒ no buffer bias. */
+   *  most). Decided once on the base (like `arrangeReorder`) - it can't be recomputed from
+   *  this context's data - and read by `arrangeOrder`; absent ⇒ no buffer bias. */
   thinBufferUrgency?: ReadonlyMap<string, number> | null;
-  /** OVERHAUL S3c-5 (🔴 tier) — the calibrated soft-`J` term weights (`ArrangeWeights`) the
+  /** OVERHAUL S3c-5 (🔴 tier) - the calibrated soft-`J` term weights (`ArrangeWeights`) the
    *  server's reorder used, learned from the drag-to-reorder history. Fed to `arrangeOrder` so a
    *  move probe's within-day reorder weights `φ` exactly as the base did. Absent/prior `{1,1,1}`
    *  ⇒ the default weights, a no-op (no-regret). */
   arrangeWeights?: ArrangeWeights | null;
-  /** OVERHAUL S3c-1 — when the rolling-horizon wrapper is showing a STICKY committed plan, the
+  /** OVERHAUL S3c-1 - when the rolling-horizon wrapper is showing a STICKY committed plan, the
    *  committed cross-project order as a task-id sequence (already reconciled to the current
-   *  set). The EMPTY (base) move subset prices this order VERBATIM — the server already arranged
-   *  + gated it, so no re-arrange (`arrangeReorder` is bypassed for the base) — which keeps the
+   *  set). The EMPTY (base) move subset prices this order VERBATIM - the server already arranged
+   *  + gated it, so no re-arrange (`arrangeReorder` is bypassed for the base) - which keeps the
    *  base re-solve client==server EXACT. Move-probes (non-empty subsets) ignore it: a strategy
    *  move is a re-plan, not a sticky hold. Absent/null ⇒ the fresh candidate, bit-for-bit. */
   committedOrder?: string[] | null;
@@ -139,7 +139,7 @@ export interface AllocContext {
 // The portfolio strategy needs to know the TRUE joint odds of a *set* of moves,
 // not the solo per-project odds each move carries. These helpers apply any
 // ordered move combination to a scratch copy of the alloc state and re-run the
-// contention-aware `globalForecastJoint` over it — so the moves interact through
+// contention-aware `globalForecastJoint` over it - so the moves interact through
 // the shared hour pool / real cascade, exactly as they will once applied. Pure:
 // nothing here touches the DB or the base gather.
 
@@ -149,14 +149,14 @@ export interface AllocState {
   tasks: AllocTask[];
   deps: DependencyEdge[];
   deadlineByProject: Map<string, string | null>;
-  /** Skip completions injected by skip-moves — they reduce the recurring drain. */
+  /** Skip completions injected by skip-moves - they reduce the recurring drain. */
   skipCompletions: ActivityCompletion[];
 }
 
 /** Skill alloc-task ids are namespaced so they never collide with real task uuids.
  *  The constant lives in `allocate.ts` (next to `AllocTask`); re-exported here because
- *  the `attain_skill`/`defer_skill` forecast arms below — which run CLIENT-SIDE during
- *  live re-solve — must rebuild the same id from a node id, and store.ts + actions.ts
+ *  the `attain_skill`/`defer_skill` forecast arms below - which run CLIENT-SIDE during
+ *  live re-solve - must rebuild the same id from a node id, and store.ts + actions.ts
  *  still import it from this module. */
 export { SKILL_TASK_PREFIX };
 
@@ -196,7 +196,7 @@ export function syntheticAllocTask(
  *  - unblock            → drop dep edges into the task (frees its ordering).
  *  - resolve_blocker    → drop the blocker task AND every edge that pointed AT it
  *                         (`depends_on_task_id === blocker`), freeing its direct
- *                         dependents — the opposite edge direction from unblock (§5.6 6b).
+ *                         dependents - the opposite edge direction from unblock (§5.6 6b).
  *  - reschedule_deadline→ move the project's deadline (what `globalForecast` gates on).
  *  - reschedule_task    → near-noop: the project deadline gates the joint odds,
  *                         not a task's own due date (alloc tasks carry no due date).
@@ -233,7 +233,7 @@ export function applyMoveToAlloc(
 
     case "attain_skill":
       // Attaining a skill drops its synthetic forecast task (id `skill:`+nodeId),
-      // freeing the budget it occupied — the same "drop a task by id" mechanic as
+      // freeing the budget it occupied - the same "drop a task by id" mechanic as
       // mark_done. This is why attain_skill is Family A (a non-identity arm).
       return {
         ...state,
@@ -242,7 +242,7 @@ export function applyMoveToAlloc(
 
     case "defer_skill":
       // Parking a skill node drops its synthetic forecast task, freeing its budget
-      // — the SAME drop mechanic as attain_skill, but the node is set aside, not
+      // - the SAME drop mechanic as attain_skill, but the node is set aside, not
       // demonstrated. The enumerator guarantees it is never a checkpoint.
       return {
         ...state,
@@ -252,7 +252,7 @@ export function applyMoveToAlloc(
     case "reschedule_skill": {
       // Re-phasing a milestone chain parks its whole node set (checkpoint + exclusive
       // prep); drop each parked node's `skill:`+id synthetic task, freeing their
-      // combined budget — the defer_skill drop mechanic generalized to a set (as triage
+      // combined budget - the defer_skill drop mechanic generalized to a set (as triage
       // does for real tasks). The enumerator guarantees the set is strand-free.
       const drop = new Set(p.parkNodeIds.map((id) => SKILL_TASK_PREFIX + id));
       return { ...state, tasks: state.tasks.filter((t) => !drop.has(t.id)) };
@@ -375,7 +375,7 @@ export function applyMoveToAlloc(
 
 /**
  * Reorder a canonical order to a committed task-id sequence (S3c-1 sticky replay). Ids not in
- * `entries` are skipped and any entry not named by `ids` is appended in its canonical position —
+ * `entries` are skipped and any entry not named by `ids` is appended in its canonical position - 
  * defensive against drift, though the server reconciles the committed order to the current set
  * before shipping it, so in practice `ids` is a permutation of `entries`. Building the entries
  * from the SAME source both sides derive (server: `buildGlobalPlan(ctx.tasks).order`; client:
@@ -401,7 +401,7 @@ function orderByCommitted(
 }
 
 /**
- * One joint forecast of the whole portfolio after applying an ordered move set —
+ * One joint forecast of the whole portfolio after applying an ordered move set - 
  * the contention-correct read of "do all of these." Folds each move into a
  * scratch alloc state, rebuilds the global order, and runs `globalForecastJoint`
  * over the transformed plan. `allOnTime` is the headline conjunction (P(all
@@ -459,11 +459,11 @@ export function jointOddsWithMoves(
   // hours), so a preview prices exactly as the dashboard headline does.
   if (g.comfortCapMinutes != null) opts.comfortCapMinutes = g.comfortCapMinutes;
   if (g.windowProfile) opts.windowCapacities = windowCapacities(capacities, g.windowProfile);
-  // S3c-1 — a STICKY committed plan prices its committed order VERBATIM for the base (no-move)
+  // S3c-1 - a STICKY committed plan prices its committed order VERBATIM for the base (no-move)
   // subset: the server already arranged + gated it, so bypass the within-day reorder (no
-  // re-arrange) and just replay the committed sequence. Only the empty subset is sticky — a
+  // re-arrange) and just replay the committed sequence. Only the empty subset is sticky - a
   // strategy move re-plans, so a non-empty subset falls through to the fresh arrangement below.
-  // S3b Phase 3 slice 3 — otherwise replay the within-day reorder decided on the base, when set:
+  // S3b Phase 3 slice 3 - otherwise replay the within-day reorder decided on the base, when set:
   // re-sequence this subset's order (group projects + slot hard work into fast windows) before
   // pricing. Deterministic over inputs the client mirrors (order, the same skip-adjusted
   // capacities, deps, profile, cap), so server == client for the subset.
@@ -484,7 +484,7 @@ export function jointOddsWithMoves(
 /**
  * The cumulative scorer for the display (decision #5): the running portfolio
  * `allOnTime` after each prefix of the ordered moves, climbing to the combined
- * total (== the last entry). Full iterations — these are the numbers the card
+ * total (== the last entry). Full iterations - these are the numbers the card
  * shows. `combined` falls back to the base joint odds when there are no moves.
  */
 export function cumulativeJointOdds(
@@ -506,27 +506,27 @@ export function cumulativeJointOdds(
 // The review screen lets the user toggle individual moves in/out and see the
 // outcome recompute BEFORE accepting. Moves interact (two freeing the same hours
 // are sub-additive; reroute + defer of the same task collide), so a subset's odds
-// can't be read off per-move deltas — you must recompose the selected set and
+// can't be read off per-move deltas - you must recompose the selected set and
 // re-run the joint MC. `ResolveInput` is the serialized, plain-JSON snapshot of
 // the generation-time gather slice that lets the SAME seeded `globalForecastJoint`
 // run in the browser: identical inputs + identical iteration count (5000) ⇒ the
 // live subset number EQUALS the server's baked `portfolioProbabilityAfter` for
-// that same subset. §0 holds — the odds still come from `forecast()`; the browser
+// that same subset. §0 holds - the odds still come from `forecast()`; the browser
 // merely relocates a deterministic computation it cannot author.
 
 /**
  * The serialized inputs shipped to the client so it can re-solve an arbitrary move
  * subset. All plain JSON (the Map is sent as entries). `capacities` is the floored
- * BASE per-day series (recurring drain already folded in) — used for the global order
+ * BASE per-day series (recurring drain already folded in) - used for the global order
  * and the no-skip Monte Carlo, so those paths stay byte-identical to the server.
  *
  * A skip-move frees its recurring drain back to the pool. Rather than ship a per-skip
  * floored vector (which under-counts when two skips share an over-subscribed day), we
  * ship the raw ingredients: `baseSlackHours` (the SIGNED, unfloored base slack) and
  * `skipDrainHoursByActivity` (each activity's freed drain). The client adds the
- * selected skips' drain onto the signed slack and floors ONCE — composing any subset
+ * selected skips' drain onto the signed slack and floors ONCE - composing any subset
  * EXACTLY as the server's `jointOddsWithMoves` recompute does. (Odds, by contrast, are
- * NOT additive at all — hence the full re-solve.)
+ * NOT additive at all - hence the full re-solve.)
  */
 export interface ResolveInput {
   tasks: AllocTask[];
@@ -544,37 +544,37 @@ export interface ResolveInput {
    *  `baseSlackHours` (then floored once) for any selected skip subset. Present for
    *  every active activity (a zero series when nothing is owed this week). */
   skipDrainHoursByActivity: Record<string, number[]>;
-  /** OVERHAUL S3b Phase 2 — the per-window velocity profile (null/absent when unlearned).
+  /** OVERHAUL S3b Phase 2 - the per-window velocity profile (null/absent when unlearned).
    *  The client rebuilds window segments from its OWN (skip-adjusted) capacities + this
    *  static profile, so the windowed re-solve stays bit-identical to the server's for the
    *  same subset (the 14/14 parity rides on the existing capacity parity). */
   windowProfile?: WindowProfile | null;
-  /** OVERHAUL S3b Phase 3 slice 2 — the single comfort cap (hard minutes/day) the server
+  /** OVERHAUL S3b Phase 3 slice 2 - the single comfort cap (hard minutes/day) the server
    *  decided on the base order, or null when none was afforded. The client meters every
    *  subset re-solve by it (the comfort flow is deterministic and the per-task `difficulty`
    *  already rides on `tasks`, so the re-solve stays bit-identical); COMPOSES with
-   *  `windowProfile` (Phase 4 — both applied when both are present), matching the server's
+   *  `windowProfile` (Phase 4 - both applied when both are present), matching the server's
    *  `jointOddsWithMoves`. */
   comfortCapMinutes?: number | null;
-  /** OVERHAUL S3b Phase 3 slice 3 — the within-day reorder flag the scorer decided on the
+  /** OVERHAUL S3b Phase 3 slice 3 - the within-day reorder flag the scorer decided on the
    *  base order. When set, the client replays the SAME deterministic `arrangeOrder` on its
    *  re-derived order before pricing (reads only `tasks`/`deps`/`capacities`/`windowProfile`/
    *  `comfortCapMinutes`/`today`, all already shipped, so the re-solve stays bit-identical
    *  to the server's `jointOddsWithMoves`). */
   arrangeReorder?: boolean;
-  /** OVERHAUL S3b Phase 3 `w_buffer` lever (graded, S3b Phase 4) — projectId → thin-buffer
+  /** OVERHAUL S3b Phase 3 `w_buffer` lever (graded, S3b Phase 4) - projectId → thin-buffer
    *  URGENCY `(0,1]` the server flagged on the base plan, as a JSON-safe record. The client
    *  rebuilds the Map and feeds it to the SAME deterministic `arrangeOrder`, so the
-   *  buffer-biased order is bit-identical to the server's (it can't be recomputed here — the
+   *  buffer-biased order is bit-identical to the server's (it can't be recomputed here - the
    *  buffer math needs the per-project forecast distribution the server holds). Absent ⇒ no
    *  buffer bias. */
   thinBufferUrgency?: Record<string, number>;
-  /** OVERHAUL S3c-5 (🔴 tier) — the calibrated soft-`J` term weights the server's reorder used
+  /** OVERHAUL S3c-5 (🔴 tier) - the calibrated soft-`J` term weights the server's reorder used
    *  (learned from the drag-to-reorder history). The client feeds them to the SAME `arrangeOrder`
    *  so its within-day reorder weights `φ` bit-identically to the server's. Prior `{1,1,1}` /
    *  absent ⇒ the default weights, a no-op (no-regret). */
   arrangeWeights?: ArrangeWeights;
-  /** OVERHAUL S3c-1 — when a STICKY committed plan is shown, its committed order as a task-id
+  /** OVERHAUL S3c-1 - when a STICKY committed plan is shown, its committed order as a task-id
    *  sequence (already reconciled to the current set). The client prices the EMPTY (base) subset
    *  by replaying this sequence VERBATIM over its own re-derived entries (reorder OFF) instead of
    *  re-arranging, so the base re-solve equals the server's sticky base EXACTLY. Non-empty subsets
@@ -582,7 +582,7 @@ export interface ResolveInput {
   committedOrder?: string[];
 }
 
-/** Element-wise sum of two per-day hour series (aligned by index — both span the same
+/** Element-wise sum of two per-day hour series (aligned by index - both span the same
  *  horizon + anchor). Folds selected skips' freed drain together before the re-solve. */
 function addHourVectors(a: number[], b: number[]): number[] {
   return a.map((x, i) => x + (b[i] ?? 0));
@@ -593,7 +593,7 @@ function addHourVectors(a: number[], b: number[]): number[] {
  * subset from a serialized `ResolveInput`, with NO server round-trip. Composes the
  * selected moves (skip-moves fold in as a base-additive capacity bump; every other
  * move is the same pure `applyMoveToAlloc` transform), builds the order from the
- * BASE capacities, and runs the joint MC over the skip-freed capacities — mirroring
+ * BASE capacities, and runs the joint MC over the skip-freed capacities - mirroring
  * the server exactly so the number is identical for the same subset.
  */
 export function resolveSubsetOdds(
@@ -642,13 +642,13 @@ export function resolveSubsetOdds(
         ),
       }))
     : input.capacities;
-  // S3c-1 — a STICKY committed plan prices the base (no-move) subset by replaying the committed
+  // S3c-1 - a STICKY committed plan prices the base (no-move) subset by replaying the committed
   // order VERBATIM over the client's own re-derived entries (reorder OFF), mirroring the server's
   // `jointOddsWithMoves` sticky branch exactly so the base re-solve stays client==server EXACT.
   // A non-empty subset re-plans and falls through to the fresh arrangement below.
-  // S3b Phase 3 slice 3 — otherwise replay the within-day reorder the server decided on the base
+  // S3b Phase 3 slice 3 - otherwise replay the within-day reorder the server decided on the base
   // (group projects + slot hard work into fast windows), over the SAME skip-adjusted capacities
-  // the server's `jointOddsWithMoves` buckets by — so the arranged order is bit-identical.
+  // the server's `jointOddsWithMoves` buckets by - so the arranged order is bit-identical.
   const order =
     moves.length === 0 && input.committedOrder
       ? orderByCommitted(baseOrder, input.committedOrder)
@@ -656,11 +656,11 @@ export function resolveSubsetOdds(
         ? arrangeOrder(baseOrder, capacities, state.deps, input.today, {
             windowProfile: input.windowProfile,
             comfortCapMinutes: input.comfortCapMinutes,
-            // Same urgency map the server flagged on the base — replayed, not recomputed (parity).
+            // Same urgency map the server flagged on the base - replayed, not recomputed (parity).
             thinBufferUrgency: input.thinBufferUrgency
               ? new Map(Object.entries(input.thinBufferUrgency))
               : null,
-            // Same calibrated weights the server used — replayed so `φ` is weighted identically.
+            // Same calibrated weights the server used - replayed so `φ` is weighted identically.
             weights: input.arrangeWeights ?? undefined,
           })
         : baseOrder;
@@ -669,8 +669,8 @@ export function resolveSubsetOdds(
     meanLog: input.model.meanLog,
   };
   // Mirror the server's `jointOddsWithMoves` composition exactly (Phase 4): the comfort cap
-  // (when the server afforded one) meters this subset by the same scalar — the comfort flow
-  // is deterministic and `difficulty` already rides on `tasks` — AND window segments are
+  // (when the server afforded one) meters this subset by the same scalar - the comfort flow
+  // is deterministic and `difficulty` already rides on `tasks` - AND window segments are
   // rebuilt from the client's own (skip-adjusted) capacities + the shipped profile, so a
   // composed comfort×window re-solve stays bit-identical to the server's.
   if (input.comfortCapMinutes != null) opts.comfortCapMinutes = input.comfortCapMinutes;
@@ -686,7 +686,7 @@ export function resolveSubsetOdds(
 
 /**
  * The client twin of `cumulativeJointOdds`: the running portfolio odds after each
- * prefix of the (selected, recommended-order) moves — for the review screen's live
+ * prefix of the (selected, recommended-order) moves - for the review screen's live
  * per-move "all →" numbers and the headline (the last entry). `combined` falls back
  * to the base joint odds when no moves are selected.
  */

@@ -24,11 +24,11 @@ import {
   type RecoveryContext,
 } from "./store";
 
-// LLM strategist — Step 1: Generate.
+// LLM strategist - Step 1: Generate.
 //
 // The deterministic recovery engine only rearranges opaque blocks (defer /
 // re-date / re-sequence). This module is the one move that needs the LLM: it
-// proposes *net-new* corrective tasks for genuine holes reality created —
+// proposes *net-new* corrective tasks for genuine holes reality created - 
 // rework after a failed review, an unblock action, or work to de-risk a task
 // that's blowing its estimate. Everything here is advisory and user-approved.
 //
@@ -38,7 +38,7 @@ import {
 
 const GAP_KINDS: GapKind[] = ["rework", "unblock", "de_risk"];
 
-// Keep the proposal tight — a recovery shouldn't bury the user in new work.
+// Keep the proposal tight - a recovery shouldn't bury the user in new work.
 const MAX_SUGGESTIONS = 4;
 
 // Every level of every factor is spelled out. The old version gave endpoints and an
@@ -54,7 +54,7 @@ const FACTOR_RUBRIC = `Score each 1-5 factor. Use the whole scale.
 
 // Scoped to the fields a number could actually land in. The old blanket "NEVER output a
 // probability" was a no-op against a schema with no numeric probability field, while the
-// real leak vector — a percentage inside the free text — went unnamed. The user prompt
+// real leak vector - a percentage inside the free text - went unnamed. The user prompt
 // hands the model the current probability as context, so a blanket ban was also friction.
 const NO_ODDS_RULE = `- Do not put a probability, percentage or odds language inside "rationale", "description" or "priority_reason". Those strings are shown beside TaskBuddy's own computed probability and must not compete with it. The current probability is given to you as context only.`;
 
@@ -99,7 +99,7 @@ ${FACTOR_RUBRIC}`;
 // schema CANNOT express stays in prose AND in the normalizers, which remain
 // load-bearing: the scope_down/split arithmetic, cross-item ref uniqueness, date
 // validity, and the two deterministic forecast gates that keep the model out of the
-// probability business. `maxItems` is deliberately not used — it truncates the array
+// probability business. `maxItems` is deliberately not used - it truncates the array
 // without telling the model, so it crams the discarded content into the last element
 // instead of planning for the cap.
 
@@ -168,7 +168,7 @@ export const GENERATE_SCHEMA = {
   },
 };
 
-/** Built per request so `task_ref` is a closed set — an invented ref becomes impossible
+/** Built per request so `task_ref` is a closed set - an invented ref becomes impossible
  *  rather than silently dropped by `normalizeModifications`. */
 export function modifySchema(refs: string[]) {
   return {
@@ -276,7 +276,7 @@ interface RawSuggestion {
 /**
  * Propose net-new corrective tasks for an off-track project. Returns null when
  * the LLM is unconfigured, the project isn't off-track, the call fails, or the
- * model finds no genuine gap — every one of those means "show nothing", so the
+ * model finds no genuine gap - every one of those means "show nothing", so the
  * UI never nags. The returned probability is computed by `forecast()`.
  */
 export async function generateCorrectiveTasks(
@@ -416,7 +416,7 @@ function normalizeTasks(raw: unknown, ctx: RecoveryContext): SuggestedTask[] {
   return out;
 }
 
-// LLM strategist — Step 2: Modify.
+// LLM strategist - Step 2: Modify.
 //
 // Generate adds net-new work; Modify reshapes the work that already exists so it
 // fits the budget. Two moves, both needing the LLM to understand what a task *is*:
@@ -652,16 +652,16 @@ function normalizeModifications(
   return out;
 }
 
-// LLM strategist — Step 3: Re-route.
+// LLM strategist - Step 3: Re-route.
 //
-// Generate adds, Modify reshapes — both keep the current plan's *approach*. This
+// Generate adds, Modify reshapes - both keep the current plan's *approach*. This
 // is the boldest move: when the path itself won't fit, replace the entire open
 // plan with a different way to hit the same deliverable (buy vs build, a managed
-// service vs custom, a template vs from-scratch). All-or-nothing — the user
+// service vs custom, a template vs from-scratch). All-or-nothing - the user
 // switches to the new approach or keeps the old one.
 //
 // The division of labour: the LLM judges *whether* a genuinely lighter route
-// exists and *what* it is (returning nothing when the plan only needs trimming —
+// exists and *what* it is (returning nothing when the plan only needs trimming - 
 // that's Modify's job). `previewProbabilityWithReroute` (i.e. `forecast()`) is
 // the sole authority on whether the alternative is actually better; a re-route
 // that doesn't clear the current odds by a real margin is dropped before it's
@@ -717,7 +717,7 @@ interface RawReroute {
 /**
  * Propose a whole-plan alternative for an off-track project. Returns null on the
  * same "show nothing" conditions as the other moves (LLM unconfigured, project
- * on-track, the call fails, the model finds no genuine alternative) — and also
+ * on-track, the call fails, the model finds no genuine alternative) - and also
  * when the deterministic forecast says the proposed route doesn't beat the
  * current odds by a real margin. The probability is always `forecast()`'s.
  */
@@ -775,7 +775,7 @@ export async function generateReroute(
       title: t.title,
       estimated_minutes: t.estimated_minutes,
     })),
-    // The definition-of-done items this lighter route lowers — validated against
+    // The definition-of-done items this lighter route lowers - validated against
     // the goal's real criteria, recorded as degraded notes on accept (§5 check 2).
     degradedCriteria: normalizeDegradedCriteria(raw.degraded_criteria, ctx.criteria),
     previewProbability,
@@ -797,8 +797,8 @@ function buildReroutePrompt(ctx: RecoveryContext): string {
 
   const deficitH = Math.max(0, Math.round((estimateTotal(ctx) - ctx.deployable) / 60));
 
-  // The definition of done, handle-tagged (C1, C2, …) so the model can flag — by
-  // handle, never by raw id — any criterion its lighter route would lower. The
+  // The definition of done, handle-tagged (C1, C2, …) so the model can flag - by
+  // handle, never by raw id - any criterion its lighter route would lower. The
   // handles are the criteria's stable order, the same order the normalizer reads.
   const dod = ctx.criteria.length
     ? [
@@ -834,7 +834,7 @@ function buildReroutePrompt(ctx: RecoveryContext): string {
   ].join("\n");
 }
 
-/** Stable C1..Cn handle for a criterion at index `i` — the LLM round-trips this
+/** Stable C1..Cn handle for a criterion at index `i` - the LLM round-trips this
  *  short handle instead of a raw UUID (far less error-prone), and the normalizer
  *  derives the same mapping from the criteria in their stored order. */
 function criterionHandle(i: number): string {
@@ -844,7 +844,7 @@ function criterionHandle(i: number): string {
 /**
  * Validate the model's degraded-DoD claims against the goal's real criteria.
  * Drops anything that doesn't map to a provided handle or carries no note, and
- * dedups — so a hallucinated id can never write a `degraded_note` (§0: which
+ * dedups - so a hallucinated id can never write a `degraded_note` (§0: which
  * criteria exist is the data's call, only the human note is the model's).
  */
 function normalizeDegradedCriteria(

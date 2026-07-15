@@ -156,7 +156,7 @@ export function buildEODSummary(tasks: Task[]): EODSummary {
 // --- Learned estimation bias ------------------------------------------------
 
 /**
- * Fit the user's estimation bias from completed tasks — the statistical core
+ * Fit the user's estimation bias from completed tasks - the statistical core
  * the forecast calibrates against (`planningAccuracy` above is its plain-English
  * cousin for the daily summary).
  *
@@ -177,7 +177,7 @@ export function estimationModel(tasks: Task[]): EstimationModel {
   const sampleSize = logs.length;
 
   if (sampleSize < MIN_ESTIMATION_SAMPLES) {
-    // Not enough history — unbiased default (E[factor] = 1) at the default spread.
+    // Not enough history - unbiased default (E[factor] = 1) at the default spread.
     return {
       meanLog: -(DEFAULT_SIGMA * DEFAULT_SIGMA) / 2,
       sigma: DEFAULT_SIGMA,

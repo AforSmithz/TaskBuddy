@@ -6,14 +6,14 @@ import type { CheckinScope } from "@/lib/types";
 import { CheckinReview } from "./checkin-review";
 
 /**
- * The full-width universal capture bar (§5.6). Type a free-form check-in — what you
- * did, what changed, an idea, a vent — and Enter runs the interpret → resolve →
+ * The full-width universal capture bar (§5.6). Type a free-form check-in - what you
+ * did, what changed, an idea, a vent - and Enter runs the interpret → resolve →
  * propose loop, then shows an inline review whose accepted moves commit as one
  * reversible PlanVersion (reusing the S1 review/commit/undo machinery). The state
  * machine: idle → interpreting → reviewing → (committed, inside the review). The
  * soft gradient orb + ↵ affordance match Direction F.
  *
- * With a `scope` (§5.6 slice 6a — the bar on a project page), the check-in binds to
+ * With a `scope` (§5.6 slice 6a - the bar on a project page), the check-in binds to
  * that goal: its entities resolve first and an "I also need to…" clause becomes a
  * real task ON the goal (a live-re-solved `add_tasks` move) rather than a loose
  * capture. The global (unscoped) Today bar is unchanged.
@@ -38,7 +38,7 @@ export function CaptureBar({ scope }: { scope?: CheckinScope }) {
     setValue("");
   }
 
-  // Reviewing — the interpreted proposals replace the input until the user is done.
+  // Reviewing - the interpreted proposals replace the input until the user is done.
   if (result) {
     return <CheckinReview result={result} onDone={reset} />;
   }

@@ -20,8 +20,8 @@ import { cn } from "@/lib/cn";
 /**
  * A learning goal's skill graph: the decomposer's prerequisite ladder of
  * capabilities. Empty until you build the plan (an LLM decomposition). Once
- * built, it tracks the two progress kinds apart — *skill* (checkpoints cleared)
- * vs *effort* (practice minutes attained) — and surfaces which skills are
+ * built, it tracks the two progress kinds apart - *skill* (checkpoints cleared)
+ * vs *effort* (practice minutes attained) - and surfaces which skills are
  * unlocked (prerequisites met) vs still locked.
  */
 export function SkillPlan({
@@ -103,7 +103,7 @@ export function SkillPlan({
   );
 }
 
-/** The two-bar effort-vs-skill read — the crux of §5.3b made visible. */
+/** The two-bar effort-vs-skill read - the crux of §5.3b made visible. */
 function SkillProgressBars({
   progress,
 }: {

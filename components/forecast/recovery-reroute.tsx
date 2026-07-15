@@ -11,7 +11,7 @@ import { Button } from "@/components/ui/button";
  * A re-route only recovers the *forecast* when the deadline itself is in
  * jeopardy (over budget / at risk). On-time projects flagged only for a blocked
  * or overdue task don't need a whole new approach. No probability threshold here
- * — the LLM judges whether a genuinely different route exists, and the forecast
+ * - the LLM judges whether a genuinely different route exists, and the forecast
  * guardrail in `generateReroute` drops it if it doesn't clearly help.
  */
 function hasRerouteSignals(plan: RecoveryPlan): boolean {
@@ -22,8 +22,8 @@ type Phase = "loading" | "ready" | "empty";
 
 /**
  * The Re-route half of the recovery callout (Step 3): fires the strategist in
- * the background to propose a *whole-plan alternative* — a different approach to
- * the same deliverable — when the current path won't fit. All-or-nothing: the
+ * the background to propose a *whole-plan alternative* - a different approach to
+ * the same deliverable - when the current path won't fit. All-or-nothing: the
  * user switches to the new approach or keeps the current plan. The preview
  * probability is the deterministic forecast's, never the LLM's.
  */
@@ -101,7 +101,7 @@ export function RecoveryReroute({ plan }: { plan: RecoveryPlan }) {
       </p>
 
       <div className="rounded-md bg-[var(--color-surface)] px-2.5 py-2">
-        {/* Current plan — what this replaces. */}
+        {/* Current plan - what this replaces. */}
         <p className="text-[10px] font-medium uppercase tracking-wide text-[var(--color-fg-subtle)]">
           Replaces the current plan
         </p>
@@ -136,7 +136,7 @@ export function RecoveryReroute({ plan }: { plan: RecoveryPlan }) {
         </ul>
 
         {/* The honest cost: definition-of-done this lighter route lowers (§5 gate
-            check 2) — recorded as degraded notes on accept, never silently. */}
+            check 2) - recorded as degraded notes on accept, never silently. */}
         {suggestion.degradedCriteria.length > 0 && (
           <>
             <p className="mt-2 flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wide text-[var(--color-cut-fg)]">

@@ -137,7 +137,7 @@ export const SAMPLE_ACTIVITIES: RecurringActivity[] = [
     dependency: 1,
     risk: 2,
     confidence: 5,
-    protected: true, // a streak habit — shielded by default
+    protected: true, // a streak habit - shielded by default
     active: true,
     created_at: "2026-05-15T07:00:00.000Z",
   },
@@ -155,7 +155,7 @@ export const SAMPLE_ACTIVITIES: RecurringActivity[] = [
     dependency: 1,
     risk: 2,
     confidence: 4,
-    protected: false, // a discretionary goal — the first flex to sacrifice
+    protected: false, // a discretionary goal - the first flex to sacrifice
     active: true,
     created_at: "2026-05-17T18:30:00.000Z",
   },

@@ -99,13 +99,13 @@ import type {
 } from "./types";
 import { MOVE_CHOICE_SCHEMA_VERSION } from "./types";
 
-// Server Actions — the single mutation layer for TaskBuddy.
+// Server Actions - the single mutation layer for TaskBuddy.
 
 export interface FormState {
   error: string | null;
 }
 
-/** Sentinel meaning "let TaskBuddy decide" — see entry-form.tsx. */
+/** Sentinel meaning "let TaskBuddy decide" - see entry-form.tsx. */
 const AUTO = "__auto__";
 
 /** Read a form field, treating the Auto sentinel and blanks as unset. */
@@ -129,7 +129,7 @@ function revalidatePaths() {
  * revalidate the affected paths. Mutations are exactly the situation-changing events (complete /
  * add / defer / reroute / log-time → model update), so this is where the committed row is kept
  * fresh; the read paths only DECIDE what to show and persist nothing (design §Decisions #6). The
- * roll is best-effort — any failure is swallowed so it can never break the mutation that
+ * roll is best-effort - any failure is swallowed so it can never break the mutation that
  * triggered it (the next mutation re-rolls, and the read path shows a correct plan meanwhile).
  * The date-guard lives inside `commitRollingPlan` (an unchanged fingerprint + anchor is a cheap
  * no-op). Named `revalidateAll` at the call sites for continuity with the pre-S3c signature.
@@ -247,7 +247,7 @@ export async function updateTaskStatusAction(
         { status, completion_confidence: null, completed_at: null, resolved_by: null };
   await updateTask(taskId, patch);
   // S2 slice B: accrue the local when-signal for a genuine user completion. Inferred
-  // (strategist) completions are excluded — there is no client clock to honestly
+  // (strategist) completions are excluded - there is no client clock to honestly
   // stamp a local window. minutes=0: the task's real length lives on
   // `tasks.actual_minutes` (slice C joins it); this row adds the local window/weekday
   // the UTC `completed_at` instant can't give.
@@ -300,7 +300,7 @@ export async function setGoalKindAction(
 
 /**
  * Decompose a learning goal into a skill graph (the LLM-proposes decomposer).
- * Replaces any prior plan. No-ops for project goals — their decomposition is the
+ * Replaces any prior plan. No-ops for project goals - their decomposition is the
  * task DAG from extraction.
  */
 export async function decomposeGoalAction(goalId: string): Promise<void> {
@@ -314,7 +314,7 @@ export async function decomposeGoalAction(goalId: string): Promise<void> {
 
 /**
  * Propose skill-node ↔ task links for a learning goal (the LLM-proposes half). Every
- * proposal lands as `suggested` and does nothing until confirmed — spillover reads only
+ * proposal lands as `suggested` and does nothing until confirmed - spillover reads only
  * confirmed edges. Pairs already on record in ANY status are excluded before the call,
  * so a dismissed link is never re-proposed.
  */
@@ -414,7 +414,7 @@ export async function undoTriageAction(taskIds: string[]): Promise<void> {
 
 /**
  * Push a task's due date (e.g. to clear an "overdue" flag). Note this does not
- * affect the completion forecast — only the project deadline + estimates do.
+ * affect the completion forecast - only the project deadline + estimates do.
  */
 export async function rescheduleTaskAction(
   taskId: string,
@@ -512,7 +512,7 @@ export async function setOverrideAction(
 }
 
 /**
- * Log a commitment ("friends 6-9pm") and return the pit calls it triggers —
+ * Log a commitment ("friends 6-9pm") and return the pit calls it triggers - 
  * projects whose completion probability dropped, with recovery moves.
  */
 export async function logCommitmentAction(
@@ -563,7 +563,7 @@ export async function acceptRecoveryTasksAction(
 
 /**
  * Ask the LLM strategist to reshape existing tasks (scope down / split) so an
- * off-track project fits its budget. Read-only — nothing is persisted until the
+ * off-track project fits its budget. Read-only - nothing is persisted until the
  * user accepts. Returns null when no reshape usefully improves the odds.
  */
 export async function suggestModificationsAction(
@@ -589,8 +589,8 @@ export async function applyModificationsAction(
 }
 
 /**
- * Ask the LLM strategist for a whole-plan re-route — a different approach to the
- * same deliverable — when the current path won't fit. Read-only; nothing is
+ * Ask the LLM strategist for a whole-plan re-route - a different approach to the
+ * same deliverable - when the current path won't fit. Read-only; nothing is
  * persisted until the user switches. Returns null when no genuinely lighter route
  * exists or the forecast says it wouldn't meaningfully help.
  */
@@ -625,7 +625,7 @@ export async function applyRerouteAction(
 
 /**
  * Apply a strategy bundle (one move or a whole tier) as a single snapshotted unit
- * — the ONE path the card's "Apply" buttons take. Records a `PlanVersion` so the
+ * - the ONE path the card's "Apply" buttons take. Records a `PlanVersion` so the
  * change is undoable whole (vision §1.3/§8.2) and returns it, so the card can offer
  * an immediate Undo. `oddsBefore`/`oddsAfter` are the previewed numbers the user
  * accepted (the client re-solve), surfaced later in the history view.
@@ -636,7 +636,7 @@ export async function commitStrategyBundleAction(
   oddsAfter: number,
   reason: string,
   /**
-   * The moves that were on the table and the user UNCHECKED — the other half of the
+   * The moves that were on the table and the user UNCHECKED - the other half of the
    * revealed preference `kept ≻ declined` (see `MoveChoice`). Passed ONLY by the
    * strategist card's whole-slate Apply, where declining is a real decision. Omitted
    * by the per-row Apply (applying one move is not a rejection of the rest) and by the
@@ -720,7 +720,7 @@ export interface CheckinRunResult {
  *  Caps the prompt, not the resolution blast radius (design §"candidate set"). */
 const CHECKIN_PROMPT_CAP = 60;
 
-/** Derive the check-in candidate set from the already-computed joint scorer — the
+/** Derive the check-in candidate set from the already-computed joint scorer - the
  *  open real tasks + the unattained skill-node frontier are ALREADY in
  *  `resolveInput.tasks` (skill nodes namespaced with `SKILL_TASK_PREFIX`), so this
  *  re-gathers nothing. Activities come off the scorer. Handles are stable within a
@@ -773,7 +773,7 @@ function checkinCandidates(scorer: JointScorer): {
 /**
  * The unlocked frontier across every learning goal: unattained nodes whose prerequisites
  * are all attained. `skillProgress` reasons about ONE goal's graph (its `attainedIds` set
- * is goal-local), so group first — a flat call would let one goal's attainments unlock
+ * is goal-local), so group first - a flat call would let one goal's attainments unlock
  * another goal's nodes. This is the set that INFERRED attainment is confined to.
  */
 function unlockedFrontier(allNodes: SkillNode[]): ReadonlySet<string> {
@@ -791,7 +791,7 @@ function unlockedFrontier(allNodes: SkillNode[]): ReadonlySet<string> {
 }
 
 /** Order the prompt candidate set so the scoped goal's own entities come first
- *  before the cap — the scope is the disambiguation. Resolution still runs against
+ *  before the cap - the scope is the disambiguation. Resolution still runs against
  *  the FULL set (an off-scope reference still resolves), so this only biases what
  *  the model SEES, never the blast radius. A stable partition (no reordering
  *  within each side) keeps the un-scoped ordering intact. */
@@ -807,11 +807,11 @@ function rankForScope(
 
 /**
  * Run the interpret → resolve → propose loop over a free-form check-in (§5.6). The
- * review/commit half is the existing S1 machinery — the capture bar commits the
+ * review/commit half is the existing S1 machinery - the capture bar commits the
  * accepted Family-A subset via `commitStrategyBundleAction` and runs the Family-B
  * actions individually. No mutation happens here; this is read-only interpretation.
  *
- * `scope` (§5.6 slice 6a) binds the check-in to one goal — its entities rank first
+ * `scope` (§5.6 slice 6a) binds the check-in to one goal - its entities rank first
  * in the interpret prompt, and an `add_task` intent becomes a Family-A `add_tasks`
  * move on that goal instead of a standalone capture. Absent for the global bar.
  */
@@ -824,7 +824,7 @@ export async function runCheckinAction(
   const [scorer, tasks, links, allNodes] = await Promise.all([
     createJointScorer(),
     listAllTasks(),
-    // Only CONFIRMED edges — a suggested link is inert until the user says yes.
+    // Only CONFIRMED edges - a suggested link is inert until the user says yes.
     listConfirmedSkillTaskLinks(),
     listAllSkillNodes(),
   ]);
@@ -844,7 +844,7 @@ export async function runCheckinAction(
       baseAllOnTime: scorer.baseAllOnTime,
       cumulative: scorer.cumulative,
       scope,
-      // §5.6 6b — the live structural DAG, so a completed/resolved intent on a blocker
+      // §5.6 6b - the live structural DAG, so a completed/resolved intent on a blocker
       // promotes to a cascade (chosen by graph role, not the model).
       deps: scorer.resolveInput.deps,
       // Confirmed skill↔task edges + the candidate set, so linked spillover can credit
@@ -889,7 +889,7 @@ export async function undoPlanRollAction(id: string): Promise<void> {
 /**
  * Honor a drag-to-reorder of today's plan (S3c-5 §6): commit the dragged order as a preference
  * seed (reconcile + re-price under the current fingerprint) and, when it's odds-neutral, accrue it
- * as a calibration observation. A deliberate drag is always honored (design §9.1) — the returned
+ * as a calibration observation. A deliberate drag is always honored (design §9.1) - the returned
  * `oddsCost` tells the client whether to surface the "this costs some odds" note. `revalidateAll`
  * then re-rolls under the fresh fingerprint, so the just-committed order stays put and the page
  * re-renders from it.
@@ -905,7 +905,7 @@ export async function reorderTodayAction(
 }
 
 /**
- * Regenerate the portfolio strategy and cache it — the ONLY trigger that runs the
+ * Regenerate the portfolio strategy and cache it - the ONLY trigger that runs the
  * synthesis LLM (locked decision #4). Both "Am I on track?" and the stale-banner
  * "Refresh" call this; the Today/Strategy load paths never do. Passes the
  * previously cached strategy for time-drift continuity, persists the result, and
@@ -986,7 +986,7 @@ export async function logActivityCompletionAction(
 ): Promise<void> {
   await requireUser();
   await logActivityCompletion(activityId, undefined, minutes);
-  // S2 slice B: a routine session is a real, discrete work session — accrue it with
+  // S2 slice B: a routine session is a real, discrete work session - accrue it with
   // its local window/weekday + length (the when-signal slice C's energy reads need).
   if (local) {
     await logWorkSession({ activityId, minutes: minutes ?? 0, kind: "complete", local });

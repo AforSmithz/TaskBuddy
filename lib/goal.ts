@@ -1,4 +1,4 @@
-// Pure reads over a goal's definition-of-done. No I/O — easy to unit-test.
+// Pure reads over a goal's definition-of-done. No I/O - easy to unit-test.
 
 import {
   COMPLETION_CONFIDENCE_RANK,
@@ -12,7 +12,7 @@ import {
  * `complete` when it has criteria and every one is met; `verified` when every met
  * criterion was checked at `verified` confidence; `confidence` is the *weakest*
  * confidence across met criteria (a met criterion with no recorded confidence is
- * treated as the weakest, `inferred`). This stays derived — nothing is stored,
+ * treated as the weakest, `inferred`). This stays derived - nothing is stored,
  * so it can never drift out of sync with the criteria rows.
  */
 export function goalCompletion(criteria: GoalCriterion[]): GoalCompletion {

@@ -11,7 +11,7 @@ import { ALL_WINDOWS, WINDOW_LABELS, WINDOW_HOURS, type TimeWindow } from "@/lib
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
 
-/** Relative weight presets per window — only the ratio matters (normalised to a share). */
+/** Relative weight presets per window - only the ratio matters (normalised to a share). */
 const LEVELS: { label: string; value: number }[] = [
   { label: "None", value: 0 },
   { label: "Some", value: 1 },
@@ -23,7 +23,7 @@ const LEVELS: { label: string; value: number }[] = [
  * share TaskBuddy otherwise infers from your logged sessions. Weights are relative
  * (their ratio is the split); all "None" ⇒ unset, the inferred share is used. The save
  * action re-normalizes server-side. Only changes the plan once your pace per window is
- * learned — until then there's nothing to weight.
+ * learned - until then there's nothing to weight.
  */
 export function WindowAvailabilityForm({
   availability,

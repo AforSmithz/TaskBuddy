@@ -16,8 +16,8 @@
  *
  * Header selection is checked by stubbing `fetch` and reading what the real
  * `callFoundry` actually put on the wire, rather than by exporting internals.
- * The exchange itself cannot be exercised here — `getVercelOidcToken()` only
- * resolves inside a Vercel function — so proving the token is *accepted* is the
+ * The exchange itself cannot be exercised here - `getVercelOidcToken()` only
+ * resolves inside a Vercel function - so proving the token is *accepted* is the
  * live pass's job, not this file's.
  */
 import Module from "module";

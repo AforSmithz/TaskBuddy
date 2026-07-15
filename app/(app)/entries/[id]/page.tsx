@@ -30,7 +30,7 @@ export default async function EntryPage({
   const { id } = await params;
   const entry = await getEntry(id);
   if (!entry) notFound();
-  // Drafts are not yet live — send them to the review gate.
+  // Drafts are not yet live - send them to the review gate.
   if (entry.status === "draft") redirect(`/entries/${id}/review`);
 
   const isPlan = entry.kind === "plan";

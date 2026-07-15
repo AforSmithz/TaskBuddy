@@ -2,7 +2,7 @@ import type { ExtractionResult, ExtractedTask, Confidence } from "./types";
 
 // Offline heuristic extractor.
 // Used when Foundry is not configured so the full pipeline still works.
-// It is intentionally rule-based — good enough to demo the workflow end to end.
+// It is intentionally rule-based - good enough to demo the workflow end to end.
 
 const WEEKDAYS = [
   "sunday",
@@ -355,7 +355,7 @@ export function heuristicExtract(rawInput: string): ExtractionResult {
     title,
     summary,
     suggested_area: lifeArea(text),
-    // A meeting doesn't necessarily form its own project — leave it to the user.
+    // A meeting doesn't necessarily form its own project - leave it to the user.
     suggested_project: null,
     discussion_points: sentences.slice(0, 6).map((s) => shorten(s, 110)),
     stakeholders,

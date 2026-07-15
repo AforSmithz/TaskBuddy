@@ -1,4 +1,4 @@
-// Minimal class-name merge helper — joins truthy class strings.
+// Minimal class-name merge helper - joins truthy class strings.
 export function cn(
   ...classes: (string | undefined | null | false)[]
 ): string {

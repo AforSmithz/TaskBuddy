@@ -18,7 +18,7 @@
  * line of the path under test is the production one.
  *
  * NOT covered here: the two strategist modules. Both need a live
- * `getRecoveryContext(projectId)` — a real project with real tasks — so they are
+ * `getRecoveryContext(projectId)` - a real project with real tasks - so they are
  * verified through the running app instead.
  */
 import Module from "module";
@@ -180,7 +180,7 @@ async function main(): Promise<void> {
   ok("produced 5-9 skills", skills.length >= 5 && skills.length <= 9, `${skills.length}`);
   // The heuristic ladder is exactly 5 nodes titled "Learn the fundamentals of X".
   // Asserting on CONTENT is the only way to tell a real decomposition from the
-  // silent fallback — a broken config produces a plausible-looking graph.
+  // silent fallback - a broken config produces a plausible-looking graph.
   ok(
     "not the generic heuristic ladder",
     !skills.some((s) => /^Learn the fundamentals of /.test(s.title)),
@@ -257,8 +257,8 @@ async function main(): Promise<void> {
   );
 
   // --- 6. Schema legality for the paths a harness cannot drive --------------
-  // The strategists need a live getRecoveryContext(projectId) — a real project
-  // with real tasks — so their prompts are exercised through the running app.
+  // The strategists need a live getRecoveryContext(projectId) - a real project
+  // with real tasks - so their prompts are exercised through the running app.
   // What CAN be settled here is the thing most likely to break: whether Azure
   // accepts each strict schema at all. An illegal one is a 400, not a bad answer.
   console.log("\n[6] strategist + portfolio schema legality");

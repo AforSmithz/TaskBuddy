@@ -14,7 +14,7 @@ export default async function BoardPage() {
     listAllTasks(),
     listEntries(),
   ]);
-  // Deferred tasks are parked out of scope for their deadline — hide them from
+  // Deferred tasks are parked out of scope for their deadline - hide them from
   // the board too (they live in the project's Deferred section, reversible).
   const tasks = allTasks.filter((t) => !t.deferred);
 

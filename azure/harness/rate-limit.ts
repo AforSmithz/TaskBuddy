@@ -5,7 +5,7 @@
  *
  * No database, no network, no Next runtime. `lib/rate-limit.ts` keeps its
  * window accounting in a pure `consume(key, limit, now)` with the clock
- * injected, so the whole thing is exercisable here — same split as
+ * injected, so the whole thing is exercisable here - same split as
  * lib/db/query.ts vs shim.ts, and for the same reason.
  *
  * What this is actually checking: that a control which sits in front of a

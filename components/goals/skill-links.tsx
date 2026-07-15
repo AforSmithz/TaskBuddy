@@ -17,7 +17,7 @@ export interface HydratedLink extends SkillTaskLink {
 
 /**
  * Linked work: the explicit "these two are the same work" edges between this goal's
- * skills and your tasks. Spillover reads only the CONFIRMED ones — so when you finish
+ * skills and your tasks. Spillover reads only the CONFIRMED ones - so when you finish
  * a linked task, the app offers to credit the skill, and vice versa.
  *
  * A suggestion is inert until you confirm it. Dismissing one retires the pair for good

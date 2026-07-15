@@ -13,7 +13,7 @@ import { cn } from "@/lib/cn";
 /**
  * The unified, cross-project schedule for the Today page: today's slice across
  * every project, with the rest of the global plan tucked behind a disclosure.
- * It renders the single allocation the agenda also ranks by — same plan, packed
+ * It renders the single allocation the agenda also ranks by - same plan, packed
  * into the day's shared hour-budget instead of a flat list.
  */
 export function TodayPlan({

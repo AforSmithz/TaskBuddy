@@ -20,8 +20,8 @@ import { localSessionStamp } from "@/lib/work-session";
 
 /**
  * The task detail page's action rail. Every control maps to an existing server
- * action (each revalidates, so the page re-renders with fresh data). Kept thin —
- * no optimistic state — because a single task page isn't latency-sensitive the
+ * action (each revalidates, so the page re-renders with fresh data). Kept thin - 
+ * no optimistic state - because a single task page isn't latency-sensitive the
  * way the board or Today list is.
  */
 export function TaskActions({ task }: { task: Task }) {

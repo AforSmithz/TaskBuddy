@@ -30,7 +30,7 @@ export interface RowFactors {
 
 /**
  * The presentational shape one task row needs. A stored `Task` maps onto it via
- * `taskToRowData`, and so do the strategist's proposed (not-yet-real) tasks —
+ * `taskToRowData`, and so do the strategist's proposed (not-yet-real) tasks - 
  * everything past `title` is optional, so a sparse proposal renders only what it
  * knows (no priority badge, no due date) while a real task renders in full.
  */
@@ -47,13 +47,13 @@ export interface TaskRowData {
   priorityReason?: string | null;
   blockedBy?: string | null;
   factors?: RowFactors | null;
-  /** Which project this task belongs to — shown as a tag in cross-project views. */
+  /** Which project this task belongs to - shown as a tag in cross-project views. */
   projectName?: string | null;
-  /** Provenance — `"debt"` renders an "Owed" tag (a materialized scope-cut). */
+  /** Provenance - `"debt"` renders an "Owed" tag (a materialized scope-cut). */
   origin?: TaskOrigin | null;
 }
 
-/** Lift a stored task into the row shape — the canonical full-detail mapping. */
+/** Lift a stored task into the row shape - the canonical full-detail mapping. */
 export function taskToRowData(t: Task): TaskRowData {
   return {
     title: t.title,

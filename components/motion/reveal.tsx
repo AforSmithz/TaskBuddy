@@ -2,7 +2,7 @@
 
 import { motion, useReducedMotion } from "motion/react";
 
-/** Standard "ease-out-expo"-ish curve — calm, enterprise-grade settle. */
+/** Standard "ease-out-expo"-ish curve - calm, enterprise-grade settle. */
 const EASE: [number, number, number, number] = [0.22, 1, 0.36, 1];
 
 /**
@@ -70,7 +70,7 @@ export function Stagger({
   );
 }
 
-/** A single cascading child — must be rendered inside <Stagger>. */
+/** A single cascading child - must be rendered inside <Stagger>. */
 export function StaggerItem({
   children,
   className,

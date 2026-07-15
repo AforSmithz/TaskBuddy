@@ -33,7 +33,7 @@ function toneText(p: number): string {
 
 /**
  * The pit wall: the bird's-eye view of what the shared hours can't satisfy and
- * the cross-project trade-off to make. Always mounted on Today — when nothing
+ * the cross-project trade-off to make. Always mounted on Today - when nothing
  * collides it shows a calm one-liner, so its automation toggle (in the header)
  * stays reachable. Two conflict paths, matching locked decision #3: an auto
  * recovery (shed the lowest-value doomed work) and, only on a genuine
@@ -43,7 +43,7 @@ function toneText(p: number): string {
  * `autoStrategy` is the G6 mode. On = the auto path applies itself on sight and
  * leaves an undoable receipt here (this card outlives the cleared conflict, so
  * the receipt persists); off = each move is surfaced for one click. A tie always
- * stays the user's call — auto escalates ties, it never resolves them.
+ * stays the user's call - auto escalates ties, it never resolves them.
  */
 export function PitWallCallout({
   pitWall,
@@ -78,12 +78,12 @@ export function PitWallCallout({
     ? "Auto-defers obvious low-value work to protect your deadlines; only a genuine tie asks you to choose."
     : "Surfaces every trade-off for you to apply — nothing is deferred automatically.";
 
-  // Best recovered odds across the moves — the headline the batch buys.
+  // Best recovered odds across the moves - the headline the batch buys.
   const best = triage.reduce((m, t) => Math.max(m, t.probabilityAfter), 0);
 
   // Auto mode: shed the lowest-value batch on sight, exactly once per mount.
   // The revalidated forecast then drops these tasks and the conflict usually
-  // clears — we fall through to the receipt below.
+  // clears - we fall through to the receipt below.
   const autoFired = useRef(false);
   useEffect(() => {
     if (!autoOn || autoFired.current || triage.length === 0) return;
@@ -152,7 +152,7 @@ export function PitWallCallout({
               </div>
             </div>
 
-            {/* Auto path — shed the lowest-value doomed work. */}
+            {/* Auto path - shed the lowest-value doomed work. */}
             {triage.length > 0 &&
               (autoOn ? (
                 <p className="mt-3.5 flex items-center gap-1.5 text-[12px] text-[var(--color-fg-muted)]">
@@ -172,7 +172,7 @@ export function PitWallCallout({
                 <ManualTriage triage={triage} />
               ))}
 
-            {/* The one manual call — a genuine comparable-value tie. */}
+            {/* The one manual call - a genuine comparable-value tie. */}
             {needsDecision && options.length > 0 && (
               <Escalation options={options} />
             )}
@@ -186,7 +186,7 @@ export function PitWallCallout({
             )}
           </div>
         ) : receipt ? (
-          /* Auto-applied receipt — persists after the conflict clears, undoable. */
+          /* Auto-applied receipt - persists after the conflict clears, undoable. */
           <div className="flex items-center justify-between gap-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-raised)] px-4 py-3">
             <p className="flex min-w-0 items-center gap-1.5 text-[12px] text-[var(--color-fg-muted)]">
               <Check className="size-3.5 shrink-0 text-[var(--color-status-done)]" />
@@ -208,7 +208,7 @@ export function PitWallCallout({
             </Button>
           </div>
         ) : (
-          /* Calm — everything fits. */
+          /* Calm - everything fits. */
           <p className="flex items-center gap-1.5 px-1 py-0.5 text-[12px] text-[var(--color-fg-muted)]">
             <Shield className="size-3.5 shrink-0 text-[var(--color-status-done)]" />
             All projects fit your hours.
@@ -266,7 +266,7 @@ function StrategyToggle({
 }
 
 /**
- * Manual mode: defer the lowest-WSJF doomed work, surfaced for a click — all at
+ * Manual mode: defer the lowest-WSJF doomed work, surfaced for a click - all at
  * once, or one task at a time. Each shows the odds it recovers (always from the
  * forecast). Reversible from the project's Deferred section.
  */
@@ -281,7 +281,7 @@ function ManualTriage({ triage }: { triage: PitWall["triage"] }) {
   function defer(ids: string[], key: string) {
     setBusy(key);
     startTransition(async () => {
-      // Always route through applyTriageAction — it splits real tasks from
+      // Always route through applyTriageAction - it splits real tasks from
       // `skill:` lanes, whereas deferTaskAction would no-op on a skill id.
       await applyTriageAction(ids);
       setApplied((s) => {

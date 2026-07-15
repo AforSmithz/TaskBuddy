@@ -32,7 +32,7 @@ import type { AuthState } from "./types";
 // CSRF is already handled and needs no token here. Next 16 gives Server Actions
 // three layers: POST-only invocation, an Origin-vs-Host comparison that aborts on
 // mismatch, and `SameSite=Lax` keeping the cookie off cross-site POSTs. Do not
-// add `experimental.serverActions.allowedOrigins` — that option only *widens* the
+// add `experimental.serverActions.allowedOrigins` - that option only *widens* the
 // accepted origin set.
 
 function readCredentials(formData: FormData) {
@@ -184,7 +184,7 @@ export async function signupAction(
 export async function logoutAction(): Promise<void> {
   // `clearSessionCookie`, never `cookieStore.delete()`. Next's delete() emits a
   // Set-Cookie with neither Secure nor Path, which a browser must reject for a
-  // `__Host-`prefixed cookie — so logout would be a silent no-op in production
+  // `__Host-`prefixed cookie - so logout would be a silent no-op in production
   // and work fine in dev. See lib/session.ts.
   clearSessionCookie(await cookies());
   revalidatePath("/", "layout");

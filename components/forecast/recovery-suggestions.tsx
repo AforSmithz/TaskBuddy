@@ -17,7 +17,7 @@ const GAP_LABEL: Record<GapKind, string> = {
   de_risk: "De-risk",
 };
 
-/** Only ask the LLM when reality actually created a hole — not for every warning. */
+/** Only ask the LLM when reality actually created a hole - not for every warning. */
 function hasGapSignals(plan: RecoveryPlan): boolean {
   return (
     plan.reasons.some((r) => r.severity === "critical") ||

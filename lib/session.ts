@@ -33,14 +33,14 @@ export class SessionSecretError extends Error {
 
 // Asserted at module load, deliberately.
 //
-// An unset SESSION_SECRET encodes to the literal string "undefined" — 9 bytes.
+// An unset SESSION_SECRET encodes to the literal string "undefined" - 9 bytes.
 // jose rejects a key that short, `verifySession` would swallow the rejection as
 // "bad token", and the result is an app where every request silently redirects
 // to /login while `loginAction` 500s with nothing in the logs pointing at the
 // cause. Fail-closed but undiagnosable. Far better to refuse to build.
 //
 // NOTE: the HMAC keys off the base64 *text* of the secret, not the 32 decoded
-// bytes. Do not "fix" that later by base64-decoding first — it would invalidate
+// bytes. Do not "fix" that later by base64-decoding first - it would invalidate
 // every live session at once.
 function readSecret(): Uint8Array {
   const raw = process.env.SESSION_SECRET ?? "";
@@ -151,7 +151,7 @@ export function shouldRotate(iat: number): boolean {
  * with **no options passed**, and its cookie serialiser emits `Secure` only when
  * the cookie object says so. Next has no `__Host-` awareness at all. So
  * `delete()` on a `__Host-` cookie emits a Set-Cookie with neither Secure nor
- * Path — which browsers are required to reject. The cookie survives, the
+ * Path - which browsers are required to reject. The cookie survives, the
  * stateless JWT is still valid, and the proxy bounces the user straight back in.
  *
  * That failure only appears where `secure: true`, i.e. production. Dev works

@@ -53,8 +53,8 @@ export default async function TodayPage() {
     dashboard;
 
   // The Today load NEVER regenerates (no LLM). It renders the cached strategy
-  // when present — marked stale only if the situation moved the odds materially or
-  // it aged out — or a deterministic fallback when nothing is cached yet. The card
+  // when present - marked stale only if the situation moved the odds materially or
+  // it aged out - or a deterministic fallback when nothing is cached yet. The card
   // decides whether to auto-regenerate in the background (aggressive policy).
   const strategy =
     cached ??
@@ -68,7 +68,7 @@ export default async function TodayPage() {
     cached !== null && assessStaleness(cached, forecasts).stale;
   const canUseLLM = isLLMConfigured();
   // Escalate the banner only when a hard deadline is genuinely at risk (a critical
-  // divergence reason) — otherwise it stays the calm front door.
+  // divergence reason) - otherwise it stays the calm front door.
   const bannerSeverity = recoveries.some((p) =>
     p.reasons.some((r) => r.severity === "critical"),
   )
@@ -79,7 +79,7 @@ export default async function TodayPage() {
   const projectNames = Object.fromEntries(
     globalPlan.order.map((o) => [o.taskId, o.projectName]),
   );
-  // Deferred tasks are parked out of scope for their deadline — keep them out of
+  // Deferred tasks are parked out of scope for their deadline - keep them out of
   // the active working views too (they live in the project's Deferred section).
   const tasks = allTasks.filter((t) => !t.deferred);
 
@@ -115,9 +115,9 @@ export default async function TodayPage() {
           plan) in the wide column, status & context in the right rail. Collapses
           to one column under 980px (matches the f-webapp mockup). */}
       <div className="mt-7 grid grid-cols-1 items-start gap-[18px] min-[980px]:grid-cols-[1.7fr_1fr]">
-        {/* Wide column — what to do next */}
+        {/* Wide column - what to do next */}
         <div className="min-w-0 space-y-5">
-          {/* One portfolio-wide strategy — the cross-project recommendation. The
+          {/* One portfolio-wide strategy - the cross-project recommendation. The
               full detail (contention, per-project options, heavy AI tools) lives
               at /strategy. */}
           <Reveal delay={0.05}>
@@ -149,7 +149,7 @@ export default async function TodayPage() {
           </Reveal>
         </div>
 
-        {/* Right rail — status & context */}
+        {/* Right rail - status & context */}
         <div className="min-w-0 space-y-5">
           <Reveal delay={0.18}>
             <Card>

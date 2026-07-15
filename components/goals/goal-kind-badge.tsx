@@ -41,7 +41,7 @@ export function GoalKindBadge({
 
 /**
  * The kind badge made editable: a small inline `<select>` that flips a goal
- * between project and learning. Mirrors the DeadlineEditor pattern — a thin
+ * between project and learning. Mirrors the DeadlineEditor pattern - a thin
  * client wrapper over the server action, optimistic-free (revalidates on save).
  */
 export function GoalKindEditor({

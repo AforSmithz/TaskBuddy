@@ -5,7 +5,7 @@
 // layer and is imported from places that must stay loadable outside the Next
 // server runtime: lib/checkin.ts and lib/skill-links.ts both keep their pure
 // halves importable from a plain-Node tsx harness, and re-exporting the gate
-// from a server-only module quietly broke that. Nothing secret lives here — the
+// from a server-only module quietly broke that. Nothing secret lives here - the
 // key is only ever tested for presence, never returned.
 
 const DEFAULT_DEPLOYMENT = "gpt-5-mini";
@@ -20,7 +20,7 @@ const DEFAULT_FALLBACK_DEPLOYMENT = "gpt-4.1-mini";
 const REASONING_NAME_PATTERN = /^(o[0-9]|gpt-5)/i;
 
 /**
- * True when Foundry is configured. The single gate for the whole LLM layer —
+ * True when Foundry is configured. The single gate for the whole LLM layer - 
  * lib/extraction.ts and lib/checkin.ts re-export it, and app/(app)/layout.tsx
  * uses it to decide demo mode. Env is read at call time, never at module scope,
  * so the app boots without any of it set.
@@ -33,8 +33,8 @@ const REASONING_NAME_PATTERN = /^(o[0-9]|gpt-5)/i;
  * would be heuristic output with no error anywhere.
  *
  * The identity check is duplicated from lib/azure-credential.ts rather than
- * imported because this module is deliberately not `server-only` — the tsx
- * harnesses import it — and azure-credential.ts is. Neither variable is a
+ * imported because this module is deliberately not `server-only` - the tsx
+ * harnesses import it - and azure-credential.ts is. Neither variable is a
  * secret, so reading them here costs nothing.
  */
 export function isLLMConfigured(): boolean {

@@ -72,7 +72,7 @@ export default async function ProjectPage({
     });
 
   const projectEntries = entries.filter((m) => m.goal_id === id);
-  // Tasks belong to the goal directly now (the spine) — no longer derived
+  // Tasks belong to the goal directly now (the spine) - no longer derived
   // through the entry they were ingested from.
   const allProjectTasks = tasks
     .filter((t) => t.goal_id === id)
@@ -94,7 +94,7 @@ export default async function ProjectPage({
     areaCounts.set(t.area, (areaCounts.get(t.area) ?? 0) + 1);
   }
 
-  // The area a scoped check-in files new tasks under — the goal's modal task area
+  // The area a scoped check-in files new tasks under - the goal's modal task area
   // (SuggestedTask requires one), falling back to "Work" like the store's own adds.
   const scopeArea =
     [...areaCounts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? "Work";
@@ -138,14 +138,14 @@ export default async function ProjectPage({
         />
       </div>
 
-      {/* Proactive recovery — surfaced only when the project is off track. */}
+      {/* Proactive recovery - surfaced only when the project is off track. */}
       {recovery && (
         <div className="mt-5">
           <RecoveryCallout plan={recovery} />
         </div>
       )}
 
-      {/* Completion forecast — the strategist's headline number. */}
+      {/* Completion forecast - the strategist's headline number. */}
       <Card className="mt-5">
         <CardBody className="space-y-4">
           <div className="flex flex-wrap items-center justify-between gap-3">
@@ -169,21 +169,21 @@ export default async function ProjectPage({
         </CardBody>
       </Card>
 
-      {/* Skill plan — a learning goal's prerequisite ladder of capabilities. */}
+      {/* Skill plan - a learning goal's prerequisite ladder of capabilities. */}
       {project.kind === "learning" && (
         <div className="mt-5">
           <SkillPlan goalId={project.id} nodes={skillNodes} />
         </div>
       )}
 
-      {/* Linked work — the confirmed skill↔task edges spillover credits across. */}
+      {/* Linked work - the confirmed skill↔task edges spillover credits across. */}
       {project.kind === "learning" && skillNodes.length > 0 && (
         <div className="mt-5">
           <SkillLinks goalId={project.id} links={hydratedLinks} />
         </div>
       )}
 
-      {/* Definition of done — the goal's real finish line (vs. "all tasks done"). */}
+      {/* Definition of done - the goal's real finish line (vs. "all tasks done"). */}
       <div className="mt-5">
         <DefinitionOfDone goalId={project.id} criteria={criteria} />
       </div>
@@ -241,7 +241,7 @@ export default async function ProjectPage({
         </div>
       </div>
 
-      {/* Deferred — work pushed past the deadline by a recovery move. Reversible. */}
+      {/* Deferred - work pushed past the deadline by a recovery move. Reversible. */}
       {deferredTasks.length > 0 && (
         <Card className="mt-5">
           <CardHeader

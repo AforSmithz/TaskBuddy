@@ -22,7 +22,7 @@ type Filter = "all" | GoalKind;
 
 /**
  * The goals list with a kind filter (All / Projects / Learning). The filter is
- * shown only when goals span both kinds — with one flavour there's nothing to
+ * shown only when goals span both kinds - with one flavour there's nothing to
  * filter, so we keep the list clean.
  */
 export function GoalsGrid({ goals }: { goals: GoalCard[] }) {

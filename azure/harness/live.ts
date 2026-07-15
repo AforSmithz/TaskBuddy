@@ -1,12 +1,12 @@
 /**
  * Live harness: runs the shim's generated SQL against the real Azure database
- * and asserts the things only a real server can settle — type parsing, jsonb
+ * and asserts the things only a real server can settle - type parsing, jsonb
  * round-trips, and RLS isolation between two users.
  *
  *   source azure/env.sh && npx tsx azure/harness/live.ts
  *
  * Reads DATABASE_URL from the environment (or APP_URL from azure/env.sh) and
- * connects as `taskbuddy_app` — the same restricted role Vercel uses, not the
+ * connects as `taskbuddy_app` - the same restricted role Vercel uses, not the
  * server admin. Testing as admin would pass while the real app failed, because
  * admin bypasses the column grants that `03_auth.sql` exists to impose.
  *
@@ -99,8 +99,8 @@ function clientFor(uid: string) {
 /**
  * Await a setup write and throw if it failed.
  *
- * The shim resolves errors instead of rejecting — that is the contract, and it
- * is the right one — but it means an unchecked setup write leaves a null for
+ * The shim resolves errors instead of rejecting - that is the contract, and it
+ * is the right one - but it means an unchecked setup write leaves a null for
  * some later assertion to trip over, three steps from the actual cause. Every
  * arrangement step in this file goes through here.
  */
@@ -308,7 +308,7 @@ async function main(): Promise<void> {
   };
   check("…and removes nothing", stillThere.data.length, 1);
 
-  // The four soft-cap prunes carry NO user filter at all — their entire scoping
+  // The four soft-cap prunes carry NO user filter at all - their entire scoping
   // is app.user_id. This is the assertion that says that actually works.
   const bobUnfiltered = (await bob("plan_versions").select("id")) as {
     data: unknown[];

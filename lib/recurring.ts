@@ -12,13 +12,13 @@ import type { AllocTask } from "./allocate";
 import { computePriority } from "./priority";
 
 // Pure cadence/streak/miss detection for recurring activities (routines & goals).
-// No I/O — every read is derived from the completion log, mirroring the
+// No I/O - every read is derived from the completion log, mirroring the
 // "derive on read, never persist derived state" style of forecast.ts/allocate.ts.
 //
 // A routine is a daily, streak-based activity (`period: "day"`); a goal is a
 // weekly session target (`period: "week"`). A COMPLETION credits the period; a
 // SKIP (a completion row with `skipped: true`) resolves the period's obligation
-// — it stops the drain and the nagging — without crediting a streak.
+// - it stops the drain and the nagging - without crediting a streak.
 
 /** The synthetic project lane recurring instances ride into the global queue on. */
 export const RECURRING_LANE_ID = "__recurring__";
@@ -158,11 +158,11 @@ function dailyStreak(
   let count = 0;
   let d = today;
   // Today's grace: if eligible-and-not-yet-done (no skip), step back without
-  // breaking — the streak is still alive until the day actually lapses.
+  // breaking - the streak is still alive until the day actually lapses.
   if (isEligible(activity, d)) {
     if (done.has(d)) count += 1;
     else if (skip.has(d)) return count; // an explicit skip today breaks it
-    // else: not done yet today — grace, fall through to walk prior days.
+    // else: not done yet today - grace, fall through to walk prior days.
   }
   d = addDays(d, -1);
 
@@ -280,7 +280,7 @@ export function status(
     return lapsedRecently(activity, completions, today) ? "missed" : "due";
   }
 
-  // Weekly goal. "Cold" only when there's been no activity recently AT ALL —
+  // Weekly goal. "Cold" only when there's been no activity recently AT ALL - 
   // a session already logged this week means it's alive, just behind or on pace.
   if (done === 0 && coldWeekly(activity, completions, today)) return "cold";
   const expectedByNow = Math.floor(
@@ -383,7 +383,7 @@ export function owedInstanceDates(
 /**
  * The owed instance dates of an activity within the CURRENT week (today through
  * this week's end). Skipping these is what a strategist "skip this week" move
- * frees — and exactly what the apply persists, so the probe and the action move
+ * frees - and exactly what the apply persists, so the probe and the action move
  * the same hours. Empty when nothing's owed this week (e.g. already done/skipped).
  */
 export function currentWeekOwedDates(
@@ -402,7 +402,7 @@ export function currentWeekOwedDates(
  * Recurring activities as synthetic commitments draining the shared budget,
  * `estimated_minutes` per owed session on the day it's expected. Folded into the
  * real commitment set in `getTimeBudget`, so `dayCapacities`/`deployableMinutes`
- * see the eaten time everywhere — the single source of truth for recurring
+ * see the eaten time everywhere - the single source of truth for recurring
  * capacity cost (the agenda's synthetic task is display-only, never re-counted).
  * `droppedIds` excludes activities a strategist skip-move is probing.
  */
@@ -437,7 +437,7 @@ export function activityDrainCommitments(
 // --- Synthetic queue tasks (today's due instances) ---------------------------
 
 /**
- * One synthetic `AllocTask` per activity with an instance due today — the rows
+ * One synthetic `AllocTask` per activity with an instance due today - the rows
  * that surface routines/goals in the Now/Next agenda. These ride the reserved
  * `RECURRING_LANE_ID` lane and are DISPLAY/ORDER-ONLY: their minutes are already
  * drained via `activityDrainCommitments`, so they must be kept out of the
@@ -473,7 +473,7 @@ export function recurringAllocTasksForToday(
  * (OVERHAUL S3c-7). Two authorities, on orthogonal axes:
  *
  *   - `union` (the canonical plan over real work + today's routines, routines ranked by an
- *     ordering-only `today` deadline) decides **where a routine sits** — its ordinal position
+ *     ordering-only `today` deadline) decides **where a routine sits** - its ordinal position
  *     among real work. A routine with `k` real tasks ahead of it stays the `k+1`-th thing.
  *   - `followed` (the arranged, comfort-capped, odds-gated, roll-sticky order over real work
  *     alone) decides **how real work is sequenced**. Its sequence is reproduced EXACTLY, so the
@@ -484,7 +484,7 @@ export function recurringAllocTasksForToday(
  * would silently discard the arrangement.
  *
  * Routine minutes are already drained into capacity, so they never enter `followed`, the
- * schedule, or the forecast (locked invariant #1) — this is a display overlay, not a re-plan.
+ * schedule, or the forecast (locked invariant #1) - this is a display overlay, not a re-plan.
  */
 export function spliceRecurringIntoOrder(
   followed: EffectiveOrderEntry[],
@@ -530,10 +530,10 @@ export function isRecurringTaskId(taskId: string): boolean {
 }
 
 /**
- * A synthetic `Task`-shaped row for an activity due today — the object the Today
+ * A synthetic `Task`-shaped row for an activity due today - the object the Today
  * agenda renders interleaved with real tasks. Its id matches the agenda-order
  * entry from `recurringAllocTasksForToday`; `due_date` is today so it buckets
- * under "Due today". Carries no `entry_id` (it has no entry) — the agenda routes
+ * under "Due today". Carries no `entry_id` (it has no entry) - the agenda routes
  * its actions to the activity, not the task table.
  */
 export function recurringAgendaTask(
@@ -545,7 +545,7 @@ export function recurringAgendaTask(
   return {
     id: `recurring:${activity.id}:${today}`,
     entry_id: "",
-    goal_id: null, // synthetic recurring lane — owned by an activity, not a goal
+    goal_id: null, // synthetic recurring lane - owned by an activity, not a goal
     title: activity.title,
     description: null,
     owner: null,

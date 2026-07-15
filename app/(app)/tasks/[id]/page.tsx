@@ -33,7 +33,7 @@ import { TaskActions } from "@/components/tasks/task-actions";
 import { formatDate, formatMinutes, isOverdue } from "@/lib/format";
 import { cn } from "@/lib/cn";
 
-/** A linked row in the dependency cards — the prerequisite or downstream task. */
+/** A linked row in the dependency cards - the prerequisite or downstream task. */
 function DepRow({ task, reason }: { task: Task; reason: string | null }) {
   return (
     <li className="flex items-start gap-2.5 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2">
@@ -110,7 +110,7 @@ export default async function TaskPage({
         {back.label}
       </Link>
 
-      {/* Header — identity, status, and the at-a-glance flags. */}
+      {/* Header - identity, status, and the at-a-glance flags. */}
       <div className="mt-4 flex flex-wrap items-center gap-2">
         <PriorityBadge label={task.priority_label} score={task.priority_score} />
         <StatusBadge status={task.status} />
@@ -158,9 +158,9 @@ export default async function TaskPage({
       </div>
 
       <div className="mt-6 grid grid-cols-1 gap-5 lg:grid-cols-3">
-        {/* Main column — the homeless context: provenance, rationale, graph. */}
+        {/* Main column - the homeless context: provenance, rationale, graph. */}
         <div className="space-y-5 lg:col-span-2">
-          {/* Provenance — where this task came from. */}
+          {/* Provenance - where this task came from. */}
           <Card>
             <CardHeader title="Origin" icon={<ScrollText className="size-4" />} />
             <CardBody className="space-y-3">
@@ -194,7 +194,7 @@ export default async function TaskPage({
             </CardBody>
           </Card>
 
-          {/* Priority rationale — the deterministic score, made legible. */}
+          {/* Priority rationale - the deterministic score, made legible. */}
           <Card>
             <CardHeader
               title="Why this priority"
@@ -226,7 +226,7 @@ export default async function TaskPage({
             </CardBody>
           </Card>
 
-          {/* Dependency graph — what gates this, and what it gates. */}
+          {/* Dependency graph - what gates this, and what it gates. */}
           <Card>
             <CardHeader
               title="Dependencies"
@@ -279,7 +279,7 @@ export default async function TaskPage({
           </Card>
         </div>
 
-        {/* Sidebar — actions, schedule, estimation, plan position. */}
+        {/* Sidebar - actions, schedule, estimation, plan position. */}
         <div className="space-y-5">
           <Card>
             <CardHeader title="Actions" icon={<Settings2 className="size-4" />} />

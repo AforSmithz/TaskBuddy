@@ -19,7 +19,7 @@ import { localSessionStamp } from "@/lib/work-session";
 
 type Grouped = Record<TaskStatus, Task[]>;
 
-/** ease-out-expo — calm settle, shared with the rest of the app. */
+/** ease-out-expo - calm settle, shared with the rest of the app. */
 const BOARD_EASE: [number, number, number, number] = [0.22, 1, 0.36, 1];
 
 const COLUMN_ACCENT: Record<TaskStatus, string> = {

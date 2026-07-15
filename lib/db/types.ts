@@ -14,7 +14,7 @@ import { types } from "pg";
 // The failure is not a clean crash. `"4.50" + 0.5` is `"4.50.5"`, so the
 // dependency-aware task ordering in `lib/schedule.ts:114` silently degrades to a
 // no-op *before* anything throws, and the capacity math in `lib/forecast.ts:90`
-// concatenates instead of adding — one commitment on a day coerces back by luck,
+// concatenates instead of adding - one commitment on a day coerces back by luck,
 // two give NaN, and `Math.max(0, NaN)` is NaN rather than 0, which then poisons
 // every subsequent day. Intermittent, not a clean zero.
 //
@@ -27,7 +27,7 @@ types.setTypeParser(1700, Number);
 // date -> keep the raw 'YYYY-MM-DD' string. MUST BE IDENTITY.
 //
 // pg-types' built-in parseDate builds a Date at **local** midnight. The obvious
-// "fix" — `new Date(v).toISOString().slice(0, 10)` — shifts every date back one
+// "fix" - `new Date(v).toISOString().slice(0, 10)` - shifts every date back one
 // day for anyone west of UTC, which corrupts all ~15 `.slice(0, 10)` call sites
 // at once and does it invisibly. The app has always treated these as plain
 // strings; keep them that way.
@@ -45,7 +45,7 @@ types.setTypeParser(1114, (v) => new Date(v + "Z").toISOString());
 types.setTypeParser(1184, (v) => new Date(v).toISOString());
 
 // DELIBERATELY NOT SET:
-//   OID 20 (int8) — there is no bigint/bigserial column anywhere in the schema
+//   OID 20 (int8) - there is no bigint/bigserial column anywhere in the schema
 //     and no `count` option is used, so the default string parse is unreachable.
 //   int2 / int4 -> number, float8 -> number, jsonb -> parsed object. All already
 //     correct by default. `plan_versions.odds_before/odds_after` and

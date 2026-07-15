@@ -12,7 +12,7 @@
  * an empty table, so the calibration dials sit at their defaults and the UI says
  * a confident "no decisions yet". `move_choices` shipped exactly that way and
  * nothing looked wrong. A hand-rolled shim with a wrong `.range()` bound or a
- * missing jsonb cast reintroduces that class of bug — silently, and in the two
+ * missing jsonb cast reintroduces that class of bug - silently, and in the two
  * features (undo, capacity) whose breakage is hardest to notice.
  *
  * The chain shapes below are transcribed from real call sites; the line numbers
@@ -116,7 +116,7 @@ check(
   'SELECT * FROM "commitments" WHERE "date" >= $1 ORDER BY "date" ASC',
 );
 
-// --- 2. .range() — the four soft-cap prunes ---------------------------------
+// --- 2. .range() - the four soft-cap prunes ---------------------------------
 //
 // PostgREST ranges are inclusive at BOTH ends: range(50, 1050) is rows 51..1051.
 // These four reads feed a DELETE of every id returned, so an off-by-one here
@@ -394,7 +394,7 @@ async function results(): Promise<void> {
     { data: null, error: null },
   );
 
-  // Builders are stored un-awaited in arrays and resolved by Promise.all —
+  // Builders are stored un-awaited in arrays and resolved by Promise.all - 
   // store.ts:1182 (4 builders) and :2827 (3 builders).
   const [a, b] = await Promise.all([
     new QueryBuilder("tasks", async () => [{ id: "a" }]).select("*"),

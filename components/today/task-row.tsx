@@ -202,7 +202,7 @@ export function TaskRow({
 }
 
 /**
- * A recurring routine/goal interleaved into the Today agenda — check it off (logs
+ * A recurring routine/goal interleaved into the Today agenda - check it off (logs
  * a completion) or skip it for now. Shows its streak (daily) or weekly progress
  * instead of a status/area control. Self-contained: it routes its actions to the
  * activity, not the task table, and collapses to a "done" state on resolution.

@@ -64,7 +64,7 @@ export type Verbosity = "low" | "medium" | "high";
 
 interface CallOptions {
   /**
-   * How hard the model thinks. Defaults to "low" — the setting the OpenRouter
+   * How hard the model thinks. Defaults to "low" - the setting the OpenRouter
    * wrapper hardcoded for every caller. Raise it per call site for genuine
    * planning work (decomposition, the strategists, check-in interpretation);
    * "minimal" is right for one-shot prose.
@@ -100,7 +100,7 @@ interface JsonCallOptions<T> extends CallOptions {
    *
    * `minItems`/`maxItems`, `minimum`/`maximum` and `pattern` are documented as
    * unsupported. Measured against the live deployment they are in fact accepted
-   * AND enforced — but by truncating or clamping the decoder, not by telling the
+   * AND enforced - but by truncating or clamping the decoder, not by telling the
    * model. A `maxItems: 3` on a request for ten items yields three, with the
    * dropped content crammed into the last string. So caps and ranges stay in
    * prose plus a code-side check; see azure/FOUNDRY.md §4.
@@ -201,7 +201,7 @@ async function authHeader(config: Config): Promise<Record<string, string>> {
       if (!config.apiKey) throw err;
       // With a key still present this is the verification window: both
       // credentials are configured and the token path is being proven. Falling
-      // back keeps the app up, but it MUST be loud — a silent fallback would
+      // back keeps the app up, but it MUST be loud - a silent fallback would
       // make the whole verification meaningless, because a deployment whose
       // token path was broken would look identical to one where it worked.
       //
@@ -269,7 +269,7 @@ interface Usage {
  *
  * DELIBERATELY LOGGED BEFORE THE ERROR CHECKS in fetchCompletion. A response
  * truncated against max_completion_tokens is the single most expensive failure
- * available here — it burns the entire budget and returns nothing — so it is
+ * available here - it burns the entire budget and returns nothing - so it is
  * exactly the call that must not go unrecorded. Logging after the throw would
  * hide the costly cases and keep only the cheap ones.
  *
@@ -370,7 +370,7 @@ async function fetchCompletion(
           retryAfterFrom(res.headers),
         );
       }
-      // An input that trips the content filter is a deterministic 400 — there
+      // An input that trips the content filter is a deterministic 400 - there
       // is no point retrying it or advancing the chain.
       if (res.status === 400 && detail.includes("content_filter")) {
         throw new FoundryError(
@@ -403,7 +403,7 @@ async function fetchCompletion(
     );
 
     // Structured outputs can return a refusal with null content. That is a
-    // decision, not a flake — retrying it just burns the budget.
+    // decision, not a flake - retrying it just burns the budget.
     if (choice?.message?.refusal) {
       throw new FoundryError(
         `Deployment "${deployment.name}" refused: ${choice.message.refusal.slice(0, 300)}`,

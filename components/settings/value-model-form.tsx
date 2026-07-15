@@ -12,7 +12,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
 
-/** Discrete importance presets — friendlier than a raw 0.25–3 slider. */
+/** Discrete importance presets - friendlier than a raw 0.25 - 3 slider. */
 const WEIGHT_OPTIONS: { label: string; value: number }[] = [
   { label: "Background", value: 0.5 },
   { label: "Normal", value: 1 },
@@ -53,7 +53,7 @@ export interface WeightableGoal {
   name: string;
 }
 
-/** Sentinel for "no explicit weight — derive this goal's value from its areas". */
+/** Sentinel for "no explicit weight - derive this goal's value from its areas". */
 const DERIVED = "derived";
 type GoalWeight = number | typeof DERIVED;
 
@@ -89,7 +89,7 @@ export function ValueModelForm({
     ),
   );
   // `DERIVED` (not a number) when unset, so an explicit "Normal" is distinguishable
-  // from "unset" — the former overrides the area-derived value, the latter defers
+  // from "unset" - the former overrides the area-derived value, the latter defers
   // to it. `goalValue()` depends on exactly that distinction.
   const [goalWeights, setGoalWeights] = useState<Record<string, GoalWeight>>(() =>
     Object.fromEntries(goals.map((g) => [g.id, model.projectWeights[g.id] ?? DERIVED])),
@@ -114,7 +114,7 @@ export function ValueModelForm({
     for (const [area, value] of Object.entries(weights)) {
       if (value !== NEUTRAL_AREA_WEIGHT) areaWeights[area] = value;
     }
-    // An explicit neutral IS persisted here (unlike an area) — see `goalValue`.
+    // An explicit neutral IS persisted here (unlike an area) - see `goalValue`.
     const projectWeights: Record<string, number> = {};
     for (const [goalId, value] of Object.entries(goalWeights)) {
       if (value !== DERIVED) projectWeights[goalId] = value;

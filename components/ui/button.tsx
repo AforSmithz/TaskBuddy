@@ -20,7 +20,7 @@ const SIZES: Record<ButtonSize, string> = {
   lg: "h-11 px-5 text-[15px] gap-2",
 };
 
-/** Composable class string — use for `<Link>`s that should look like buttons. */
+/** Composable class string - use for `<Link>`s that should look like buttons. */
 export function buttonClasses(
   variant: ButtonVariant = "primary",
   size: ButtonSize = "md",

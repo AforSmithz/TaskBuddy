@@ -145,14 +145,14 @@ export function TodayAgenda({
   }, [optimistic, dependencies]);
 
   // The global cross-project order, looked up by task id. Deadline pressure can
-  // pull one project's task ahead of another's — keyed on id so an optimistically
+  // pull one project's task ahead of another's - keyed on id so an optimistically
   // completed task (dropped from `optimistic`) never carries a stale rank.
   const orderByTask = useMemo(
     () => new Map(order.map((e) => [e.taskId, e])),
     [order],
   );
 
-  // Reasons for the tasks deadline pressure pulled ahead — annotated on their
+  // Reasons for the tasks deadline pressure pulled ahead - annotated on their
   // rows. Empty for single-project users (nothing leapfrogs anything).
   const pulledAhead = useMemo(() => {
     const m = new Map<string, string>();

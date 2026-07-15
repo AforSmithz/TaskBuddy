@@ -18,7 +18,7 @@ function toneText(p: number): string {
 
 /**
  * One off-track project on the /strategy page, collapsed by default. The full
- * `RecoveryCallout` — including its three eager-on-mount LLM children — only
+ * `RecoveryCallout` - including its three eager-on-mount LLM children - only
  * mounts when the disclosure is expanded, so opening a project is what fires its
  * heavy AI tools (never on page load). A `critical` plan accents red.
  */

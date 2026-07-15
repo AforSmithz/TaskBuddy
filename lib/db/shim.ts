@@ -46,8 +46,8 @@ function executorFor(uid: string): Executor {
  * The user id is resolved EAGERLY, here, rather than lazily inside
  * `auth.getUser()`. Only write paths call `currentUserId()`; every read calls
  * `.from()` with no id in hand, and each of those statements still needs
- * `app.user_id` set. Resolving once per client also keeps `currentUserId` —
- * which runs on every write — from re-verifying the token each time.
+ * `app.user_id` set. Resolving once per client also keeps `currentUserId` - 
+ * which runs on every write - from re-verifying the token each time.
  */
 export async function getRequestClient(): Promise<RequestClient> {
   const store = await cookies();

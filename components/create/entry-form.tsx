@@ -11,7 +11,7 @@ import { cn } from "@/lib/cn";
 const INITIAL: FormState = { error: null };
 const NEW_AREA = "__new_area__";
 const NEW_PROJECT = "__new_project__";
-/** Defers the choice to TaskBuddy — resolved (or confirmed) in the review step. */
+/** Defers the choice to TaskBuddy - resolved (or confirmed) in the review step. */
 const AUTO = "__auto__";
 
 const PLACEHOLDER: Record<EntryKind, string> = {
@@ -152,7 +152,7 @@ export function EntryForm({
         </div>
       </div>
 
-      {/* Related meeting — transcript mode only */}
+      {/* Related meeting - transcript mode only */}
       {mode === "meeting" && projectEntries.length > 0 && (
         <div>
           <FieldLabel htmlFor="parentEntryId">

@@ -11,7 +11,7 @@ const inputCls =
 
 /**
  * Create a routine (daily, streak-based) or goal (weekly session target). Direct
- * create — no LLM extraction. The strategist defaults to protecting routines and
+ * create - no LLM extraction. The strategist defaults to protecting routines and
  * treating goals as discretionary; the user can flip that here or per-row later.
  */
 export function ActivityForm() {

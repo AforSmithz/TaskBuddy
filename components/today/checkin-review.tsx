@@ -27,7 +27,7 @@ function toneText(p: number): string {
       : "text-[var(--color-status-done)]";
 }
 
-/** A short label for the odds-silent Family-B rows — never a percentage (a 0% next
+/** A short label for the odds-silent Family-B rows - never a percentage (a 0% next
  *  to a log would mislead; the design keeps these visually distinct). */
 function actionLabel(p: CheckinProposal): { icon: typeof Timer; text: string } {
   const a = p.action;
@@ -36,16 +36,16 @@ function actionLabel(p: CheckinProposal): { icon: typeof Timer; text: string } {
   return { icon: Check, text: "Note" };
 }
 
-/** Optional context for `moveOutcome` — the shipped task titles + DAG so a
+/** Optional context for `moveOutcome` - the shipped task titles + DAG so a
  *  resolve_blocker line can name its freed dependents (§5.6 6b). Display-only. */
 interface OutcomeCtx {
   titleById: Map<string, string>;
   deps: DependencyEdge[];
 }
 
-/** One line of the post-commit outcome summary (§5.6 slice 6a/6b) — a glyph + the item
+/** One line of the post-commit outcome summary (§5.6 slice 6a/6b) - a glyph + the item
  *  title (+ optional sub-lines), derived purely from the committed move's payload and
- *  the shipped re-solve inputs (no probability is computed here — frontend rule §2.8).
+ *  the shipped re-solve inputs (no probability is computed here - frontend rule §2.8).
  *  The glyph carries the meaning: ✓ done/learned/cleared, ＋ added scope, → moved, − skipped. */
 function moveOutcome(
   move: StrategyMove,
@@ -59,7 +59,7 @@ function moveOutcome(
       return { glyph: "✓", text: `learned ${p.title}`, done: true };
     case "resolve_blocker": {
       // Cleared a blocker: list the freed dependents by title, and honestly flag any
-      // that still wait on OTHER work (partial satisfaction — decision #3). Both reads
+      // that still wait on OTHER work (partial satisfaction - decision #3). Both reads
       // are display-only filters over the shipped DAG + titles, never a re-derivation.
       const titleById = ctx?.titleById;
       const deps = ctx?.deps ?? [];
@@ -109,7 +109,7 @@ export function CheckinReview({
   const { review, resolveInput } = result;
   const { proposals, chips } = review;
 
-  // Included rows (by proposal index) — seeded from each proposal's defaultChecked
+  // Included rows (by proposal index) - seeded from each proposal's defaultChecked
   // (high-confidence + resolved → on; ambiguous / inferred spillover → off).
   const [included, setIncluded] = useState<Set<number>>(
     () => new Set(proposals.flatMap((p, i) => (p.defaultChecked ? [i] : []))),
@@ -133,7 +133,7 @@ export function CheckinReview({
     return { byIndex, combined };
   }, [proposals, included, resolveInput]);
 
-  // Base portfolio odds (no moves) — the "before" of the post-commit odds transition.
+  // Base portfolio odds (no moves) - the "before" of the post-commit odds transition.
   // Same sanctioned S1 client re-solve as `live`; never a hand-rolled probability.
   const baseCombined = useMemo(
     () => resolveSubsetCumulative(resolveInput as ResolveInput, []).combined,
@@ -172,7 +172,7 @@ export function CheckinReview({
         );
         newVersionId = version.id;
       }
-      // Family-B actions are odds-silent + idempotent — run individually (log SETs
+      // Family-B actions are odds-silent + idempotent - run individually (log SETs
       // time, capture adds an errand); they ride outside the undoable bundle.
       for (const { p } of familyB) {
         const a = p.action!;
@@ -197,8 +197,8 @@ export function CheckinReview({
     // Post-commit outcome summary (§5.6 slice 6a): what the accepted moves did,
     // grouped by goal (recital ✓ / work ✓ / gym −), the portfolio odds transition,
     // and a reflective end-of-day read. All from already-committed data + the same
-    // sanctioned S1 re-solve — no fresh probability is computed here.
-    // Titles + DAG for naming a resolve_blocker's freed dependents (§5.6 6b) — the same
+    // sanctioned S1 re-solve - no fresh probability is computed here.
+    // Titles + DAG for naming a resolve_blocker's freed dependents (§5.6 6b) - the same
     // shipped re-solve inputs the odds use; no fresh computation, display only.
     const outcomeCtx: OutcomeCtx = {
       titleById: new Map(resolveInput.tasks.map((t) => [t.id, t.title])),

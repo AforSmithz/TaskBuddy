@@ -6,8 +6,8 @@ import { getVercelOidcToken } from "@vercel/functions/oidc";
 //
 // WHAT THIS REPLACES. Every Azure credential the app used to hold was a
 // long-lived secret sitting in a Vercel environment variable: the Foundry API
-// key, the database password. `azure/sql/02_grants.sql` argued — correctly at
-// the time — that Key Vault could not fix that, because reading a secret from
+// key, the database password. `azure/sql/02_grants.sql` argued - correctly at
+// the time - that Key Vault could not fix that, because reading a secret from
 // Key Vault needs a credential that would itself have to live in a Vercel env
 // var. That reasoning holds right up until the root credential stops being a
 // secret, which is what this file does.
@@ -22,7 +22,7 @@ import { getVercelOidcToken } from "@vercel/functions/oidc";
 //
 // AZURE_TENANT_ID and AZURE_CLIENT_ID are NOT secrets. They are public
 // directory identifiers; neither grants anything without a signed assertion
-// from the trusted issuer. That is the whole point — the Vercel env var surface
+// from the trusted issuer. That is the whole point - the Vercel env var surface
 // goes from "four secrets" to "two identifiers".
 
 /** Matches the `audiences` on the federated credential. See azure/identity.sh. */
@@ -39,7 +39,7 @@ export const COGNITIVE_SERVICES_SCOPE =
 // Entra round trip on every single LLM call.
 //
 // KEYED ON THE IDENTITY rather than being a bare singleton. In production this
-// makes no difference — a serverless instance never changes identity mid-life —
+// makes no difference - a serverless instance never changes identity mid-life - 
 // but a bare singleton also caches the *miss*, which makes the whole path
 // untestable in one process and would hide a late-binding env var. Keying it
 // costs one string compare and removes both problems.
@@ -47,7 +47,7 @@ let cached: { key: string; credential: ClientAssertionCredential } | null = null
 
 /**
  * The federated credential, or `null` when this process has no workload
- * identity — local `next dev`, and the plain-Node tsx harnesses under
+ * identity - local `next dev`, and the plain-Node tsx harnesses under
  * `azure/harness/`. Both of those have no OIDC token to present, so callers
  * fall back to key auth rather than failing.
  *
@@ -65,7 +65,7 @@ export function azureCredential(): ClientAssertionCredential | null {
   const credential = new ClientAssertionCredential(tenantId, clientId, () =>
     // Called by the SDK on every token refresh, never cached by us. The
     // @vercel/oidc docs are explicit that the OIDC token "is subject to change
-    // in production" and must not be held onto — it is the credential's own
+    // in production" and must not be held onto - it is the credential's own
     // access-token cache that makes this cheap, not a cache of this value.
     //
     // Passing `audience` makes Vercel *exchange* the platform token for one

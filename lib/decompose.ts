@@ -82,7 +82,7 @@ const DECOMPOSITION_SCHEMA = {
 
 /**
  * Reject a decomposition the pipeline cannot use, so the deployment chain
- * advances. An EMPTY array is deliberately not rejected — the prompt now uses
+ * advances. An EMPTY array is deliberately not rejected - the prompt now uses
  * it to mean "this is not a learning goal", which is a real answer rather than
  * a failure. What is rejected is an over-long graph or duplicate keys, neither
  * of which a strict schema can catch.
@@ -168,7 +168,7 @@ function sanitizeSkills(skills: ExtractedSkill[]): ExtractedSkill[] {
 
 /**
  * Offline fallback: a generic learn-anything ladder. Honest about being generic
- * — it's a scaffold to edit, not a real domain plan, used only without an API key.
+ * - it's a scaffold to edit, not a real domain plan, used only without an API key.
  */
 function heuristicSkills(name: string): ExtractedSkill[] {
   const subject = name.replace(/^learn(ing)?\s+/i, "").trim() || "the subject";

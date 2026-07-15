@@ -4,7 +4,7 @@ import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { SESSION_COOKIE, verifySession } from "./session";
 
-// Authentication helpers — the single place the rest of the app asks
+// Authentication helpers - the single place the rest of the app asks
 // "who is the current user?". `getUser` is memoised per render pass, so repeated
 // calls within one request verify the token once.
 //
@@ -39,7 +39,7 @@ export async function requireUser(): Promise<SessionUser> {
   return user;
 }
 
-/** Display name for a user — the name chosen at signup, falling back to email. */
+/** Display name for a user - the name chosen at signup, falling back to email. */
 export function displayName(user: SessionUser): string {
   return (user.fullName && user.fullName.trim()) || user.email || "Account";
 }

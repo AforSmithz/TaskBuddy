@@ -70,7 +70,7 @@ export function DefinitionOfDone({
           </ul>
         )}
 
-        {/* Completion state — the honest read, not just task counts. */}
+        {/* Completion state - the honest read, not just task counts. */}
         {completion.complete && (
           <p
             className={cn(

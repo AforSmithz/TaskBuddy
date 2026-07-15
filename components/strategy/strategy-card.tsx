@@ -54,7 +54,7 @@ function toneText(p: number): string {
       : "text-[var(--color-status-done)]";
 }
 
-/** Icon per move kind — mirrors the visual language of the recovery callout. */
+/** Icon per move kind - mirrors the visual language of the recovery callout. */
 const MOVE_ICON: Record<StrategyMoveKind, typeof ArrowRight> = {
   defer: ArrowRight,
   reschedule_deadline: CalendarClock,
@@ -121,7 +121,7 @@ function addedTasks(payload: StrategyMovePayload): TaskRowData[] {
   }
 }
 
-/** A labelled group of changed-task rows inside the disclosure — deferred work
+/** A labelled group of changed-task rows inside the disclosure - deferred work
  *  carries a "Deferred" tag, net-new work reads as live. Renders the same detailed
  *  task row used on the project page so the trade-off is fully legible. */
 function ChangeGroup({
@@ -155,8 +155,8 @@ function ChangeGroup({
 
 /**
  * One move row: rationale + its own odds (`→`) and the running portfolio
- * conjunction (`all`), the inline Apply, and — when the move sheds/replaces real
- * work — an expandable disclosure listing EVERY task it changes (deferred and
+ * conjunction (`all`), the inline Apply, and - when the move sheds/replaces real
+ * work - an expandable disclosure listing EVERY task it changes (deferred and
  * net-new), so the full trade-off is inspectable before applying.
  */
 function MoveRow({
@@ -181,7 +181,7 @@ function MoveRow({
   /** Is this move part of the staged "apply" set (drives the live odds + the dim). */
   included: boolean;
   onToggleInclude: () => void;
-  /** The LIVE cumulative portfolio odds after this move within the included set —
+  /** The LIVE cumulative portfolio odds after this move within the included set - 
    *  overrides the baked `portfolioProbabilityAfter` once the user has toggled. */
   liveJoint?: number;
 }) {
@@ -298,7 +298,7 @@ function MoveRow({
 }
 
 /**
- * One applyable tier of moves — the bold "Recommended" plan or the grounded
+ * One applyable tier of moves - the bold "Recommended" plan or the grounded
  * "Steady plan". Each row shows the CUMULATIVE portfolio odds after applying that
  * step (`portfolioProbabilityAfter`), climbing to `combinedProbability` at the
  * "Apply all" (or a plan-level "Together →" line for a single-step plan). Owns its
@@ -333,7 +333,7 @@ function MoveTier({
   const [busy, setBusy] = useState<number | "all" | null>(null);
   const [pending, startTransition] = useTransition();
   const [open, setOpen] = useState(defaultOpen);
-  // The most recent committed bundle — backs the inline Undo (vision §8.2). `indices`
+  // The most recent committed bundle - backs the inline Undo (vision §8.2). `indices`
   // are the rows it applied, so undo can bring exactly those back into the list.
   const [lastVersion, setLastVersion] = useState<{
     id: string;
@@ -344,7 +344,7 @@ function MoveTier({
   const canResolve = Boolean(resolveInput) && moves.length > 0;
 
   // Live re-solve: the running portfolio odds after each INCLUDED, not-yet-applied
-  // move (in recommended order) plus the combined — recomputed client-side from the
+  // move (in recommended order) plus the combined - recomputed client-side from the
   // serialized inputs, identical to the server's baked numbers for the same subset.
   // §0 holds: the odds still come from `forecast()`; the browser only relocates it.
   const live = useMemo(() => {
@@ -387,13 +387,13 @@ function MoveTier({
   // The single commit path: apply a set of moves as ONE snapshotted bundle, then
   // remember it for Undo. Both the per-row Apply and "Apply N" funnel through here,
   // so every change is a recorded, reversible PlanVersion (§1.3). The server orders
-  // the moves (deadline reschedules last) — the card passes recommended order.
+  // the moves (deadline reschedules last) - the card passes recommended order.
   function commit(
     entries: { move: StrategyMove; index: number }[],
     busyKey: number | "all",
     /**
      * The moves still on the table that the user unchecked. Only the whole-slate
-     * Apply passes this — that click is a decision about every offered move, so
+     * Apply passes this - that click is a decision about every offered move, so
      * `kept ≻ declined` is a real revealed preference. Applying a single row says
      * nothing about the rows left alone, so `applyOne` passes nothing and the
      * server records no observation.
@@ -437,7 +437,7 @@ function MoveTier({
       .map((move, index) => ({ move, index }))
       .filter(({ index }) => !applied.has(index));
     const entries = open.filter(({ index }) => included.has(index));
-    // Everything still on the table that the user unchecked — the other half of the
+    // Everything still on the table that the user unchecked - the other half of the
     // preference pair. Already-applied rows are excluded: they weren't declined.
     const declined = open
       .filter(({ index }) => !included.has(index))
@@ -472,7 +472,7 @@ function MoveTier({
   const inPlay = remaining.filter(({ index }) => included.has(index));
 
   // The headline combined: the LIVE re-solve when toggles are available, else the
-  // baked number. A strategy cached before Phase 5 has no cumulative odds — fall
+  // baked number. A strategy cached before Phase 5 has no cumulative odds - fall
   // back to the move's solo odds for rows, and hide the combined chip when it isn't
   // finite, so a stale-schema cache degrades gracefully instead of showing "NaN%".
   const headlineCombined = live ? live.combined : combinedProbability;
@@ -591,10 +591,10 @@ function MoveTier({
  * optimizer's mechanical-only plan, collapsible so Today stays calm.
  *
  * Regeneration is gated deterministically (the server only marks `stale` when the
- * odds moved materially or the strategy aged out — a cosmetic edit never does).
+ * odds moved materially or the strategy aged out - a cosmetic edit never does).
  * When the LLM is available (`canUseLLM`), the card auto-regenerates in the
- * background — on first load it upgrades the deterministic draft, and a stale
- * strategy refreshes itself — so the AI strategy stays current without a click.
+ * background - on first load it upgrades the deterministic draft, and a stale
+ * strategy refreshes itself - so the AI strategy stays current without a click.
  * "Am I on track?" / the stale banner's Refresh remain as manual triggers.
  */
 export function StrategyCard({
@@ -614,7 +614,7 @@ export function StrategyCard({
   steadyPlanDefaultOpen?: boolean;
   /**
    * How loud the banner reads: "gentle" by default (calm front door); "escalated"
-   * only when a hard deadline is genuinely at risk — then the card takes a danger
+   * only when a hard deadline is genuinely at risk - then the card takes a danger
    * accent so a true emergency doesn't read like a minor slip.
    */
   severity?: "gentle" | "escalated";
@@ -634,8 +634,8 @@ export function StrategyCard({
     });
   }
 
-  // Aggressive policy: when the LLM is available, regenerate in the background —
-  // upgrade a deterministic draft on first load, or refresh a stale strategy —
+  // Aggressive policy: when the LLM is available, regenerate in the background - 
+  // upgrade a deterministic draft on first load, or refresh a stale strategy - 
   // exactly once per mount. The server's deterministic gate already ensures
   // `stale` only fires on a material change, so this never spins on cosmetic edits.
   const autoFired = useRef(false);
@@ -655,7 +655,7 @@ export function StrategyCard({
   // on, so the hero caption says "hold course" instead of promising a plan.
   //
   // Caption only, deliberately: a hold needs an off-track goal, and `detectDivergence`
-  // tags `at_risk` critical whether the deadline is near or far — so such a goal all but
+  // tags `at_risk` critical whether the deadline is near or far - so such a goal all but
   // always raises the escalated banner, which owns the headline. A "nothing worth
   // changing" headline lost that race every time and would only ever have been dead code.
   const holdOnly =
@@ -665,10 +665,10 @@ export function StrategyCard({
   const tierKey = `${current.generatedAt}:${current.usedLLM}`;
 
   // Escalate visually only for a real emergency (a hard deadline at risk). Never
-  // surface raw odds here — the accent is the only louder signal.
+  // surface raw odds here - the accent is the only louder signal.
   const escalated = severity === "escalated" && !calm;
 
-  // Hero anchor — the giant portfolio number: odds everything lands with this
+  // Hero anchor - the giant portfolio number: odds everything lands with this
   // plan (`combinedProbability`). Neutral when healthy; takes the cut/danger tone
   // only when at risk, so an on-track portfolio reads calm. Falls back to a
   // wordmark for a pre-Phase-5 cache that has no combined odds.
@@ -701,7 +701,7 @@ export function StrategyCard({
       )}
     >
       <div className="p-6 md:p-7">
-        {/* Background regeneration in flight — auto (first-load upgrade / stale
+        {/* Background regeneration in flight - auto (first-load upgrade / stale
             refresh) or a manual click. */}
         {refreshing ? (
           <div className="mb-5 flex items-center gap-2 rounded-[14px] border border-[var(--color-border)] bg-[var(--color-surface-raised)] px-3.5 py-2.5">
@@ -711,7 +711,7 @@ export function StrategyCard({
             </p>
           </div>
         ) : isStale ? (
-          /* Stale and not auto-refreshing (e.g. LLM offline) — offer a manual refresh. */
+          /* Stale and not auto-refreshing (e.g. LLM offline) - offer a manual refresh. */
           <div className="mb-5 flex items-center justify-between gap-3 rounded-[14px] border border-[var(--color-border)] border-l-2 border-l-[var(--color-accent)] bg-[var(--color-surface-raised)] px-3.5 py-2.5">
             <p className="min-w-0 text-[12px] text-[var(--color-fg-muted)]">
               Your situation changed since this strategy — refresh for current
@@ -724,7 +724,7 @@ export function StrategyCard({
           </div>
         ) : null}
 
-        {/* Hero — the giant odds anchor plus the headline & why. */}
+        {/* Hero - the giant odds anchor plus the headline & why. */}
         <div className="relative flex flex-col gap-6 overflow-hidden md:flex-row md:gap-8">
           <div
             aria-hidden
@@ -775,7 +775,7 @@ export function StrategyCard({
           </div>
         </div>
 
-        {/* Bold tier — the LLM's recommendation, re-scored jointly. */}
+        {/* Bold tier - the LLM's recommendation, re-scored jointly. */}
         <MoveTier
           key={`bold:${tierKey}`}
           moves={current.moves}
@@ -785,7 +785,7 @@ export function StrategyCard({
           resolveInput={current.resolveInput}
         />
 
-        {/* Grounded tier — mechanical-only joint plan, collapsible. */}
+        {/* Grounded tier - mechanical-only joint plan, collapsible. */}
         {current.grounded && current.grounded.moves.length > 0 && (
           <MoveTier
             key={`steady:${tierKey}`}
@@ -799,7 +799,7 @@ export function StrategyCard({
           />
         )}
 
-        {/* Calm — held course, or nothing to act on. */}
+        {/* Calm - held course, or nothing to act on. */}
         {calm && (
           <p className="mt-3 flex items-center gap-1.5 px-1 text-[12px] text-[var(--color-status-done)]">
             <Shield className="size-3.5 shrink-0" />
@@ -807,7 +807,7 @@ export function StrategyCard({
           </p>
         )}
 
-        {/* Footer — the only LLM trigger + the link to the full detail. */}
+        {/* Footer - the only LLM trigger + the link to the full detail. */}
         <div className="mt-4 flex items-center justify-between gap-3 border-t border-[var(--color-border)] pt-3">
           <Button
             variant="ghost"

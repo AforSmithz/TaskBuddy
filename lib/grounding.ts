@@ -34,11 +34,11 @@ import {
 import { goalCompletion } from "./goal";
 import { skillProgress } from "./skill";
 
-// Step 5 (§5 / vision §4.1) — cause-diagnosis.
+// Step 5 (§5 / vision §4.1) - cause-diagnosis.
 //
 // `detectDivergence` says *that* a goal is off track (the symptoms). This module
-// is the layer on top: it classifies *why* — one-off slip vs chronic velocity vs
-// constraint change vs structural overload — because the cause picks the response
+// is the layer on top: it classifies *why* - one-off slip vs chronic velocity vs
+// constraint change vs structural overload - because the cause picks the response
 // *class* (which move family to prefer), so the strategist doesn't reflexively
 // cut scope for a single blown estimate.
 //
@@ -53,12 +53,12 @@ const LN_CHRONIC_OVERRUN = Math.log(1.25);
 const ONE_OFF_SIGMA = 2;
 /** Need at least this many done tasks for "a single outlier" to be meaningful. */
 const ONE_OFF_MIN_SAMPLES = 3;
-/** The remaining residuals must sit within ~this of 0 (log space ⇒ ~20%) — pace is fine. */
+/** The remaining residuals must sit within ~this of 0 (log space ⇒ ~20%) - pace is fine. */
 const ONE_OFF_MEDIAN_TOL = 0.18;
 /** Odds must fall at least this far below the baseline to read as the world moving. */
 const CONSTRAINT_ODDS_DROP = 0.05;
 
-/** The temporal/odds anchor — "the world as the last standing plan saw it". */
+/** The temporal/odds anchor - "the world as the last standing plan saw it". */
 export interface CauseBaseline {
   /** When the cached strategy that anchors the baseline was generated (ISO). */
   generatedAt: string;
@@ -67,16 +67,16 @@ export interface CauseBaseline {
 }
 
 /**
- * Everything {@link diagnoseCause} needs — a pure subset that `RecoveryContext`
+ * Everything {@link diagnoseCause} needs - a pure subset that `RecoveryContext`
  * (and `buildRecoveryPlan`'s locals) already satisfy structurally, so callers
  * pass the context they already hold.
  */
 export interface CauseInput {
   /** The global learned estimation model (systematic bias + spread). */
   model: EstimationModel;
-  /** This goal's completed tasks — the per-goal residual sample. */
+  /** This goal's completed tasks - the per-goal residual sample. */
   completedTasks: Task[];
-  /** This goal's open tasks — for "added since the baseline" detection. */
+  /** This goal's open tasks - for "added since the baseline" detection. */
   openTasks: Task[];
   /** The symptoms already detected (the layer this builds on). */
   reasons: DivergenceReason[];
@@ -85,7 +85,7 @@ export interface CauseInput {
   /** The temporal/odds baseline, or null when no strategy is cached yet. */
   baseline: CauseBaseline | null;
   /**
-   * The GLOBAL per-window velocity (OVERHAUL S2 slice C) — how much each time-of-day
+   * The GLOBAL per-window velocity (OVERHAUL S2 slice C) - how much each time-of-day
    * window runs over/under your estimates, across all goals. Absent until session
    * capture accrues; when absent the placement tempering can't fire and the
    * diagnosis is bit-identical to before S2 (the no-regret anchor).
@@ -99,7 +99,7 @@ export interface CauseInput {
   windowedResiduals?: ResidualSample[];
 }
 
-/** log(actual/estimated) for each genuinely-timed done task — the residual sample. */
+/** log(actual/estimated) for each genuinely-timed done task - the residual sample. */
 export function goalResiduals(tasks: Task[]): number[] {
   const out: number[] = [];
   for (const t of tasks) {
@@ -131,7 +131,7 @@ function mean(xs: number[]): number {
  * Inert until the loop has learned the windows: needs real `windowVelocity` and a
  * non-sparse window-tagged sample, so before S2 capture accrues it returns null and
  * the diagnosis is bit-identical to before (the no-regret anchor). It can only ever
- * DEMOTE a chronic_velocity reading — the conservative direction (§0; deterministic).
+ * DEMOTE a chronic_velocity reading - the conservative direction (§0; deterministic).
  */
 function placementExplains(
   samples: ResidualSample[],
@@ -164,18 +164,18 @@ function placementExplains(
  * Classify *why* a goal diverged. Deterministic-first (§0). The checks run in a
  * fixed precedence so each cause means what it says:
  *
- *   1. one_off_slip — a single big over-run while the rest of the goal's work
+ *   1. one_off_slip - a single big over-run while the rest of the goal's work
  *      sits near its estimates. Checked FIRST (locked decision) so one blow-out
  *      can't masquerade as a chronic pattern, and so the strategist can hold
  *      rather than over-react to an expected missed Friday.
- *   2. chronic_velocity — estimates systematically run over, globally or for this
+ *   2. chronic_velocity - estimates systematically run over, globally or for this
  *      goal once it has its own sample. The estimates are the problem, not the
  *      arrangement. (2a) timing_placement intercepts the goal's own chronic read
- *      when the overrun is explained by the low-energy windows it was worked in —
+ *      when the overrun is explained by the low-energy windows it was worked in - 
  *      a placement problem, not an estimation one (S2; inert until windows learned).
- *   3. constraint_change — neither slip nor pattern explains it, but the world
+ *   3. constraint_change - neither slip nor pattern explains it, but the world
  *      moved since the plan was made (new work landed, or the odds fell).
- *   4. scope_structural — the default: more committed work than the time allows.
+ *   4. scope_structural - the default: more committed work than the time allows.
  */
 export function diagnoseCause(input: CauseInput): CauseDiagnosis {
   const { model, completedTasks, openTasks, currentProbability, baseline } =
@@ -184,7 +184,7 @@ export function diagnoseCause(input: CauseInput): CauseDiagnosis {
   const n = residuals.length;
   const sigma = model.sigma;
 
-  // 1) one_off_slip — exactly one big over-run while the rest cluster near 0.
+  // 1) one_off_slip - exactly one big over-run while the rest cluster near 0.
   if (n >= ONE_OFF_MIN_SAMPLES) {
     const overruns = residuals.filter((r) => r > ONE_OFF_SIGMA * sigma);
     if (
@@ -199,7 +199,7 @@ export function diagnoseCause(input: CauseInput): CauseDiagnosis {
     }
   }
 
-  // 2) chronic_velocity — a systematic over-run, for this goal or globally.
+  // 2) chronic_velocity - a systematic over-run, for this goal or globally.
   //
   //    The goal's own residual mean is SHRUNK toward the global bias (empirical
   //    Bayes, κ = SHRINKAGE_STRENGTH) rather than SWITCHED to it at a hard
@@ -212,16 +212,16 @@ export function diagnoseCause(input: CauseInput): CauseDiagnosis {
   //
   //    NO-REGRET at the anchor: `n = 0 ⇒ B = 0 ⇒ bias = model.meanLog`, i.e. exactly
   //    the old `globalChronic` test. The global trust gate mirrors `fitVelocityModel`
-  //    — below MIN_ESTIMATION_SAMPLES the global model is the unbiased *default*, not
+  // - below MIN_ESTIMATION_SAMPLES the global model is the unbiased *default*, not
   //    evidence, so there is nothing to shrink toward and nothing to diagnose. (The
-  //    goal's sample is a subset of the global pool — `goalResiduals` shares
-  //    `estimationModel`'s gate — so this can never mask a goal that used to fire.)
+  //    goal's sample is a subset of the global pool - `goalResiduals` shares
+  //    `estimationModel`'s gate - so this can never mask a goal that used to fire.)
   const chronicBias =
     model.sampleSize >= MIN_ESTIMATION_SAMPLES
       ? shrinkScalar(mean(residuals), model.meanLog, n, SHRINKAGE_STRENGTH)
       : null;
   if (chronicBias !== null && chronicBias >= LN_CHRONIC_OVERRUN) {
-    // 2a) timing_placement (S2) — before blaming the estimates, check whether THIS
+    // 2a) timing_placement (S2) - before blaming the estimates, check whether THIS
     //     goal's overrun is just the low-energy windows it was worked in. If net of
     //     the windows the pace is fine, it's a placement problem (reschedule into
     //     better hours), not an estimation one. Called unconditionally: it self-gates
@@ -245,7 +245,7 @@ export function diagnoseCause(input: CauseInput): CauseDiagnosis {
     };
   }
 
-  // 3) constraint_change — the world moved since the plan was made. v1 reads two
+  // 3) constraint_change - the world moved since the plan was made. v1 reads two
   //    signals off the cached-strategy baseline: work that landed after it was
   //    generated, or odds that have since fallen materially (the effect of a
   //    pulled-in deadline / cut availability / new blocker). By here we've ruled
@@ -270,7 +270,7 @@ export function diagnoseCause(input: CauseInput): CauseDiagnosis {
     }
   }
 
-  // 4) scope_structural — the default: genuine over-commitment for the time.
+  // 4) scope_structural - the default: genuine over-commitment for the time.
   return {
     cause: "scope_structural",
     detail:
@@ -278,7 +278,7 @@ export function diagnoseCause(input: CauseInput): CauseDiagnosis {
   };
 }
 
-// Step 5 slice 4 (§5 / vision §4.1) — response class: cause → preferred move family.
+// Step 5 slice 4 (§5 / vision §4.1) - response class: cause → preferred move family.
 //
 // The diagnosed cause picks which *family* of recovery moves fits the situation,
 // so the strategist doesn't reflexively cut scope for a one-off slip, or merely
@@ -286,7 +286,7 @@ export function diagnoseCause(input: CauseInput): CauseDiagnosis {
 // recovery-style preference, these are TIEBREAKERS (bounded, same ±1 scale): the
 // joint optimizer only consults them when two candidates' odds are within an
 // epsilon, so the forecast always decides first and the cause only arbitrates a
-// genuine tie. The cause picks the family; the odds still decide within it (§0 —
+// genuine tie. The cause picks the family; the odds still decide within it (§0 - 
 // the cause itself is computed deterministically by `diagnoseCause`).
 //
 // Mirrors the design table:
@@ -294,24 +294,24 @@ export function diagnoseCause(input: CauseInput): CauseDiagnosis {
 //   chronic_velocity  → re-estimate (reshape) / move the deadline (the estimates,
 //                       not the arrangement, are wrong)
 //   timing_placement  → smallest reschedule into stronger hours (S2; the windows,
-//                       not the estimates, are wrong — don't reshape or cut scope)
+//                       not the estimates, are wrong - don't reshape or cut scope)
 //   constraint_change → reroute / reschedule / triage (re-plan around the change)
 //   scope_structural  → triage / reroute (shed genuine over-commitment)
 //
 // `hold` IS enumerable now (step 5 slice 4 follow-on, limitation #2). It is not a
 // competitor to the real moves: `optimizeJointPlan` never lets a zero-gain move win
-// the accept gate. It is offered only at the moment the optimizer gives up — when
+// the accept gate. It is offered only at the moment the optimizer gives up - when
 // nothing left on the table clears `JOINT_MIN_GAIN` and a goal is still off track.
 // That state already MEANT "wait"; a `hold` candidate just says so out loud and
 // records the decision in the S1 plan-version history, which is the natural home for
 // it (a hold is a real decision). Only a cause that positively prefers holding can
-// surface one — hence the single entry below.
+// surface one - hence the single entry below.
 
 export const CAUSE_MOVE_PREFERENCES: Record<
   DivergenceCause,
   Partial<Record<StrategyMoveKind, number>>
 > = {
-  // A blip — make the smallest reschedule; never cut scope for it. And when nothing
+  // A blip - make the smallest reschedule; never cut scope for it. And when nothing
   // is worth doing, saying "wait, this recovers" is the RIGHT answer, not a shrug.
   one_off_slip: {
     hold: 1,
@@ -324,14 +324,14 @@ export const CAUSE_MOVE_PREFERENCES: Record<
     defer_skill: -0.5,
     reschedule_skill: -0.5,
   },
-  // The estimates are systematically low — re-shape (re-estimate / scope down) or
+  // The estimates are systematically low - re-shape (re-estimate / scope down) or
   // move the date; re-arranging the same work won't fix a pace problem.
   chronic_velocity: {
     reshape: 1,
     reschedule_deadline: 0.5,
     reroute: -0.25,
   },
-  // Not the estimates — the work keeps landing in low-energy windows. Move it to
+  // Not the estimates - the work keeps landing in low-energy windows. Move it to
   // stronger hours (smallest reschedule); don't re-estimate or cut scope for it.
   // Mirrors one_off_slip's "don't over-react" shape (the placement is fixable).
   timing_placement: {
@@ -342,13 +342,13 @@ export const CAUSE_MOVE_PREFERENCES: Record<
     reroute: -0.25,
     triage: -1,
   },
-  // The world moved — re-plan around the new constraint rather than blaming pace.
+  // The world moved - re-plan around the new constraint rather than blaming pace.
   constraint_change: {
     reroute: 1,
     reschedule_deadline: 0.5,
     triage: 0.5,
   },
-  // Genuine over-commitment — shed or replace work; re-dating alone won't fit it.
+  // Genuine over-commitment - shed or replace work; re-dating alone won't fit it.
   scope_structural: {
     triage: 1,
     reroute: 0.5,
@@ -361,7 +361,7 @@ export const CAUSE_MOVE_PREFERENCES: Record<
 /**
  * Tiebreak bias for a move kind given the diagnosed cause (0 when the cause is
  * unknown or the kind isn't listed). Weighted-summed with the value model's
- * recovery-style `movePref` in the joint optimizer — both apply only within the
+ * recovery-style `movePref` in the joint optimizer - both apply only within the
  * odds epsilon, so the forecast is never overridden.
  */
 export function causeMovePref(
@@ -401,7 +401,7 @@ export function aggregateCauseMovePref(
 //
 // `optimizeJointPlan` breaks a sub-epsilon odds tie with two nudges: the user's
 // recovery STYLE (`movePref`) and the diagnosed CAUSE's preferred move family
-// (`causeMovePref`). They were summed 1:1 — an unexamined assumption about which
+// (`causeMovePref`). They were summed 1:1 - an unexamined assumption about which
 // should win. These are the named knobs for that ratio; both default to 1.0 (the
 // historical behaviour) and are LEARNED off the offered-vs-kept history by
 // `calibrateMovePrefWeights` below. They apply only within `PREF_TIE_EPS`, so the
@@ -416,7 +416,7 @@ export function aggregateCauseMovePref(
 export const STYLE_PREF_WEIGHT = 1;
 export const CAUSE_PREF_WEIGHT = 1;
 
-/** The prior `[style, cause]` the calibrator shrinks toward — today's co-equal sum. */
+/** The prior `[style, cause]` the calibrator shrinks toward - today's co-equal sum. */
 export const MOVE_PREF_PRIOR: readonly number[] = [
   STYLE_PREF_WEIGHT,
   CAUSE_PREF_WEIGHT,
@@ -433,7 +433,7 @@ export interface MovePrefWeights {
 /**
  * φ for one offered move, priced under the recovery style in force when it was
  * offered. The preference TABLES are read live (a table edit re-prices history);
- * only their INPUTS — kind, cause, style — come off the stored row.
+ * only their INPUTS - kind, cause, style - come off the stored row.
  *
  * The components are NEGATED, and that is the entire adaptation of the shared seam
  * to this consumer: `fitCalibratedWeights` fits an argMIN objective (the preferred
@@ -446,7 +446,7 @@ export interface MovePrefWeights {
 function movePrefFeatures(m: OfferedMove, style: RecoveryStyle): number[] {
   const vm: ValueModel = { ...DEFAULT_VALUE_MODEL, recoveryStyle: style };
   // A single-goal move stores one cause entry, and a one-entry weighted mean IS the
-  // direct lookup — so both move shapes price through the same call.
+  // direct lookup - so both move shapes price through the same call.
   return [-movePref(vm, m.kind), -aggregateCauseMovePref(m.causes, m.kind)];
 }
 
@@ -461,7 +461,7 @@ function centroid(vectors: number[][]): number[] {
 }
 
 /**
- * Learn the STYLE-vs-CAUSE ratio from the user's own accept/decline behaviour — the
+ * Learn the STYLE-vs-CAUSE ratio from the user's own accept/decline behaviour - the
  * 🟠 tier of the calibration cohort (design/step5 → limitation #3, "calibrate from
  * live data"). Each applied bundle contributes ONE revealed preference: the centroid
  * of the moves the user kept is preferred to the centroid of the moves they declined.
@@ -472,7 +472,7 @@ function centroid(vectors: number[][]): number[] {
  *
  * Why no odds-tie gate (unlike `plan_reorders`, which only records odds-NEUTRAL drags):
  * a drag that worsens the odds is the user overriding the forecast, a different kind of
- * statement worth excluding. Declining a *recommendation* is never that — and these two
+ * statement worth excluding. Declining a *recommendation* is never that - and these two
  * weights only ever scale nudges that `PREF_TIE_EPS` already confines to genuine odds
  * ties. A mis-learned weight therefore cannot override a real gain; the structural
  * invariant that licenses `prefFor` at all is the same one that makes this safe to
@@ -483,8 +483,8 @@ function centroid(vectors: number[][]): number[] {
  *
  * Scale-invariance caveat (the trap `calibrate.ts` documents): under the `balanced`
  * recovery style every `movePref` is 0, so φ[0] ≡ 0, Δ[0] ≡ 0, and `style` never moves
- * off its prior. That is correct — with no style there is no style-vs-cause ratio to
- * learn — but it means the 🟠 tier only sharpens for users who picked a lean.
+ * off its prior. That is correct - with no style there is no style-vs-cause ratio to
+ * learn - but it means the 🟠 tier only sharpens for users who picked a lean.
  */
 export function calibrateMovePrefWeights(
   choices: readonly MoveChoice[],
@@ -504,20 +504,20 @@ export function calibrateMovePrefWeights(
   return { style, cause, samples: pairs.length };
 }
 
-// Step 5 (§5 / vision §4.3) — the grounding gate's "cost to the goal" check.
+// Step 5 (§5 / vision §4.3) - the grounding gate's "cost to the goal" check.
 //
 // A recovery move reports its odds gain ("+30% on time"). But a deadline-buying
-// cut can lift the odds while doing nothing for the goal's *reason for being* —
+// cut can lift the odds while doing nothing for the goal's *reason for being* - 
 // its definition of done (project) or its skill milestones (learning). This
 // function computes that cost so it can be shown beside the odds gain: the bar
 // the move leaves unaddressed. Fully derived from `goalCompletion` /
-// `skillProgress` (§0 — never authored), so a green number can't hide a goal
+// `skillProgress` (§0 - never authored), so a green number can't hide a goal
 // being quietly abandoned.
 
 /**
  * The honest cost-to-the-goal beyond the deadline. Returns null when there's no
  * recorded bar to measure against (no criteria / no skills), or when the bar is
- * already fully cleared — in those cases a cut carries no hidden goal cost.
+ * already fully cleared - in those cases a cut carries no hidden goal cost.
  */
 export function goalCutCost(
   kind: GoalKind,
@@ -527,7 +527,7 @@ export function goalCutCost(
   if (kind === "learning") {
     if (skills.length === 0) return null;
     const sp = skillProgress(skills);
-    // Fully attained — nothing left for a deadline move to skip past.
+    // Fully attained - nothing left for a deadline move to skip past.
     if (sp.skillPct >= 1) return null;
     const pct = Math.round(sp.skillPct * 100);
     const detail =
@@ -548,7 +548,7 @@ export function goalCutCost(
   if (criteria.length === 0) return null;
   const gc = goalCompletion(criteria);
   const unmet = gc.total - gc.metCount;
-  // Definition of done already fully met — the date is all that's left at stake.
+  // Definition of done already fully met - the date is all that's left at stake.
   if (unmet === 0) return null;
   const detail = `The date moves, the goal's bar doesn't — ${unmet} of ${gc.total} definition-of-done ${
     unmet === 1 ? "criterion is" : "criteria are"

@@ -59,7 +59,7 @@ export function ScheduleTimeline({ days }: { days: ScheduleDay[] }) {
                       {isBuffer && (
                         <Coffee className="size-3.5 shrink-0 text-[var(--color-fg-subtle)]" />
                       )}
-                      {/* Goal tag — only on global (cross-project) schedules. */}
+                      {/* Goal tag - only on global (cross-project) schedules. */}
                       {block.projectId && block.projectName && (
                         <span
                           className="flex shrink-0 items-center gap-1 text-[11px] font-medium text-[var(--color-fg-muted)]"

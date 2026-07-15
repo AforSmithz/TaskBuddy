@@ -25,7 +25,7 @@ import { attachDatabasePool } from "@vercel/functions";
 //
 // The safety net for that judgement is a metric alert on `active_connections`
 // (fires above 25), so the assumption is watched rather than merely asserted.
-// If you raise this further, raise that alert with it — and remember the number
+// If you raise this further, raise that alert with it - and remember the number
 // is per instance, not per deployment.
 //
 // This is a module-scope singleton on purpose. A per-request pool would multiply
@@ -54,13 +54,13 @@ function buildPool(): Pool {
   //
   // pg's ConnectionParameters does `Object.assign({}, config, parse(connectionString))`,
   // so anything the connection string implies WINS over the explicit config
-  // object — including `sslmode`. A stray `?sslmode=require` copied from a psql
+  // object - including `sslmode`. A stray `?sslmode=require` copied from a psql
   // invocation would therefore quietly override the TLS settings below. Passing
   // discrete fields removes that whole class of surprise.
   const url = new URL(raw);
 
   // Verify the certificate. The firewall is deliberately open (Vercel has no
-  // static egress IPs on this plan), so TLS *verification* — not just TLS — is
+  // static egress IPs on this plan), so TLS *verification* - not just TLS - is
   // what stands between the app and an impersonated server. `PGSSL_STRICT=0` is
   // an escape hatch for a broken local trust store; never set it in production.
   const strict = process.env.PGSSL_STRICT !== "0";
@@ -134,7 +134,7 @@ export async function withUser<T>(
   if (!UUID_RE.test(uid)) {
     // Never reachable from a verified session token, but an invalid uuid here
     // would surface as a confusing 22P02 from deep inside a policy check.
-    // This check is also what makes the interpolation below safe — see there.
+    // This check is also what makes the interpolation below safe - see there.
     throw new Error("Invalid user id.");
   }
 
@@ -144,7 +144,7 @@ export async function withUser<T>(
     //
     // Passing no `values` makes node-postgres use the simple query protocol,
     // which accepts several semicolon-separated statements per message. The
-    // extended protocol — anything with parameters — does not, which is why
+    // extended protocol - anything with parameters - does not, which is why
     // this cannot be written with a $1 placeholder.
     //
     // INTERPOLATING `uid` IS SAFE HERE, AND ONLY HERE, because it has just been
@@ -177,7 +177,7 @@ export async function withUser<T>(
 /**
  * Run `fn` on a pooled connection with **no** `app.user_id` set. Only the
  * authentication path may use this, and only via the SECURITY DEFINER functions
- * in `03_auth.sql` — with the GUC unset, `app.uid()` is NULL and every ordinary
+ * in `03_auth.sql` - with the GUC unset, `app.uid()` is NULL and every ordinary
  * policy denies, which is exactly the intent.
  */
 export async function withoutUser<T>(

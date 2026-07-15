@@ -4,9 +4,9 @@ import { WINDOW_HOURS, WINDOW_LABELS } from "@/lib/velocity";
 import { Card, CardHeader } from "@/components/ui/card";
 import { cn } from "@/lib/cn";
 
-// "Your reliable hours" (OVERHAUL S2 slice C) — a read-only surface that shows how
+// "Your reliable hours" (OVERHAUL S2 slice C) - a read-only surface that shows how
 // work runs vs. your estimates by time-of-day window, derived from accruing work
-// sessions. Pure (no "use client") — server-rendered, no interaction. The
+// sessions. Pure (no "use client") - server-rendered, no interaction. The
 // strategist consumes the same window read to temper its cause diagnosis, so it
 // lives on the Strategy page next to that reasoning.
 //
@@ -94,7 +94,7 @@ function WindowRow({ w }: { w: EnergyWindow }) {
  */
 export function ReliableHours({ windows }: { windows: EnergyWindow[] }) {
   const hasSignal = windows.some((w) => w.sampleSize >= MIN_WINDOW_SAMPLES);
-  // Only windows you've actually worked in — an unobserved window is just the
+  // Only windows you've actually worked in - an unobserved window is just the
   // global baseline, so showing it as a flat bar would imply a reading we don't have.
   const observed = windows.filter((w) => w.sampleSize > 0);
 
