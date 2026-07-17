@@ -18,8 +18,10 @@ param location = readEnvironmentVariable('LOC', 'eastasia')
 // running `curl -fsS https://api.ipify.org` when your address changes.
 param devLaptopIp = readEnvironmentVariable('DEV_IP', '182.8.227.216')
 
-// Mirrors OPEN_TO_VERCEL in provision.sh. Leave false until deploying.
-param openToVercel = bool(readEnvironmentVariable('OPEN_TO_VERCEL', 'false'))
+// Mirrors OPEN_TO_VERCEL in provision.sh. Defaults TRUE: the app is deployed on
+// Vercel, so the rule is part of the working state, not an opt-in extra. See the
+// note on the parameter in main.bicep for what a false default cost us.
+param openToVercel = bool(readEnvironmentVariable('OPEN_TO_VERCEL', 'true'))
 
 param foundryAccountName = readEnvironmentVariable('FOUNDRY', 'taskbuddy-foundry')
 param foundryLocation = 'koreacentral'

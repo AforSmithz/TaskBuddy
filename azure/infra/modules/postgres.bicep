@@ -30,11 +30,14 @@ param tenantId string = subscription().tenantId
 @description('''
 Open the firewall to the entire IPv4 range for Vercel.
 Vercel has no static egress IPs on this plan, so there is nothing narrower to
-allow. Kept as an explicit opt-in, mirroring OPEN_TO_VERCEL in provision.sh.
-Do NOT express this as 0.0.0.0-0.0.0.0: on Azure that means *Azure-internal
-only*, which admits every other Azure tenant while still blocking your app.
+allow. Defaults TRUE because the app is deployed and cannot reach the database
+without it: with this false, a Complete-mode deployment removes allow-vercel and
+sign-in starts failing with a connection timeout that looks nothing like a
+firewall problem. Do NOT express this as 0.0.0.0-0.0.0.0: on Azure that means
+*Azure-internal only*, which admits every other Azure tenant while still
+blocking your app.
 ''')
-param openToVercel bool = false
+param openToVercel bool = true
 
 resource server 'Microsoft.DBforPostgreSQL/flexibleServers@2025-08-01' = {
   name: serverName

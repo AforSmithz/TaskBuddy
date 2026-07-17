@@ -52,7 +52,13 @@ param adminPassword string
 param devLaptopIp string
 
 @description('Open the Postgres firewall to the whole IPv4 range for Vercel. See modules/postgres.bicep.')
-param openToVercel bool = false
+// Defaults TRUE because production depends on it. This was false once, and the
+// deployed server ended up with only the dev-laptop rule: every Vercel function
+// was dropped at the firewall, so sign-in failed with a 10s connection timeout
+// while local dev kept working. A default that silently breaks production the
+// next time someone deploys in Complete mode is the wrong default.
+// Set OPEN_TO_VERCEL=false only for a server nothing is deployed against.
+param openToVercel bool = true
 
 @description('Foundry account name.')
 param foundryAccountName string
