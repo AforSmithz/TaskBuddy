@@ -4,30 +4,22 @@ import { createHash, randomUUID, timingSafeEqual } from "crypto";
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
-import {
-  EmailTakenError,
-  createUser,
-  findUserForLogin,
-  normalizeEmail,
-  touchLastLogin,
-  upgradePasswordHash,
-} from "./db/auth-queries";
-import { DUMMY_HASH, hash, needsRehash, verify } from "./password";
+import { EmailTakenError, createUser, normalizeEmail } from "./db/auth-queries";
+import { AuthFailed, createAccount, globalSignOut, isAuthConfigured, signIn } from "./cognito";
 import { isRateLimited } from "./rate-limit";
-import {
-  COOKIE_OPTS,
-  SESSION_COOKIE,
-  clearSessionCookie,
-  signSession,
-} from "./session";
+import { clearSessionCookie, setSessionCookies, ID_COOKIE, verifySession } from "./session";
 import { isDbConfigured } from "./db/pool";
 import type { AuthState } from "./types";
 
 // Server Actions backing the login, signup and logout flows.
 //
-// Exports and signatures are unchanged from the Supabase versions, so
+// Exports and signatures are unchanged from the Azure versions, so
 // `components/auth/auth-form.tsx` (useActionState) and the logout <form> in
-// `components/layout/sidebar.tsx` keep working as they are.
+// `components/layout/sidebar.tsx` keep working untouched. THAT IS THE WHOLE
+// POINT OF THIS SHAPE: Cognito's hosted UI would have replaced these pages with
+// a redirect flow, and the app's own login screen would have been discarded for
+// no gain that matters at two users. Cognito is the credential store; the
+// interface stays ours.
 //
 // CSRF is already handled and needs no token here. Next 16 gives Server Actions
 // three layers: POST-only invocation, an Origin-vs-Host comparison that aborts on
@@ -53,15 +45,6 @@ function secretsMatch(a: string, b: string): boolean {
   return timingSafeEqual(ha, hb);
 }
 
-async function issueSession(user: {
-  id: string;
-  email: string | null;
-  name: string | null;
-}): Promise<void> {
-  const token = await signSession(user);
-  (await cookies()).set(SESSION_COOKIE, token, COOKIE_OPTS);
-}
-
 /** Sign an existing user in with email + password. */
 export async function loginAction(
   _prev: AuthState,
@@ -71,50 +54,34 @@ export async function loginAction(
   if (!email || !password) {
     return { error: "Enter your email and password." };
   }
-  if (!isDbConfigured()) {
-    return { error: "No database is configured on this deployment." };
+  if (!isAuthConfigured()) {
+    return { error: "No user pool is configured on this deployment." };
   }
 
-  // BEFORE the database lookup and the bcrypt below, which is the entire point.
-  // Every request through here costs a deliberate cost-12 hash (~290ms) whether
-  // or not the account exists; this is what stops that being a free CPU sink.
-  // Ten attempts a minute is far above any human and far below anything worth
-  // paying for. See lib/rate-limit.ts for what this does and does not cover.
+  // Still in front of the call, though it now guards a different cost.
+  //
+  // On Azure this existed because `loginAction` ran a deliberate cost-12 bcrypt
+  // on EVERY request including misses - lib/password.ts DUMMY_HASH - so an
+  // unauthenticated endpoint burned ~290ms of billable CPU per hit. Cognito's
+  // `preventUserExistenceErrors` provides that indistinguishability itself, so
+  // the bcrypt is gone from this path and with it the CPU sink.
+  //
+  // What remains worth throttling is the AdminInitiateAuth call: it is a
+  // network round trip per attempt, it is billed, and Cognito's own throttles
+  // are account-wide - so an unthrottled password-spray against one account
+  // would degrade sign-in for the other. Ten a minute is far above any human.
   if (await isRateLimited("login", 10)) {
     return { error: "Too many attempts. Wait a minute and try again." };
   }
 
   try {
-    const user = await findUserForLogin(email);
-
-    // Always run a bcrypt comparison, even when there is no such account.
-    // Returning early on a miss would make an unknown email answer in ~1ms and a
-    // known one in ~300ms, which is a free account-enumeration oracle.
-    const ok = await verify(password, user?.password_hash ?? DUMMY_HASH);
-    if (!user || !ok) {
+    const tokens = await signIn(normalizeEmail(email), password);
+    setSessionCookies(await cookies(), tokens);
+  } catch (err) {
+    if (err instanceof AuthFailed) {
       // Never distinguish unknown-email from wrong-password.
       return { error: "Incorrect email or password." };
     }
-
-    await issueSession({
-      id: user.id,
-      email: user.email,
-      name: user.full_name,
-    });
-
-    // Housekeeping, deliberately swallowed. A valid login must never fail
-    // because a bookkeeping write did.
-    try {
-      await touchLastLogin(user.id);
-      if (needsRehash(user.password_hash)) {
-        // One of the carried-over accounts is bcrypt cost 6. This is the only
-        // moment the plaintext exists to re-hash it at cost 12.
-        await upgradePasswordHash(user.id, await hash(password));
-      }
-    } catch (err) {
-      console.error("login housekeeping failed (ignored):", err);
-    }
-  } catch (err) {
     console.error("login failed:", err);
     return { error: "Could not sign you in. Please try again." };
   }
@@ -137,22 +104,20 @@ export async function signupAction(
   if (password.length < 8) {
     return { error: "Password must be at least 8 characters." };
   }
-  if (!isDbConfigured()) {
-    return { error: "No database is configured on this deployment." };
+  if (!isDbConfigured() || !isAuthConfigured()) {
+    return { error: "This deployment is not configured for signups." };
   }
 
   // Ahead of the invite-code check, not after it, so that GUESSING the code is
   // throttled too. `secretsMatch` is constant-time and leaks nothing, but
-  // nothing else here makes an attacker pay for attempts. Five a minute; real
-  // signups on this deployment are rare enough that a stricter limit than
-  // login costs nobody anything.
+  // nothing else here makes an attacker pay for attempts.
   if (await isRateLimited("signup", 5)) {
     return { error: "Too many attempts. Wait a minute and try again." };
   }
 
-  // There is no email provider and no verification step, so signup is
-  // auto-confirm. Without this gate an internet-facing /signup is an open
-  // account-creation endpoint pointed at a 1-vCore burstable database.
+  // The user pool has self sign-up disabled, so this code is the only gate on
+  // account creation. Without it, `AdminCreateUser` behind an unauthenticated
+  // Server Action is an open account-creation endpoint.
   const expected = process.env.SIGNUP_CODE;
   if (!expected) {
     return { error: "Signups are closed on this deployment." };
@@ -161,15 +126,25 @@ export async function signupAction(
     return { error: "That invite code is not valid." };
   }
 
-  const id = randomUUID();
+  // POSTGRES FIRST, COGNITO SECOND, and the order is load-bearing. `appUid` is
+  // a foreign key target for 24 tables; creating the Cognito user first would
+  // open a window where a valid token carries a `custom:app_uid` that no row
+  // matches, and every query that user made would fail a constraint rather
+  // than an auth check.
+  //
+  // The reverse failure - a `users` row with no Cognito account - is harmless
+  // and self-correcting: nobody can sign in as it, and retrying signup with the
+  // same email hits EmailTakenError from the unique index.
+  const appUid = randomUUID();
   try {
-    await createUser({
-      id,
-      email,
-      passwordHash: await hash(password),
+    await createUser({ id: appUid, email, fullName: name });
+    const tokens = await createAccount({
+      email: normalizeEmail(email),
+      password,
       fullName: name,
+      appUid,
     });
-    await issueSession({ id, email: normalizeEmail(email), name });
+    setSessionCookies(await cookies(), tokens);
   } catch (err) {
     if (err instanceof EmailTakenError) return { error: err.message };
     console.error("signup failed:", err);
@@ -182,11 +157,20 @@ export async function signupAction(
 
 /** Sign the current user out and return to the login screen. */
 export async function logoutAction(): Promise<void> {
-  // `clearSessionCookie`, never `cookieStore.delete()`. Next's delete() emits a
+  const store = await cookies();
+
+  // Revoke server-side BEFORE clearing, so a failure to clear the cookie is not
+  // also a failure to end the session. This is the half the self-signed JWT
+  // could not do: the refresh token is dead the moment this returns, so even a
+  // surviving cookie expires within the hour instead of lasting a week.
+  const claims = await verifySession(store.get(ID_COOKIE)?.value);
+  if (claims?.email) await globalSignOut(claims.email);
+
+  // `clearSessionCookie`, never `store.delete()`. Next's delete() emits a
   // Set-Cookie with neither Secure nor Path, which a browser must reject for a
-  // `__Host-`prefixed cookie - so logout would be a silent no-op in production
+  // `__Host-` prefixed cookie - so logout would be a silent no-op in production
   // and work fine in dev. See lib/session.ts.
-  clearSessionCookie(await cookies());
+  clearSessionCookie(store);
   revalidatePath("/", "layout");
   redirect("/login");
 }

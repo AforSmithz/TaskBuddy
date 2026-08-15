@@ -1,46 +1,25 @@
 import "server-only";
-import { withUser, withoutUser } from "./pool";
+import { withUser } from "./pool";
 
 // The authentication path's database access. Deliberately NOT through the shim.
 //
 // The shim refuses to execute without a session, which is correct for every
-// other query and exactly wrong here: obtaining a session is the point of these
-// calls. So they talk to the pool directly, and the two that must read past
-// `users_self` go through the SECURITY DEFINER functions in `03_auth.sql`.
-
-export interface LoginRow {
-  id: string;
-  email: string;
-  full_name: string | null;
-  password_hash: string;
-}
+// other query and exactly wrong here: obtaining a session is the point.
+//
+// MUCH SMALLER THAN IT WAS. `findUserForLogin` and `upgradePasswordHash` are
+// gone from the app entirely, because credentials are no longer the app's
+// business. The bcrypt hashes still in `users.password_hash` are read exactly
+// once per legacy account, by the Cognito USER_MIGRATION trigger in
+// aws/lambda/user-migration - which is a different process, with a different
+// IAM role, running only when Cognito asks it to. Once both carried-over
+// accounts have signed in once, that column is dead weight and
+// aws/sql/05_drop_password_hash.sql removes it.
 
 /** Normalise an email the same way everywhere: this is the lookup key. */
 export function normalizeEmail(email: string): string {
   return email.trim().toLowerCase();
 }
 
-/**
- * Fetch the credential row for a sign-in attempt, or null.
- *
- * MUST go through `app.login_lookup`. `users_self` is `id = app.uid()` and
- * `app.uid()` is NULL before a session exists, so a direct SELECT here returns
- * zero rows every single time - the failure looks exactly like "wrong password"
- * for every user in the database, forever.
- */
-export async function findUserForLogin(
-  email: string,
-): Promise<LoginRow | null> {
-  return withoutUser(async (client) => {
-    const res = await client.query<LoginRow>(
-      "select id, email, full_name, password_hash from app.login_lookup($1)",
-      [normalizeEmail(email)],
-    );
-    return res.rows[0] ?? null;
-  });
-}
-
-/** Raised when the email is already taken. */
 export class EmailTakenError extends Error {
   constructor() {
     super("That email is already registered.");
@@ -53,7 +32,13 @@ export class EmailTakenError extends Error {
  *
  * The id is generated in Node so it can be set as `app.user_id` *before* the
  * INSERT runs, which is what makes the `users_self` WITH CHECK (`id = app.uid()`)
- * pass without needing another definer function.
+ * pass without needing another definer function. It is also the value written
+ * to Cognito as `custom:app_uid`, so the token and the row agree by
+ * construction rather than by a lookup.
+ *
+ * NO PASSWORD. `password_hash` is nullable as of aws/sql/04_cognito.sql;
+ * accounts created from here never have one, because Cognito holds the
+ * credential. Only the two rows carried over from Supabase still populate it.
  *
  * There is no plain `UNIQUE(email)` constraint - uniqueness is a functional
  * index on `lower(email)` - so `ON CONFLICT (email)` would fail with "no unique
@@ -63,19 +48,13 @@ export class EmailTakenError extends Error {
 export async function createUser(user: {
   id: string;
   email: string;
-  passwordHash: string;
   fullName: string | null;
 }): Promise<void> {
   try {
     await withUser(user.id, async (client) => {
       await client.query(
-        "insert into users (id, email, password_hash, full_name) values ($1, $2, $3, $4)",
-        [
-          user.id,
-          normalizeEmail(user.email),
-          user.passwordHash,
-          user.fullName,
-        ],
+        "insert into users (id, email, full_name) values ($1, $2, $3)",
+        [user.id, normalizeEmail(user.email), user.fullName],
       );
     });
   } catch (err) {
@@ -103,23 +82,6 @@ export async function touchLastLogin(id: string): Promise<void> {
   await withUser(id, async (client) => {
     await client.query("update users set last_login_at = now() where id = $1", [
       id,
-    ]);
-  });
-}
-
-/**
- * Replace a user's password hash. Used for the transparent cost upgrade on
- * login. Goes through the definer function because the app role has no direct
- * UPDATE privilege on `password_hash` - that is the whole point of `03_auth.sql`.
- */
-export async function upgradePasswordHash(
-  id: string,
-  passwordHash: string,
-): Promise<void> {
-  await withoutUser(async (client) => {
-    await client.query("select app.set_password_hash($1, $2)", [
-      id,
-      passwordHash,
     ]);
   });
 }
