@@ -1,8 +1,7 @@
 import "server-only";
-import { cookies } from "next/headers";
 import { QueryBuilder, type Executor, type Row } from "./query";
 import { withUser } from "./pool";
-import { SESSION_COOKIE, verifySession } from "../session";
+import { ambientUserId } from "./context";
 
 // The request-scoped database handle. All the query-building logic lives in
 // `./query.ts`; this file is only the seam that binds a builder to the signed-in
@@ -38,23 +37,15 @@ function executorFor(uid: string): Executor {
 }
 
 /**
- * The per-request database handle. Same name, same module position and same
- * async signature as the Supabase original, so `lib/store.ts`'s
- * `type RequestClient = Awaited<ReturnType<typeof getRequestClient>>` and the
- * four sites that pass the client as a parameter are untouched.
+ * A client bound to an explicit user id.
  *
- * The user id is resolved EAGERLY, here, rather than lazily inside
- * `auth.getUser()`. Only write paths call `currentUserId()`; every read calls
- * `.from()` with no id in hand, and each of those statements still needs
- * `app.user_id` set. Resolving once per client also keeps `currentUserId` - 
- * which runs on every write - from re-verifying the token each time.
+ * This is the seam the SQS workers enter through. They have a job payload
+ * rather than a cookie, so they establish the user with
+ * `runAsUser(uid, ...)` from ./context and everything downstream - all ~200
+ * `getRequestClient()` calls in lib/store.ts - resolves through it unchanged.
  */
-export async function getRequestClient(): Promise<RequestClient> {
-  const store = await cookies();
-  const claims = await verifySession(store.get(SESSION_COOKIE)?.value);
-  const uid = claims?.sub ?? null;
+export function requestClientFor(uid: string | null): RequestClient {
   const exec = uid ? executorFor(uid) : null;
-
   return {
     from: (table: string) => new QueryBuilder(table, exec),
     auth: {
@@ -64,4 +55,35 @@ export async function getRequestClient(): Promise<RequestClient> {
       }),
     },
   };
+}
+
+/**
+ * The per-request database handle. Same name, same module position and same
+ * async signature as the Supabase original, so `lib/store.ts`'s
+ * `type RequestClient = Awaited<ReturnType<typeof getRequestClient>>` and the
+ * four sites that pass the client as a parameter are untouched.
+ *
+ * TWO WAYS TO RESOLVE THE USER, checked in this order:
+ *
+ *   1. An ambient id from `runAsUser` - the workers, which have no request.
+ *   2. The verified Cognito ID token in the session cookie - Next.
+ *
+ * Ambient first, deliberately. A worker must never fall through to reading
+ * cookies: outside a request `cookies()` throws in Next 16, and an
+ * accidentally-caught throw would leave `uid` null, which reads as "signed
+ * out" and silently returns empty results rather than failing.
+ *
+ * The user id is resolved EAGERLY, here, rather than lazily inside
+ * `auth.getUser()`. Only write paths call `currentUserId()`; every read calls
+ * `.from()` with no id in hand, and each of those statements still needs
+ * `app.user_id` set.
+ */
+export async function getRequestClient(): Promise<RequestClient> {
+  const ambient = ambientUserId();
+  if (ambient) return requestClientFor(ambient);
+
+  // Imported lazily so a worker bundle never pulls `next/headers` in at all.
+  const { getUser } = await import("../auth");
+  const user = await getUser();
+  return requestClientFor(user?.id ?? null);
 }
