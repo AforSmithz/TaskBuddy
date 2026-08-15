@@ -19,18 +19,13 @@ import {
   createGoal,
   createRecurringActivity,
   discardDraft,
-  getGoal,
   removeGoalCriterion,
-  replaceSkillNodes,
   setGoalCriterionMet,
   setGoalKind,
   setSkillNodeAttained,
   setTriageItemDeferred,
-  listSkillNodes,
   listAllSkillNodes,
-  listSkillTaskLinksForGoal,
   listConfirmedSkillTaskLinks,
-  insertSuggestedLinks,
   setSkillTaskLinkStatus,
   getCachedStrategy,
   getEntry,
@@ -40,7 +35,6 @@ import {
   logCommitment,
   setAutoStrategy,
   setAvailability,
-  setCachedStrategy,
   setOverride,
   setProjectDeadline,
   setValueModel,
@@ -57,18 +51,20 @@ import {
   type ReorderOutcome,
 } from "./store";
 import { buildEODSummary, generateFollowUp, type EODSummary } from "./generate";
-import { decomposeLearningGoal } from "./decompose";
-import { pairKey, suggestSkillTaskLinks } from "./skill-links";
 import { skillProgress } from "./skill";
 import {
   generateCorrectiveTasks,
   generateReroute,
   generateTaskModifications,
 } from "./strategist";
-import { generatePortfolioStrategy } from "./portfolio-strategist";
 import { interpretCheckin, resolveCheckin, proposeFromCheckin } from "./checkin";
 import { SKILL_TASK_PREFIX, type ResolveInput } from "./portfolio-state";
 import { requireUser } from "./auth";
+import {
+  decomposeGoalJob,
+  refreshStrategyJob,
+  suggestSkillLinksJob,
+} from "./job-handlers";
 import type { ValueModel } from "./value-model";
 import type { WindowAvailability } from "./window-availability";
 import type {
@@ -305,10 +301,11 @@ export async function setGoalKindAction(
  */
 export async function decomposeGoalAction(goalId: string): Promise<void> {
   await requireUser();
-  const goal = await getGoal(goalId);
-  if (!goal || goal.kind !== "learning") return;
-  const skills = await decomposeLearningGoal(goal.name, goal.description);
-  await replaceSkillNodes(goalId, skills);
+  // The body lives in lib/job-handlers.ts so that this action and the SQS
+  // worker provably run the same code rather than two copies that drift. Only
+  // the auth check and the revalidation stay here - a worker has neither a
+  // cookie to check nor a render pass to invalidate.
+  await decomposeGoalJob(goalId);
   await revalidateAll();
 }
 
@@ -320,20 +317,10 @@ export async function decomposeGoalAction(goalId: string): Promise<void> {
  */
 export async function suggestSkillLinksAction(goalId: string): Promise<number> {
   await requireUser();
-  const goal = await getGoal(goalId);
-  if (!goal || goal.kind !== "learning") return 0;
-
-  const [nodes, tasks, existing] = await Promise.all([
-    listSkillNodes(goalId),
-    listAllTasks(),
-    listSkillTaskLinksForGoal(goalId),
-  ]);
-  const existingPairs = new Set(existing.map((l) => pairKey(l.skill_node_id, l.task_id)));
-
-  const proposed = await suggestSkillTaskLinks(nodes, tasks, existingPairs);
-  const created = await insertSuggestedLinks(proposed);
+  // Shared with the worker; see decomposeGoalAction above.
+  const created = await suggestSkillLinksJob(goalId);
   await revalidateAll();
-  return created.length;
+  return created;
 }
 
 /** Confirm a proposed link (it starts driving spillover) or dismiss it (never
@@ -913,11 +900,13 @@ export async function reorderTodayAction(
  */
 export async function refreshPortfolioStrategyAction(): Promise<PortfolioStrategy> {
   await requireUser();
-  const prev = await getCachedStrategy();
-  const strategy = await generatePortfolioStrategy(prev);
-  await setCachedStrategy(strategy);
+  // Shared with the worker; see decomposeGoalAction above. This one still has
+  // to read the strategy back afterwards because the caller renders it.
+  await refreshStrategyJob();
+  const strategy = await getCachedStrategy();
   revalidatePath("/");
   revalidatePath("/strategy");
+  if (!strategy) throw new Error("Strategy generation produced no result.");
   return strategy;
 }
 
