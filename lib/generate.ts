@@ -3,7 +3,7 @@ import { MIN_ESTIMATION_SAMPLES } from "./types";
 import { DEFAULT_SIGMA } from "./forecast";
 import { isLLMConfigured } from "./extraction";
 
-// Follow-up message generator (LLM-backed when Foundry is configured, a
+// Follow-up message generator (LLM-backed when Bedrock is configured, a
 // deterministic template otherwise) plus the end-of-day summary, which is pure
 // TypeScript and has never involved the LLM.
 
@@ -54,8 +54,8 @@ export async function generateFollowUp(entry: EntryDetail): Promise<string> {
 
   if (isLLMConfigured()) {
     try {
-      const { callFoundry } = await import("./foundry");
-      return await callFoundry(
+      const { callBedrock } = await import("./bedrock");
+      return await callBedrock(
         [
           { role: "system", content: FOLLOW_UP_SYSTEM_PROMPT },
           {

@@ -20,7 +20,7 @@ import { isOnTrack } from "./types";
 import { aggregateCauseMovePref, causeMovePref } from "./grounding";
 import { goalValue, movePref, type ValueModel } from "./value-model";
 import type { AllocTask } from "./allocate";
-import type { ChatMessage } from "./foundry";
+import type { ChatMessage } from "./bedrock";
 import { isLLMConfigured } from "./extraction";
 import {
   createJointScorer,
@@ -717,7 +717,7 @@ async function proposeGenerativeCandidates(
   );
   if (ctxByRef.size === 0) return [];
 
-  const { callFoundryJSON } = await import("./foundry");
+  const { callBedrockJSON } = await import("./bedrock");
   // Closed sets for both ref namespaces, so a cross-project or invented ref is
   // structurally impossible rather than silently resolved against the wrong project.
   const projectRefs = [...ctxByRef.keys()];
@@ -726,7 +726,7 @@ async function proposeGenerativeCandidates(
   );
   let raw: RawGenerative;
   try {
-    raw = await callFoundryJSON<RawGenerative>(
+    raw = await callBedrockJSON<RawGenerative>(
       [
         { role: "system", content: GENERATIVE_SYSTEM_PROMPT },
         { role: "user", content: buildGenerativePrompt(ctxByRef) },
@@ -1119,14 +1119,14 @@ async function synthesize(args: {
   prev: PortfolioStrategy | null;
   candidates: Candidate[];
 }): Promise<SynthesisResult> {
-  const { callFoundryJSON } = await import("./foundry");
+  const { callBedrockJSON } = await import("./bedrock");
 
   const messages: ChatMessage[] = [
     { role: "system", content: SYNTHESIS_SYSTEM_PROMPT },
     { role: "user", content: buildSynthesisPrompt(args) },
   ];
 
-  const raw = await callFoundryJSON<RawSynthesis>(messages, {
+  const raw = await callBedrockJSON<RawSynthesis>(messages, {
     schema: SYNTHESIS_SCHEMA,
     schemaName: "portfolio_synthesis",
     reasoningEffort: "medium",
