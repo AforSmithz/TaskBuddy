@@ -1,0 +1,36 @@
+{
+  "app": "npx tsx bin/taskbuddy.ts",
+  "watch": {
+    "include": [
+      "**"
+    ],
+    "exclude": [
+      "README.md",
+      "cdk*.json",
+      "tsconfig.json",
+      "package*.json",
+      "node_modules"
+    ]
+  },
+  "context": {
+    "@aws-cdk/aws-lambda:recognizeLayerVersion": true,
+    "@aws-cdk/core:checkSecretUsage": true,
+    "@aws-cdk/aws-iam:minimizePolicies": true,
+    "@aws-cdk/core:validateSnapshotRemovalPolicy": true,
+    "@aws-cdk/aws-s3:serverAccessLogsUseBucketPolicy": true,
+    "@aws-cdk/aws-rds:auroraClusterChangeScopeOfInstanceParameterGroupWithEachParameters": true,
+    "@aws-cdk/core:enablePartitionLiterals": true,
+    "@aws-cdk/aws-lambda:useCdkManagedLogGroup": false,
+    "@aws-cdk/core:defaultCrossStackReferences": "strong",
+    "availability-zones:account=352445792687:region=ap-southeast-1": [
+      "ap-southeast-1a",
+      "ap-southeast-1b",
+      "ap-southeast-1c"
+    ],
+    "availability-zones:account=352445792687:region=us-east-1": [
+      "us-east-1a",
+      "us-east-1b",
+      "us-east-1c"
+    ]
+  }
+}
