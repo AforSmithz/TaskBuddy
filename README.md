@@ -12,9 +12,10 @@ proposes a recovery strategy instead of quietly going red.
 
 ## Stack
 
-Next.js 16 (App Router), React 19, TypeScript, Tailwind CSS v4, Azure Database
-for PostgreSQL, self-hosted session auth, Microsoft Foundry for the LLM layer.
-Deployed on Vercel.
+Next.js 16 (App Router), React 19, TypeScript, Tailwind CSS v4, Amazon Aurora
+PostgreSQL Serverless v2, Amazon Cognito for auth, Amazon Bedrock for the LLM
+layer. Runs on AWS Lambda behind CloudFront, with the async half on EventBridge,
+SQS and Step Functions.
 
 ## Getting started
 
@@ -37,13 +38,17 @@ every variable and the reasoning behind it; the short version:
 
 | Variable | Purpose |
 | --- | --- |
-| `DATABASE_URL` | Azure Postgres, as the `taskbuddy_app` role. Unset means demo mode. |
-| `SESSION_SECRET` | Signing key for the session cookie. Minimum 32 bytes. |
+| `PGHOST` | Aurora writer endpoint. The app connects as `taskbuddy_app` with an IAM token; there is no password. Unset means demo mode. |
+| `COGNITO_USER_POOL_ID` / `COGNITO_CLIENT_ID` | Auth. Neither is a secret, and the client secret is never stored: it is read at cold start. |
 | `SIGNUP_CODE` | Required to create an account. There is no email verification. |
-| `AZURE_FOUNDRY_ENDPOINT` / `AZURE_FOUNDRY_API_KEY` | LLM extraction. Unset means the heuristic extractor. |
+| `BEDROCK_MODEL` | Inference profile id. Unset falls back to a documented default. |
 
-Apply the schema with `azure/apply-sql.sh`, which runs `azure/sql/01_schema.sql`,
-`02_grants.sql` and `03_auth.sql` in order and then verifies them.
+Note what is *not* on that list: no database password, no API key, and no
+`SESSION_SECRET`. Every credential is either an IAM token derived from the
+execution role or a public identifier.
+
+Apply the schema with `aws/scripts/apply-sql.sh`, which runs `aws/sql/01_schema.sql`
+through `04_cognito.sql` in order and then verifies them.
 
 Each layer degrades on its own. No database means the in-memory store; no
 Foundry credentials means the heuristic extractor; a failed LLM call falls back
@@ -63,9 +68,10 @@ notes or goal -> extraction -> priority scoring -> allocation -> forecast -> str
 | Forecast | Monte Carlo completion probability against real availability | `lib/forecast.ts` |
 | Strategy | Cross-goal recovery moves when the odds drop | `lib/portfolio-strategist.ts`, `lib/strategist.ts` |
 | Data | Query layer over node-postgres, with an in-memory fallback | `lib/store.ts`, `lib/db/` |
-| Auth | bcrypt passwords, signed session cookies, RLS per request | `lib/auth.ts`, `lib/session.ts`, `lib/password.ts` |
-| LLM client | Foundry calls with strict JSON schemas | `lib/foundry.ts` |
+| Auth | Cognito user pool, verified ID tokens, RLS per request | `lib/auth.ts`, `lib/session.ts`, `lib/cognito.ts` |
+| LLM client | Bedrock Converse with strict JSON schemas | `lib/bedrock.ts` |
 | Mutations | Server Actions | `lib/actions.ts` |
+| Async jobs | Job bodies shared by actions and SQS workers | `lib/job-handlers.ts`, `lib/jobs.ts` |
 
 **Priority score** = `Urgency*0.30 + Impact*0.25 + Dependency*0.20 + Risk*0.15 +
 Confidence*0.10 - Effort*0.10`, mapped to Critical / High / Medium / Low /
@@ -74,6 +80,11 @@ Backlog bands.
 Every row is read through Postgres row-level security. The app connects as an
 unprivileged role and sets the current user id per transaction, so a query
 cannot return another account's data even if the application logic is wrong.
+
+Cognito mints its own subject id, so it is deliberately not the app's user id.
+The Postgres `users.id` travels in the ID token as `custom:app_uid`, which is
+what lets every foreign key and every policy stay exactly as it was, and what
+keeps "who is this?" free of a database round trip.
 
 ## Routes
 
@@ -90,26 +101,37 @@ cannot return another account's data even if the application logic is wrong.
 
 ## Infrastructure
 
-The whole Azure stack is defined as Bicep in `azure/infra/`. Always run
-`az deployment group what-if` before applying: several properties on the
-Postgres server are cost controls sitting exactly on the free-tier edge, and
-changing `storageSizeGB`, `autoGrow`, `skuName`, `highAvailability` or
-`geoRedundantBackup` moves the server off $0/mo. A GitHub Actions workflow posts
-that what-if plan on any PR touching infrastructure, authenticating through OIDC
-federation with a `Reader` role, so CI can show the blast radius without holding
-credentials that could change anything.
+The whole AWS stack is defined as CDK in `aws/infra/` - six stacks: `data`,
+`auth`, `events`, `web`, `observability`, and `edge`. Always run `cdk diff`
+before applying.
 
-On Vercel the app authenticates to Foundry with a federated workload identity
-exchanged from a per-invocation OIDC assertion, so no long-lived Azure secret is
-stored in the deployment.
+Three properties are cost controls sitting on an exact edge, and each one reads
+like an ops choice:
 
-Two region constraints worth knowing before provisioning. The subscription's
-`sys.regionrestriction` policy allows only `japanwest`, `centralindia`,
-`indonesiacentral`, `koreacentral` and `eastasia`, and a disallowed region fails
-*after* the CLI prints "Creating PostgreSQL Server", so it reads as a transient
-error. Postgres sits in `eastasia` paired with Vercel's `hkg1` because the db
-layer runs a transaction per statement and latency dominates. Foundry cannot sit
-beside it: `eastasia` has zero model quota, so it runs in `koreacentral`.
+- **`DB_MIN_ACU = 0`** is what lets Aurora auto-pause. Setting it to `0.5` reads
+  like "always keep a little capacity" and takes the cluster from about $10/mo
+  to about $50/mo with no other change and no warning.
+- **`idleTimeoutMillis: 10_000`** in `lib/db/pool.ts` is no longer just hygiene.
+  Aurora will not pause while any connection is open, so a pool that held
+  connections between page views would keep capacity awake around the clock.
+- **No NAT gateway.** One would cost more per month than everything else in the
+  architecture combined. That is why Lambda is not VPC-attached and why the
+  cluster is publicly routable - a trade paid for with IAM-only authentication,
+  forced TLS against a pinned regional CA, and forced RLS.
+
+Two `cdk synth` warnings (`W2508`, `W9011`) are expected on every run and are
+documented in `aws/README.md`; they cannot be suppressed, and if either ever
+stops appearing the network posture changed.
+
+Long LLM work does not run in a request. Eleven call sites, seven at medium
+reasoning effort and one measured at 43 seconds, are moved behind an EventBridge
+bus into an SQS queue with a DLQ and a concurrency cap; the skill-link fan-out
+runs through a Step Functions Distributed Map so a throttled judgement retries
+instead of being silently dropped.
+
+Everything sits in `ap-southeast-1`, about 30ms from Jakarta. Unlike the Azure
+build, which needed `eastasia` for the database and `koreacentral` for the model
+because `eastasia` had zero model quota, one region covers the whole stack.
 
 ## Scripts
 
@@ -118,4 +140,11 @@ pnpm dev      # development server
 pnpm build    # production build
 pnpm start    # serve the production build
 pnpm lint     # ESLint
+```
+
+```bash
+npx tsx aws/harness/offline.ts              # 26 offline assertions, no network
+bash aws/scripts/preflight.sh               # is this account ready to deploy?
+bash aws/scripts/build-web.sh               # assemble the Lambda bundle
+TASKBUDDY_ALERT_EMAIL=... bash aws/scripts/deploy.sh
 ```
