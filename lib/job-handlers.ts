@@ -32,12 +32,30 @@ import {
 // in the worker, the session cookie in Next - so every store call below resolves
 // through the same RLS-scoped client either way.
 
-/** Every job the queue understands. The worker's switch is exhaustive over this. */
+/**
+ * Every job the queue understands. The worker's switch is exhaustive over this.
+ *
+ * `jobId` is the row in `job_runs` this message settles - the only channel a
+ * worker has back to the browser, since it has no render pass and no session.
+ * It is OPTIONAL on purpose. The web function and the worker are separate
+ * Lambdas in separate stacks and `cdk deploy` updates them seconds apart, so a
+ * message published by the older web code arrives at the newer worker with no
+ * jobId. Requiring one would make those messages unparseable, and an
+ * unparseable message is DELETED rather than retried - the user's decompose
+ * would silently never happen. Missing means "run the work, skip the
+ * bookkeeping", which costs a status row and nothing else.
+ *
+ * `plan.roll.daily` carries neither: EventBridge Scheduler sends a fixed
+ * payload on a timer, with no user and nobody watching a page.
+ */
 export type Job =
-  | { type: "goal.decompose.requested"; userId: string; goalId: string }
-  | { type: "goal.skill_links.requested"; userId: string; goalId: string }
-  | { type: "strategy.refresh.requested"; userId: string }
+  | { type: "goal.decompose.requested"; userId: string; goalId: string; jobId?: string }
+  | { type: "goal.skill_links.requested"; userId: string; goalId: string; jobId?: string }
+  | { type: "strategy.refresh.requested"; userId: string; jobId?: string }
   | { type: "plan.roll.daily" };
+
+/** The jobs a user starts and watches - everything except the scheduled roll. */
+export type UserJob = Exclude<Job, { type: "plan.roll.daily" }>;
 
 /**
  * Break a learning goal into skill nodes.
