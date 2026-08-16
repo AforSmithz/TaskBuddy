@@ -106,6 +106,42 @@ export const WORKER_TIMEOUT_SECONDS = 300;
 export const WORKER_MAX_CONCURRENCY = 2;
 
 /**
+ * Deliveries of one message before SQS routes it to the DLQ.
+ *
+ * THE WORKER READS THIS SAME NUMBER, as the `MAX_RECEIVE_COUNT` env var, to
+ * decide whether a failure is a transient `retrying` or a final `failed` on the
+ * job row the browser is watching. Changing it in one place only makes the UI
+ * lie in one direction or the other: report a permanent failure while SQS is
+ * still retrying, or leave a job that already reached the DLQ spinning forever.
+ *
+ * Three, because Bedrock throttles clear in seconds while a schema or prompt
+ * failure will fail identically forever, and paying for ten attempts at a
+ * 43-second reasoning call to learn that is expensive in both senses.
+ */
+export const WORKER_MAX_RECEIVE_COUNT = 3;
+
+/**
+ * How long a delivered message stays invisible to other consumers.
+ *
+ * One minute past the function timeout, NOT the 6x the SQS docs recommend. The
+ * 6x rule exists for batches - it budgets for a whole batch of records being
+ * processed serially - and this event source mapping has `batchSize: 1` with
+ * partial batch failures on, so the only thing that has to fit is one job.
+ *
+ * The margin matters in the other direction too. This is also how long a failed
+ * job waits before its next attempt, so at 1800s the second attempt would land
+ * half an hour after the user pressed the button and the page would have given
+ * up on it long before. `JOB_STALE_MS` in lib/types.ts is derived from this
+ * number times WORKER_MAX_RECEIVE_COUNT; the two move together.
+ *
+ * It must stay ABOVE `WORKER_TIMEOUT_SECONDS`: Lambda kills the first copy at
+ * the function timeout, so a shorter window would redeliver a message while its
+ * first copy is still running and the model would be invoked - and billed -
+ * twice for one job.
+ */
+export const WORKER_VISIBILITY_TIMEOUT_SECONDS = WORKER_TIMEOUT_SECONDS + 60;
+
+/**
  * Bedrock model ids. Inference profile ids, not bare model ids - Claude 4.5+
  * refuses on-demand invocation without one.
  *

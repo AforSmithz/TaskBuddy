@@ -17,8 +17,10 @@ import {
   DB_APP_ROLE,
   DB_NAME,
   WORKER_MAX_CONCURRENCY,
+  WORKER_MAX_RECEIVE_COUNT,
   WORKER_MEMORY_MB,
   WORKER_TIMEOUT_SECONDS,
+  WORKER_VISIBILITY_TIMEOUT_SECONDS,
 } from "./config";
 import { nodeFunction } from "./node-function";
 
@@ -77,19 +79,17 @@ export class EventsStack extends Stack {
 
     this.jobQueue = new sqs.Queue(this, "JobQueue", {
       queueName: `${APP}-llm-jobs`,
-      // Six times the function timeout, per the SQS rule. Anything less and a
-      // slow-but-succeeding job gets redelivered while the first copy is still
-      // running, so the model is invoked twice and billed twice.
-      visibilityTimeout: Duration.seconds(WORKER_TIMEOUT_SECONDS * 6),
+      // One minute past the function timeout - see the constant for why this is
+      // not the 6x the docs suggest, and why it is also the retry cadence the
+      // pending UI's abandonment window is derived from.
+      visibilityTimeout: Duration.seconds(WORKER_VISIBILITY_TIMEOUT_SECONDS),
       retentionPeriod: Duration.days(4),
       enforceSSL: true,
       deadLetterQueue: {
         queue: this.dlq,
-        // Three attempts. Bedrock throttles are transient and clear in seconds;
-        // a schema or prompt failure will fail identically forever, and paying
-        // for ten attempts at a 43-second reasoning call to learn that is
-        // expensive in both senses.
-        maxReceiveCount: 3,
+        // Shared with the worker, which reads the same number to tell a
+        // transient failure from a final one on the job row the page watches.
+        maxReceiveCount: WORKER_MAX_RECEIVE_COUNT,
       },
     });
 
@@ -106,6 +106,9 @@ export class EventsStack extends Stack {
         BEDROCK_MODEL: BEDROCK_PRIMARY_MODEL,
         BEDROCK_FALLBACK_MODEL,
         EVENT_BUS_NAME: this.bus.eventBusName,
+        // The queue's redrive policy is not on the message and not readable
+        // from the event, so the one number both sides need travels here.
+        MAX_RECEIVE_COUNT: String(WORKER_MAX_RECEIVE_COUNT),
       },
     });
 
