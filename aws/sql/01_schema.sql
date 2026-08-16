@@ -488,6 +488,55 @@ create table if not exists move_choices (
 create index if not exists move_choices_user_captured_idx
   on move_choices (user_id, captured_at desc);
 
+-- ---------------------------------------------------------------------------
+-- Asynchronous job runs — the one table this migration ADDS.
+--
+-- Every other table above is byte-for-byte the Azure schema. This one is new
+-- because the AWS deployment moved the slow LLM calls off the request path:
+-- the Server Action publishes to EventBridge and returns, and this row is how
+-- the browser learns what happened afterwards. Without it "the request
+-- returned immediately" would be indistinguishable from "nothing happened".
+--
+-- `subject_id` is the goal a job is about, and is NULL for portfolio-wide work
+-- (the strategy refresh). It is deliberately NOT a foreign key: a job row is an
+-- audit record of something that was attempted, and a goal deleted mid-flight
+-- must not erase the evidence that its decomposition ran.
+--
+-- `result` carries whatever the job body returned that the UI needs — today
+-- only `{"created": n}` from the skill-link proposer, which used to be the
+-- action's return value and had nowhere else to go once the action stopped
+-- waiting for it.
+create table if not exists job_runs (
+  id         uuid primary key default gen_random_uuid(),
+  user_id    uuid not null references users(id) on delete cascade,
+  type       text not null,                        -- a Job["type"] from lib/job-handlers.ts
+  subject_id uuid,                                 -- goal id, or null for portfolio-wide
+  status     text not null default 'queued',       -- queued|running|retrying|succeeded|failed
+  result     jsonb,                                -- job output the UI renders, e.g. {"created": 4}
+  error      text,                                 -- the failure message, for the retry affordance
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  constraint job_runs_status_check
+    check (status in ('queued', 'running', 'retrying', 'succeeded', 'failed'))
+);
+
+-- The read the pages make on every load: "is there a live job for this goal?"
+create index if not exists job_runs_user_type_created_idx
+  on job_runs (user_id, type, created_at desc);
+
+-- ONE LIVE JOB PER (user, type, subject). This is the enqueue guard, and it is
+-- an index rather than an application check because two clicks 50ms apart are
+-- two Lambda invocations that cannot see each other's uncommitted row.
+--
+-- `nulls not distinct` is the load-bearing word. Postgres treats NULLs as
+-- distinct in a unique index by default, so without it the strategy refresh
+-- (subject_id IS NULL) would be exempt from the guard it most needs — it is
+-- the one job the UI fires automatically on mount. Requires PG15+; the cluster
+-- is 16.13 (aws/infra/lib/config.ts DB_ENGINE_VERSION).
+create unique index if not exists job_runs_one_live_per_subject
+  on job_runs (user_id, type, subject_id) nulls not distinct
+  where status in ('queued', 'running', 'retrying');
+
 -- ===========================================================================
 -- Row Level Security.
 --
@@ -533,7 +582,7 @@ begin
     'portfolio_strategy', 'value_model', 'recurring_activities',
     'activity_completions', 'work_sessions', 'window_availability',
     'plan_versions', 'committed_plan', 'plan_rolls', 'plan_reorders',
-    'move_choices'
+    'move_choices', 'job_runs'
   ]
   loop
     execute format('alter table %I enable row level security', t);
@@ -653,7 +702,7 @@ begin
     'portfolio_strategy', 'value_model', 'recurring_activities',
     'activity_completions', 'work_sessions', 'window_availability',
     'plan_versions', 'committed_plan', 'plan_rolls', 'plan_reorders',
-    'move_choices'
+    'move_choices', 'job_runs'
   ]
   loop
     execute format('drop policy if exists %I on %I', t || '_owner', t);
