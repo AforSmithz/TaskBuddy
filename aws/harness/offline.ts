@@ -357,6 +357,33 @@ async function main(): Promise<void> {
   }
 
   // ===========================================================================
+  console.log("\nquery builder - IS NULL is not reachable through .eq()");
+  // ===========================================================================
+  // The portfolio-wide job has no subject, so its lookup is `subject_id IS
+  // NULL`. Written as `.eq("subject_id", null)` that binds a parameter and
+  // becomes `subject_id = NULL`, which is never true - the query returns
+  // nothing, no error, and the page shows an idle button beside a job that is
+  // still running.
+  {
+    const { QueryBuilder } = await import("../../lib/db/query");
+    const sql = new QueryBuilder("job_runs", null)
+      .select("id")
+      .eq("type", "strategy.refresh.requested")
+      .isNull("subject_id")
+      .toSQL();
+    checkThat(
+      "isNull emits IS NULL",
+      Boolean(sql && /"?subject_id"?\s+IS NULL/.test(sql.text)),
+      `got: ${sql?.text}`,
+    );
+    checkThat(
+      "...and binds no parameter for it",
+      sql?.values.length === 1,
+      `expected only the type parameter, got ${JSON.stringify(sql?.values)}`,
+    );
+  }
+
+  // ===========================================================================
   console.log("\nschema - job_runs is RLS-protected on both loops");
   // ===========================================================================
   // 01_schema.sql enables RLS from one array of table names and creates the
