@@ -1,9 +1,10 @@
 "use client";
 
 import { useTransition } from "react";
-import { Check, Link2, Sparkles, X } from "lucide-react";
-import type { SkillTaskLink } from "@/lib/types";
+import { AlertTriangle, Check, Link2, Sparkles, X } from "lucide-react";
+import type { JobRun, SkillTaskLink } from "@/lib/types";
 import { setSkillLinkStatusAction, suggestSkillLinksAction } from "@/lib/actions";
+import { useJobRun } from "@/components/jobs/use-job-run";
 import { Card, CardHeader } from "@/components/ui/card";
 import { Pill } from "@/components/ui/badge";
 import { cn } from "@/lib/cn";
@@ -23,21 +24,43 @@ export interface HydratedLink extends SkillTaskLink {
  * A suggestion is inert until you confirm it. Dismissing one retires the pair for good
  * rather than re-proposing it on the next pass.
  */
-export function SkillLinks({ goalId, links }: { goalId: string; links: HydratedLink[] }) {
+export function SkillLinks({
+  goalId,
+  links,
+  activeJob = null,
+}: {
+  goalId: string;
+  links: HydratedLink[];
+  /** A proposal run already in flight for this goal, per the server. */
+  activeJob?: JobRun | null;
+}) {
   const [pending, startTransition] = useTransition();
+  // Proposing links judges every candidate pair with its own model call, so it
+  // runs on the queue - through a Step Functions Distributed Map, where a pair
+  // that cannot be judged is a recorded failure instead of the silent `false`
+  // the in-process version produced under a burst of throttles.
+  const job = useJobRun(activeJob);
+  const busy = pending || job.pending;
 
   const suggested = links.filter((l) => l.status === "suggested");
   const confirmed = links.filter((l) => l.status === "confirmed");
 
   function findLinks() {
-    if (pending) return;
-    startTransition(() => void suggestSkillLinksAction(goalId));
+    if (busy) return;
+    job.start(() => suggestSkillLinksAction(goalId));
   }
 
   function setStatus(id: string, status: "confirmed" | "dismissed") {
-    if (pending) return;
+    if (busy) return;
     startTransition(() => void setSkillLinkStatusAction(id, status));
   }
+
+  // The count the action used to return, read back off the job row. Without it
+  // a run that proposed nothing looks identical to one that never happened.
+  const proposed =
+    job.run?.status === "succeeded" && typeof job.result?.created === "number"
+      ? (job.result.created as number)
+      : null;
 
   return (
     <Card>
@@ -79,7 +102,7 @@ export function SkillLinks({ goalId, links }: { goalId: string; links: HydratedL
                   <button
                     type="button"
                     onClick={() => setStatus(l.id, "confirmed")}
-                    disabled={pending}
+                    disabled={busy}
                     className={cn(
                       "focus-visible:ring-accent inline-flex items-center gap-1 rounded-[14px] px-2.5 py-1",
                       "text-xs font-medium focus-visible:ring-2 focus-visible:outline-none",
@@ -92,7 +115,7 @@ export function SkillLinks({ goalId, links }: { goalId: string; links: HydratedL
                   <button
                     type="button"
                     onClick={() => setStatus(l.id, "dismissed")}
-                    disabled={pending}
+                    disabled={busy}
                     className={cn(
                       "focus-visible:ring-accent inline-flex items-center gap-1 rounded-[14px] px-2.5 py-1",
                       "text-fg-muted text-xs font-medium focus-visible:ring-2 focus-visible:outline-none",
@@ -132,16 +155,42 @@ export function SkillLinks({ goalId, links }: { goalId: string; links: HydratedL
         <button
           type="button"
           onClick={findLinks}
-          disabled={pending}
+          disabled={busy}
+          aria-busy={job.pending}
           className={cn(
             "focus-visible:ring-accent inline-flex items-center gap-1.5 rounded-[14px] px-3 py-1.5",
             "border-border border text-sm font-medium focus-visible:ring-2 focus-visible:outline-none",
             "hover:bg-bg-subtle disabled:opacity-50",
           )}
         >
-          <Sparkles className="size-3.5" />
-          {pending ? "Looking…" : "Find linked work"}
+          <Sparkles className={cn("size-3.5", job.pending && "animate-pulse")} />
+          {job.pending
+            ? "Looking…"
+            : job.failed
+              ? "Try again"
+              : "Find linked work"}
         </button>
+
+        {job.pending && (
+          <p className="text-fg-subtle mt-2 text-xs" aria-live="polite">
+            Checking each pair. This keeps running if you leave this page.
+          </p>
+        )}
+        {!job.pending && job.error && (
+          <p
+            className="mt-2 flex items-start gap-1.5 text-xs text-[var(--color-danger)]"
+            role="status"
+            aria-live="polite"
+          >
+            <AlertTriangle className="mt-px size-3.5 shrink-0" />
+            <span>{job.error}</span>
+          </p>
+        )}
+        {!job.pending && proposed === 0 && (
+          <p className="text-fg-subtle mt-2 text-xs" aria-live="polite">
+            Nothing new to link. Every pair worth proposing is already on record.
+          </p>
+        )}
       </div>
     </Card>
   );
