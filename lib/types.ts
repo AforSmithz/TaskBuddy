@@ -1916,4 +1916,14 @@ export interface JobHandle {
   jobId: string;
   status: JobRunStatus;
   ranInline: boolean;
+  /**
+   * The outcome, when the action already has one.
+   *
+   * These carry the INLINE path's result, and they are not a convenience: a
+   * terminal job is never polled, so a handle that came back already finished
+   * is the only chance the browser gets to see what it produced or why it
+   * failed. On the queued path both are null and the poll fills them in.
+   */
+  result: Record<string, unknown> | null;
+  error: string | null;
 }

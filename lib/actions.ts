@@ -68,7 +68,7 @@ import {
   suggestSkillLinksJob,
   type Job,
 } from "./job-handlers";
-import { publish } from "./jobs";
+import { isQueueConfigured, publish } from "./jobs";
 import type { ValueModel } from "./value-model";
 import type { WindowAvailability } from "./window-availability";
 import type {
@@ -158,10 +158,15 @@ async function revalidateAll() {
  *
  * THE INLINE PATH IS NOT A FALLBACK BOLTED ON FOR SAFETY, it is the local
  * development path and the deployment-without-the-events-stack path. With no
- * `EVENT_BUS_NAME`, `publish()` returns false and this runs exactly what the
- * action ran before, in-request, so behaviour is unchanged anywhere the bus is
- * absent. `lib/job-handlers.ts` holds the body either way, so the two paths
- * cannot drift.
+ * `EVENT_BUS_NAME` this runs exactly what the action ran before, in-request, so
+ * behaviour is unchanged anywhere the bus is absent. `lib/job-handlers.ts` holds
+ * the body either way, so the two paths cannot drift.
+ *
+ * It is chosen by whether a bus is CONFIGURED, never by whether a publish
+ * succeeded. Those are different failures: the first is a deployment shape, the
+ * second is an outage, and quietly answering an outage by running the model
+ * call in the web request would reintroduce the exact latency this migration
+ * removed, on the day the infrastructure is least healthy.
  *
  * A failure on the inline path is RECORDED rather than thrown. The caller is a
  * `useTransition` in a client component and an action that throws surfaces as a
@@ -179,24 +184,53 @@ async function enqueue(
   // Something is already in flight for this subject. Every one of these jobs is
   // a billed model call, and the strategy refresh is fired automatically on
   // mount by two separate pages, so joining the existing run matters.
-  if (reused) return { jobId: run.id, status: run.status, ranInline: false };
+  if (reused) {
+    return {
+      jobId: run.id,
+      status: run.status,
+      ranInline: false,
+      result: run.result,
+      error: run.error,
+    };
+  }
 
-  if (await publish(toJob(run.id))) {
-    return { jobId: run.id, status: "queued", ranInline: false };
+  // THE TEST IS "IS THERE A BUS", NOT "DID THE PUBLISH WORK". A publish that
+  // fails against a bus that exists is an outage, and running a 43-second model
+  // call inside the web request is precisely what this migration removed - it
+  // would risk the request timeout on the one path least able to afford it.
+  // Failing here is recoverable: the row records why, and the user can retry.
+  if (isQueueConfigured()) {
+    if (await publish(toJob(run.id))) {
+      return {
+        jobId: run.id,
+        status: "queued",
+        ranInline: false,
+        result: null,
+        error: null,
+      };
+    }
+    const error = "Could not queue that job. Try again in a moment.";
+    await settleJobRun(run.id, "failed", { error });
+    return { jobId: run.id, status: "failed", ranInline: false, result: null, error };
   }
 
   await settleJobRun(run.id, "running", {});
   try {
     const result = (await body()) ?? null;
-    await settleJobRun(run.id, "succeeded", { result });
+    await settleJobRun(run.id, "succeeded", { result, error: null });
     await revalidateAll();
-    return { jobId: run.id, status: "succeeded", ranInline: true };
+    return {
+      jobId: run.id,
+      status: "succeeded",
+      ranInline: true,
+      result,
+      error: null,
+    };
   } catch (err) {
     console.error(`job ${type} failed inline:`, err);
-    await settleJobRun(run.id, "failed", {
-      error: err instanceof Error ? err.message : String(err),
-    });
-    return { jobId: run.id, status: "failed", ranInline: true };
+    const error = err instanceof Error ? err.message : String(err);
+    await settleJobRun(run.id, "failed", { error });
+    return { jobId: run.id, status: "failed", ranInline: true, result: null, error };
   }
 }
 
@@ -207,8 +241,14 @@ async function enqueue(
  * skill nodes or a strategy from a Lambda that has no render pass, so nothing
  * it does can invalidate a page on its own. The first poll that observes a
  * finished job is running inside a request that can, so it revalidates there.
- * Terminal is observed once per job (the client stops polling), so this is not
- * a per-tick cost.
+ *
+ * The cost is bounded but not free, and worth stating precisely: each watcher
+ * observes the terminal state once (it stops polling immediately after), so
+ * this is once per open tab watching the job rather than once per tick - and
+ * `revalidateAll` rolls the plan, which is a real piece of work. Two tabs on
+ * Today therefore roll twice. That is the same shape the synchronous action
+ * had, one roll per completion per caller, and two users with two tabs is not
+ * a load worth adding coordination for.
  */
 export async function pollJobRunAction(jobId: string): Promise<JobRun | null> {
   await requireUser();
