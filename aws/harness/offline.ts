@@ -65,7 +65,14 @@ async function main(): Promise<void> {
     "../../lib/bedrock-config"
   );
   const { runAsUser, ambientUserId } = await import("../../lib/db/context");
-  const { parse } = await import("../lambda/llm-worker/index");
+  const { attemptOf, isFinalAttempt, parse } = await import(
+    "../lambda/llm-worker/index"
+  );
+  const { JOB_STALE_MS, isJobAbandoned, isTerminalJobStatus } = await import(
+    "../../lib/types"
+  );
+  const { WORKER_MAX_RECEIVE_COUNT, WORKER_TIMEOUT_SECONDS, WORKER_VISIBILITY_TIMEOUT_SECONDS } =
+    await import("../infra/lib/config");
 
   // ===========================================================================
   console.log("\nsplitMessages - system prompts must not become user turns");
@@ -242,6 +249,129 @@ async function main(): Promise<void> {
     );
     check("unparseable body returns null", parse({ body: "{oops", messageId: "m" } as Parameters<typeof parse>[0]), null);
     check("body with no type returns null", parse(rec({ detail: { nope: 1 } })), null);
+
+    // A user-scoped job with no user can never run correctly, and retrying it
+    // three times only delays someone noticing.
+    check(
+      "user job with no userId is rejected",
+      parse(rec({ detail: { type: "goal.decompose.requested", goalId: "g" } })),
+      null,
+    );
+
+    // DEPLOY-WINDOW TOLERANCE. The web function and the worker are separate
+    // stacks updated seconds apart, so a message published by the older web
+    // code arrives with no jobId. Rejecting it would DELETE it (unparseable
+    // messages are never retried) and the user's job would silently vanish.
+    check(
+      "job with no jobId is still accepted",
+      parse(rec({ detail: { type: "strategy.refresh.requested", userId: "u" } })),
+      { type: "strategy.refresh.requested", userId: "u" },
+    );
+    check(
+      "jobId round-trips through the envelope",
+      parse(
+        rec({
+          detail: {
+            type: "goal.decompose.requested",
+            userId: "u",
+            goalId: "g",
+            jobId: "j",
+          },
+        }),
+      ),
+      { type: "goal.decompose.requested", userId: "u", goalId: "g", jobId: "j" },
+    );
+  }
+
+  // ===========================================================================
+  console.log("\nretry accounting - a transient failure must not read as final");
+  // ===========================================================================
+  // The worker writes 'retrying' or 'failed' on the row the browser is watching,
+  // and only the receive count tells the two apart. An off-by-one here shows the
+  // user a permanent failure while SQS is still retrying - or leaves a job that
+  // already reached the DLQ spinning on the page forever.
+  {
+    const rec = (attributes?: Record<string, string>) =>
+      ({ body: "{}", messageId: "m1", attributes }) as unknown as Parameters<
+        typeof attemptOf
+      >[0];
+
+    check("first delivery reads as attempt 1", attemptOf(rec({ ApproximateReceiveCount: "1" })), 1);
+    check("third delivery reads as attempt 3", attemptOf(rec({ ApproximateReceiveCount: "3" })), 3);
+    // @types declares `attributes` non-optional, so the compiler never warns
+    // about a record built by cast - as the harness itself builds them.
+    check("missing attributes default to attempt 1", attemptOf(rec(undefined)), 1);
+    check("garbage receive count defaults to 1", attemptOf(rec({ ApproximateReceiveCount: "x" })), 1);
+
+    check("attempt 1 of 3 is not final", isFinalAttempt(1, 3), false);
+    check("attempt 2 of 3 is not final", isFinalAttempt(2, 3), false);
+    // SQS routes to the DLQ on the receive that WOULD exceed maxReceiveCount,
+    // so the third delivery is the last one this worker ever sees.
+    check("attempt 3 of 3 IS final", isFinalAttempt(3, 3), true);
+  }
+
+  // ===========================================================================
+  console.log("\njob staleness - the window the pending UI gives up in");
+  // ===========================================================================
+  {
+    const run = (status: string, ageMs: number) =>
+      ({
+        id: "j",
+        type: "goal.decompose.requested",
+        subjectId: "g",
+        status,
+        result: null,
+        error: null,
+        createdAt: new Date(1_700_000_000_000 - ageMs).toISOString(),
+        updatedAt: new Date(1_700_000_000_000 - ageMs).toISOString(),
+      }) as Parameters<typeof isJobAbandoned>[0];
+    const NOW = 1_700_000_000_000;
+
+    check("a fresh queued job is not abandoned", isJobAbandoned(run("queued", 5_000), NOW), false);
+    check("a long-silent running job is abandoned", isJobAbandoned(run("running", JOB_STALE_MS + 1), NOW), true);
+    // A finished job is never abandoned however old it is - otherwise every
+    // historical row would render as a failure.
+    check("a succeeded job is never abandoned", isJobAbandoned(run("succeeded", JOB_STALE_MS * 10), NOW), false);
+    check("succeeded is terminal", isTerminalJobStatus("succeeded"), true);
+    check("retrying is NOT terminal", isTerminalJobStatus("retrying"), false);
+
+    // THE CROSS-FILE ASSERTION THAT MATTERS. A failed delivery does not come
+    // back immediately - it reappears when the visibility timeout expires - so
+    // if the UI gives up sooner than the queue gives up, it declares dead a job
+    // SQS is still going to run, and the retry button pays for the same model
+    // call twice.
+    const queueWorstCaseMs =
+      WORKER_MAX_RECEIVE_COUNT * WORKER_VISIBILITY_TIMEOUT_SECONDS * 1000;
+    checkThat(
+      "UI waits longer than the queue's worst-case retry schedule",
+      JOB_STALE_MS > queueWorstCaseMs,
+      `JOB_STALE_MS is ${JOB_STALE_MS}ms but SQS can take ${queueWorstCaseMs}ms to exhaust its attempts`,
+    );
+    // Below the function timeout, a message is redelivered while its first copy
+    // is still running: the model is invoked, and billed, twice for one job.
+    checkThat(
+      "visibility timeout outlasts the function timeout",
+      WORKER_VISIBILITY_TIMEOUT_SECONDS > WORKER_TIMEOUT_SECONDS,
+      `visibility ${WORKER_VISIBILITY_TIMEOUT_SECONDS}s must exceed function timeout ${WORKER_TIMEOUT_SECONDS}s`,
+    );
+  }
+
+  // ===========================================================================
+  console.log("\nschema - job_runs is RLS-protected on both loops");
+  // ===========================================================================
+  // 01_schema.sql enables RLS from one array of table names and creates the
+  // owner policies from another. A table in the first but not the second has
+  // RLS on with NO policy, which denies everything - and the worker's first
+  // status write then fails with an error that names no policy at all.
+  {
+    const fs = await import("fs");
+    const sql = fs.readFileSync(path.join(__dirname, "..", "sql", "01_schema.sql"), "utf8");
+    check("job_runs appears in both table-name arrays", (sql.match(/'job_runs'/g) ?? []).length, 2);
+    checkThat(
+      "the one-live-job index is declared nulls not distinct",
+      /job_runs_one_live_per_subject[\s\S]{0,200}nulls not distinct/.test(sql),
+      "without it the strategy refresh (subject_id IS NULL) escapes the guard it most needs",
+    );
   }
 
   // ===========================================================================
