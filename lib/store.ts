@@ -1674,12 +1674,12 @@ function toJobRun(row: JobRunRow): JobRun {
 /**
  * The newest job run of `type` for `subjectId`, whatever its state.
  *
- * The subject is matched HERE rather than in SQL, and that is a limitation of
- * the query builder rather than a preference: `.eq(col, null)` binds a NULL
- * parameter, and `col = NULL` is never true in SQL, so the portfolio-wide jobs
- * (subject_id IS NULL) would match nothing at all. The row count per user is
- * bounded by JOB_RUN_CAP, so reading a page of them and filtering in JS costs
- * nothing.
+ * The subject match is done in SQL, via `.isNull()` for the portfolio-wide case.
+ * Filtering it in JS instead would mean reading a bounded page of rows and
+ * hoping the one that matters is inside it - and it is not always: a job that
+ * is genuinely still running sinks below any LIMIT as soon as enough jobs are
+ * started after it, at which point the page shows an idle button for work that
+ * is still going and the enqueue collides with the unique index.
  */
 export async function latestJobRun(
   type: string,
@@ -1687,17 +1687,14 @@ export async function latestJobRun(
 ): Promise<JobRun | null> {
   if (isDbConfigured()) {
     const supabase = await getRequestClient();
+    const q = supabase.from("job_runs").select(JOB_RUN_COLUMNS).eq("type", type);
+    const scoped =
+      subjectId === null ? q.isNull("subject_id") : q.eq("subject_id", subjectId);
     const rows = mustRows<JobRunRow>(
-      await supabase
-        .from("job_runs")
-        .select(JOB_RUN_COLUMNS)
-        .eq("type", type)
-        .order("created_at", { ascending: false })
-        .limit(JOB_RUN_CAP),
+      await scoped.order("created_at", { ascending: false }).limit(1),
       "job_runs latest read",
     );
-    const row = rows.find((r) => r.subject_id === subjectId);
-    return row ? toJobRun(row) : null;
+    return rows[0] ? toJobRun(rows[0]) : null;
   }
   await ensureSeeded();
   return (
@@ -1815,16 +1812,25 @@ export async function startJobRun(
   return { run, reused: false };
 }
 
-/** Delete job rows older than the most recent `JOB_RUN_CAP` (soft cap). */
+/**
+ * Delete job rows older than the most recent `JOB_RUN_CAP` (soft cap).
+ *
+ * TERMINAL ROWS ONLY. Rank is by age, and a job that is genuinely still running
+ * can fall past the cap if enough jobs were started after it - deleting it
+ * would make its watcher's next poll return null, which the hook reads as "this
+ * job no longer exists" and silently drops the pending state on work that is
+ * still going.
+ */
 async function pruneJobRuns(supabase: RequestClient): Promise<void> {
-  const stale = mustRows<{ id: string }>(
+  const older = mustRows<{ id: string; status: JobRunStatus }>(
     await supabase
       .from("job_runs")
-      .select("id")
+      .select("id, status")
       .order("created_at", { ascending: false })
       .range(JOB_RUN_CAP, JOB_RUN_CAP + 1000),
     "job_runs stale list",
   );
+  const stale = older.filter((r) => isTerminalJobStatus(r.status));
   if (stale.length)
     mustOk(
       await supabase
@@ -1841,17 +1847,28 @@ async function pruneJobRuns(supabase: RequestClient): Promise<void> {
 /**
  * Move a job to `running`, and report whether this caller may run the body.
  *
- * FALSE MEANS "SOMEONE ELSE ALREADY DID THIS". SQS redelivers a message whose
- * worker was killed mid-job, and `replaceSkillNodes` wipes and rewrites a goal's
- * whole skill graph - so re-running a body whose work already committed can
- * destroy edits the user made in between. A row that is already terminal (or
- * gone, having been pruned or cascade-deleted with its user) is the signal to
- * skip the body and let the message be deleted.
+ * FALSE MEANS "THIS JOB IS ALREADY SETTLED" - a redelivery of a message whose
+ * work finished, which SQS produces whenever the visibility timeout lapses just
+ * as a job completes. Skipping the body there matters because `replaceSkillNodes`
+ * wipes and rewrites a goal's whole skill graph: re-running it would destroy
+ * anything the user edited in between.
+ *
+ * IT DOES NOT MAKE REDELIVERY SAFE IN GENERAL, and the difference is worth being
+ * precise about. A worker killed mid-job leaves the row `running`, which claims
+ * successfully and re-runs the body - correctly, because that job never
+ * finished. Nothing here can distinguish "died before doing the work" from
+ * "died after committing it but before settling the row"; the first must retry
+ * and the second must not, and they look identical. The narrow window this
+ * leaves is the price of at-least-once delivery, not an oversight.
  */
 export async function claimJobRun(id: string): Promise<boolean> {
   const run = await getJobRun(id);
   if (!run || isTerminalJobStatus(run.status)) return false;
-  await settleJobRun(id, "running", {});
+  // Clear the previous attempt's message on the way in. A row that failed once
+  // and succeeds on redelivery would otherwise keep its error text, and the
+  // card renders an error whenever one is present - a red failure underneath a
+  // result that actually worked.
+  await settleJobRun(id, "running", { error: null });
   return true;
 }
 
