@@ -35,23 +35,22 @@ export function SkillLinks({
   activeJob?: JobRun | null;
 }) {
   const [pending, startTransition] = useTransition();
-  // Proposing links judges every candidate pair with its own model call, so it
-  // runs on the queue - through a Step Functions Distributed Map, where a pair
-  // that cannot be judged is a recorded failure instead of the silent `false`
-  // the in-process version produced under a burst of throttles.
+  // Proposing links judges every candidate pair with its own model call, which
+  // is why it runs on the queue: in-process, a burst of throttles made
+  // `filterVerified` drop good pairs and report success, while on the queue the
+  // same burst is a retry with a DLQ behind it.
   const job = useJobRun(activeJob);
-  const busy = pending || job.pending;
 
   const suggested = links.filter((l) => l.status === "suggested");
   const confirmed = links.filter((l) => l.status === "confirmed");
 
   function findLinks() {
-    if (busy) return;
+    if (pending || job.pending) return;
     job.start(() => suggestSkillLinksAction(goalId));
   }
 
   function setStatus(id: string, status: "confirmed" | "dismissed") {
-    if (busy) return;
+    if (pending) return;
     startTransition(() => void setSkillLinkStatusAction(id, status));
   }
 
@@ -102,7 +101,7 @@ export function SkillLinks({
                   <button
                     type="button"
                     onClick={() => setStatus(l.id, "confirmed")}
-                    disabled={busy}
+                    disabled={pending}
                     className={cn(
                       "focus-visible:ring-accent inline-flex items-center gap-1 rounded-[14px] px-2.5 py-1",
                       "text-xs font-medium focus-visible:ring-2 focus-visible:outline-none",
@@ -115,7 +114,7 @@ export function SkillLinks({
                   <button
                     type="button"
                     onClick={() => setStatus(l.id, "dismissed")}
-                    disabled={busy}
+                    disabled={pending}
                     className={cn(
                       "focus-visible:ring-accent inline-flex items-center gap-1 rounded-[14px] px-2.5 py-1",
                       "text-fg-muted text-xs font-medium focus-visible:ring-2 focus-visible:outline-none",
@@ -155,7 +154,7 @@ export function SkillLinks({
         <button
           type="button"
           onClick={findLinks}
-          disabled={busy}
+          disabled={pending || job.pending}
           aria-busy={job.pending}
           className={cn(
             "focus-visible:ring-accent inline-flex items-center gap-1.5 rounded-[14px] px-3 py-1.5",
