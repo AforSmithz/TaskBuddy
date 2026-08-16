@@ -38,20 +38,71 @@ else
 fi
 
 # --- 2. Account activation -------------------------------------------------
-# The check that matters on a fresh account. Signup can be incomplete while STS
-# still answers, and every service call then fails with a message that sounds
-# like a permissions problem rather than an unfinished registration.
-for svc in "s3api list-buckets" "lambda list-functions" "ec2 describe-vpcs" "rds describe-db-clusters"; do
-  name="${svc%% *}"
-  out=$(aws $svc --region "$REGION" 2>&1)
+# ASK THE ACCOUNT, DO NOT INFER FROM SERVICE ERRORS.
+#
+# An earlier version of this script guessed at activation by probing S3, Lambda,
+# EC2 and RDS and pattern-matching NotSignedUp / SubscriptionRequired /
+# OptInRequired. That works, but it is indirect and it cannot tell an unfinished
+# signup apart from a disabled region or a policy denial - three very different
+# problems that produce nearly identical text.
+#
+# `account get-account-information` answers directly. PENDING_ACTIVATION means
+# signup has not completed, full stop, and no amount of retrying will change it.
+info=$(aws account get-account-information --output json 2>&1)
+if echo "$info" | grep -q '"AccountState"'; then
+  state=$(echo "$info" | python3 -c 'import sys,json;print(json.load(sys.stdin)["AccountState"])')
+  created=$(echo "$info" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("AccountCreatedDate",""))')
+  case "$state" in
+    ACTIVE)
+      ok "account is ACTIVE" ;;
+    PENDING_ACTIVATION)
+      bad "account is PENDING_ACTIVATION (created $created)."
+      cat <<'EOM'
+        Signup has not finished. Nothing can be provisioned, including
+        `cdk bootstrap`. Usually one of:
+          - the payment method was declined or never accepted (AWS places a
+            small verification hold; cards without international transactions
+            enabled commonly fail)
+          - phone / identity verification was not completed
+          - the account is in manual review
+        Check https://console.aws.amazon.com for a banner, and the signup email
+        (including spam). Activation is normally minutes; if it has been more
+        than 24 hours, AWS account-activation support is free without a support
+        plan: https://support.aws.amazon.com/#/contacts/aws-account-support
+EOM
+      ;;
+    SUSPENDED)
+      bad "account is SUSPENDED (created $created). Billing or policy issue; contact AWS support." ;;
+    *)
+      warn "account state is $state (created $created) - not a state this script knows about" ;;
+  esac
+else
+  warn "cannot read account state: $(echo "$info" | head -1)"
+fi
+
+# The probes stay, but now as a check on REACHABILITY given an active account,
+# not as the activation test. They are what catches a service disabled by an SCP
+# or a region that is genuinely not opted in.
+probe() {
+  local name="$1"; shift
+  local out
+  out=$("$@" --region "$REGION" 2>&1)
   case "$out" in
     *NotSignedUp*|*SubscriptionRequired*|*OptInRequired*)
-      bad "$name: account is not subscribed. Finish AWS signup (payment method) before deploying." ;;
+      bad "$name: not subscribed (consistent with the account state above)" ;;
+    *AccessDenied*|*UnauthorizedOperation*)
+      bad "$name: access denied - check for a service control policy" ;;
     *"error"*|*"Error"*)
-      warn "$name: $(echo "$out" | head -1)" ;;
+      warn "$name: $(echo "$out" | head -1 | cut -c1-90)" ;;
     *) ok "$name reachable" ;;
   esac
-done
+}
+probe s3         aws s3api list-buckets
+probe lambda     aws lambda list-functions
+probe ec2        aws ec2 describe-vpcs
+probe rds        aws rds describe-db-clusters
+probe cognito    aws cognito-idp list-user-pools --max-results 1
+probe sqs        aws sqs list-queues
 
 # --- 3. Bedrock model access ----------------------------------------------
 # A model that is not enabled fails at the first LLM call, in a worker, hours
