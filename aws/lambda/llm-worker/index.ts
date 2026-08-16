@@ -124,10 +124,23 @@ function bodyFor(job: UserJob): () => Promise<Record<string, unknown> | void> {
   }
 }
 
-function rejectAfter(ms: number, type: string): Promise<never> {
-  return new Promise((_, reject) =>
-    setTimeout(() => reject(new Error(`job ${type} exceeded ${ms}ms`)), ms),
-  );
+/**
+ * A timeout that cleans up after itself.
+ *
+ * The `cancel` matters in a Lambda specifically: an execution environment is
+ * frozen between invocations rather than torn down, so a 240-second timer left
+ * armed by a job that finished in two seconds is still pending when the next
+ * invocation thaws it.
+ */
+function rejectAfter(
+  ms: number,
+  type: string,
+): { promise: Promise<never>; cancel: () => void } {
+  let timer: ReturnType<typeof setTimeout>;
+  const promise = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`job ${type} exceeded ${ms}ms`)), ms);
+  });
+  return { promise, cancel: () => clearTimeout(timer) };
 }
 
 /**
@@ -185,10 +198,14 @@ async function run(job: Job, finalAttempt: boolean): Promise<void> {
       // primitive here. A body that outlives the timeout can still commit its
       // writes, which is exactly why the claim above exists and why `failed` is
       // never proof that nothing was written.
+      const timeout = rejectAfter(MAX_JOB_MS, job.type);
       const result =
-        (await Promise.race([bodyFor(job)(), rejectAfter(MAX_JOB_MS, job.type)])) ??
-        null;
-      if (jobId) await settleJobRun(jobId, "succeeded", { result });
+        (await Promise.race([bodyFor(job)(), timeout.promise]).finally(
+          timeout.cancel,
+        )) ?? null;
+      // `error: null` clears whatever a previous failed attempt wrote, so a job
+      // that succeeds on redelivery does not keep rendering the old failure.
+      if (jobId) await settleJobRun(jobId, "succeeded", { result, error: null });
     } catch (err) {
       if (jobId) await settleQuietly(jobId, finalAttempt, err);
       // Rethrown unchanged: the handler needs the real error to decide the
