@@ -10,6 +10,7 @@ import {
   Clock,
 } from "lucide-react";
 import {
+  activeJobRun,
   forecastProjectWithRecovery,
   getGoal,
   listAllTasks,
@@ -39,7 +40,21 @@ export default async function ProjectPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
-  const [project, entries, tasks, criteria, skillNodes, links, fr] = await Promise.all([
+  // The two skill jobs run on the queue, so a decomposition started before a
+  // reload is still running in a Lambda somewhere. Reading the live run here is
+  // what lets the cards come back up in their pending state instead of offering
+  // a button that would start the same billed work a second time.
+  const [
+    project,
+    entries,
+    tasks,
+    criteria,
+    skillNodes,
+    links,
+    fr,
+    decomposeJob,
+    linkJob,
+  ] = await Promise.all([
     getGoal(id),
     listEntries(),
     listAllTasks(),
@@ -47,6 +62,8 @@ export default async function ProjectPage({
     listSkillNodes(id),
     listSkillTaskLinksForGoal(id),
     forecastProjectWithRecovery(id),
+    activeJobRun("goal.decompose.requested", id),
+    activeJobRun("goal.skill_links.requested", id),
   ]);
   if (!project) notFound();
   const { forecast, recovery, model } = fr;
@@ -172,14 +189,22 @@ export default async function ProjectPage({
       {/* Skill plan - a learning goal's prerequisite ladder of capabilities. */}
       {project.kind === "learning" && (
         <div className="mt-5">
-          <SkillPlan goalId={project.id} nodes={skillNodes} />
+          <SkillPlan
+            goalId={project.id}
+            nodes={skillNodes}
+            activeJob={decomposeJob}
+          />
         </div>
       )}
 
       {/* Linked work - the confirmed skill↔task edges spillover credits across. */}
       {project.kind === "learning" && skillNodes.length > 0 && (
         <div className="mt-5">
-          <SkillLinks goalId={project.id} links={hydratedLinks} />
+          <SkillLinks
+            goalId={project.id}
+            links={hydratedLinks}
+            activeJob={linkJob}
+          />
         </div>
       )}
 

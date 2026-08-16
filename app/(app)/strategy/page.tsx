@@ -2,6 +2,7 @@ import { Compass, AlertTriangle, History, ShieldCheck } from "lucide-react";
 import {
   forecastDashboard,
   getAutoStrategy,
+  activeJobRun,
   getCachedStrategy,
   listAllTasks,
   listPlanRolls,
@@ -34,6 +35,7 @@ export default async function StrategyPage() {
     planVersions,
     planRolls,
     workSessions,
+    strategyJob,
   ] = await Promise.all([
     forecastDashboard(),
     getAutoStrategy(),
@@ -42,6 +44,9 @@ export default async function StrategyPage() {
     listPlanVersions(),
     listPlanRolls(),
     listWorkSessions(),
+    // A refresh in flight - possibly started from Today, since both pages
+    // render this card and both auto-fire it. One job, either way.
+    activeJobRun("strategy.refresh.requested"),
   ]);
   const { forecasts, recoveries, pitWall, globalPlan, tuning } = dashboard;
   const tasksById = new Map(tasks.map((t) => [t.id, t]));
@@ -99,6 +104,7 @@ export default async function StrategyPage() {
           strategy={strategy}
           stale={strategyStale}
           canUseLLM={canUseLLM}
+          activeJob={strategyJob}
           projectNames={projectNames}
           steadyPlanDefaultOpen
           severity={bannerSeverity}
