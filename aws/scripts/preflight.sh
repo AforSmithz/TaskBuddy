@@ -107,32 +107,77 @@ probe sqs        aws sqs list-queues
 # --- 3. Bedrock model access ----------------------------------------------
 # A model that is not enabled fails at the first LLM call, in a worker, hours
 # after a deploy that looked clean.
+#
+# THIS SENDS A REAL REQUEST, and the earlier version did not. It listed
+# inference profiles and checked for status ACTIVE, which proves only that the
+# profile EXISTS in the region - it is true for every account, including one that
+# has never been granted access to the model behind it. That check passed on
+# 2026-08-19 while every call in the deployed app was failing with:
+#
+#   ResourceNotFoundException: Model use case details have not been submitted
+#   for this account. Fill out the Anthropic use case details form.
+#
+# which is a one-time console form (Bedrock -> Model access) that nothing in the
+# API surface hints at. A one-token Converse costs a fraction of a cent and is
+# the only thing that actually answers "can this account call this model".
 for model in "${BEDROCK_MODEL:-global.anthropic.claude-haiku-4-5-20251001-v1:0}" \
              "${BEDROCK_FALLBACK_MODEL:-global.anthropic.claude-sonnet-4-6}"; do
-  if aws bedrock list-inference-profiles --region "$REGION" \
-       --query "inferenceProfileSummaries[?inferenceProfileId=='$model'].status" \
-       --output text 2>/dev/null | grep -q ACTIVE; then
-    ok "bedrock profile active: $model"
-  else
-    bad "bedrock profile not ACTIVE in $REGION: $model"
-  fi
+  out=$(aws bedrock-runtime converse --region "$REGION" --model-id "$model" \
+        --messages '[{"role":"user","content":[{"text":"hi"}]}]' \
+        --inference-config '{"maxTokens":1}' 2>&1)
+  case "$out" in
+    *use\ case\ details*)
+      bad "bedrock: $model needs the Anthropic use case form. Bedrock console -> Model access -> submit use case details, then re-run." ;;
+    *AccessDenied*|*don\'t\ have\ access*|*not\ authorized*)
+      bad "bedrock: no access to $model. Request it in the Bedrock console under Model access." ;;
+    *ResourceNotFound*)
+      bad "bedrock: $model not found in $REGION (check the inference profile id)" ;;
+    *ValidationException*)
+      # The request shape is this script's, not the app's; a validation error
+      # still proves the account can reach the model.
+      warn "bedrock: $model reachable, but rejected the probe request: $(echo "$out" | head -1 | cut -c1-70)" ;;
+    *usage*|*output*)
+      ok "bedrock: $model answered a real request" ;;
+    *)
+      warn "bedrock: $model - unrecognised response: $(echo "$out" | head -1 | cut -c1-70)" ;;
+  esac
 done
 
 # --- 4. Lambda Web Adapter layer ------------------------------------------
 # A stale pinned version fails as an opaque "layer not found" during rollback.
+#
+# This asks whether the PINNED version can be read, not what the newest one is.
+# The LWA layer's resource policy grants `GetLayerVersion` to everyone but not
+# `ListLayerVersions`, so listing returns AccessDeniedException from any account
+# that does not own the layer - i.e. every account that would ever run this.
+# The earlier version of this check listed, and could therefore never pass; its
+# FAIL read as "the region lacks the layer", which was wrong in both directions.
+#
+# Reading the pin is also the check that matters. A version that resolves is one
+# CloudFormation can attach; the newest version is a bump decision, not a gate.
 LWA=$(grep -o 'LambdaAdapterLayerArm64:[0-9]*' aws/infra/lib/config.ts | head -1)
 LWA_VER="${LWA##*:}"
-latest=$(aws lambda list-layer-versions --region "$REGION" \
-  --layer-name "arn:aws:lambda:${REGION}:${LWA_ACCOUNT}:layer:LambdaAdapterLayerArm64" \
-  --query 'LayerVersions[0].Version' --output text 2>/dev/null)
-if [ -n "${latest:-}" ] && [ "$latest" != "None" ]; then
-  if [ "$LWA_VER" = "$latest" ]; then
-    ok "LWA layer pinned at the current version ($LWA_VER)"
-  else
-    warn "LWA layer pinned at $LWA_VER, current is $latest. Bumping changes the process supervisor in front of \`next start\` - do it deliberately."
+LWA_BASE="arn:aws:lambda:${REGION}:${LWA_ACCOUNT}:layer:LambdaAdapterLayerArm64"
+lwa_arch=$(aws lambda get-layer-version-by-arn --region "$REGION" \
+  --arn "${LWA_BASE}:${LWA_VER}" \
+  --query 'CompatibleArchitectures[0]' --output text 2>/dev/null)
+if [ "${lwa_arch:-}" = "arm64" ]; then
+  ok "LWA layer v$LWA_VER resolves in $REGION (arm64)"
+  # Walk forward from the pin to find the newest readable version. Bounded, so a
+  # long-abandoned pin reports "at least N" rather than looping.
+  newest="$LWA_VER"; probe_v=$((LWA_VER + 1)); tries=0
+  while [ "$tries" -lt 12 ]; do
+    aws lambda get-layer-version-by-arn --region "$REGION" \
+      --arn "${LWA_BASE}:${probe_v}" --query 'Version' --output text >/dev/null 2>&1 || break
+    newest="$probe_v"; probe_v=$((probe_v + 1)); tries=$((tries + 1))
+  done
+  if [ "$newest" != "$LWA_VER" ]; then
+    warn "LWA layer pinned at $LWA_VER, v$newest exists. Bumping changes the process supervisor in front of \`next start\` - do it deliberately."
   fi
+elif [ -n "${lwa_arch:-}" ] && [ "$lwa_arch" != "None" ]; then
+  bad "LWA layer v$LWA_VER in $REGION reports architecture '$lwa_arch', not arm64 - the web function is arm64."
 else
-  bad "cannot read the LWA layer in $REGION - check the region supports it"
+  bad "LWA layer v$LWA_VER does not resolve in $REGION. Check the version exists: aws lambda get-layer-version-by-arn --arn ${LWA_BASE}:${LWA_VER}"
 fi
 
 # --- 5. CDK bootstrap ------------------------------------------------------
