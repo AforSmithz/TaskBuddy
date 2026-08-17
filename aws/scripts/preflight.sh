@@ -117,9 +117,11 @@ probe sqs        aws sqs list-queues
 #   ResourceNotFoundException: Model use case details have not been submitted
 #   for this account. Fill out the Anthropic use case details form.
 #
-# which is a one-time console form (Bedrock -> Model access) that nothing in the
-# API surface hints at. A one-token Converse costs a fraction of a cent and is
-# the only thing that actually answers "can this account call this model".
+# which is a one-time per-account submission that nothing in the API surface
+# hints at. The Model access console page it used to live on has since been
+# retired; submit it with aws/scripts/submit-bedrock-use-case.sh instead. A
+# one-token Converse costs a fraction of a cent and is the only thing that
+# actually answers "can this account call this model".
 for model in "${BEDROCK_MODEL:-global.anthropic.claude-haiku-4-5-20251001-v1:0}" \
              "${BEDROCK_FALLBACK_MODEL:-global.anthropic.claude-sonnet-4-6}"; do
   out=$(aws bedrock-runtime converse --region "$REGION" --model-id "$model" \
@@ -127,9 +129,9 @@ for model in "${BEDROCK_MODEL:-global.anthropic.claude-haiku-4-5-20251001-v1:0}"
         --inference-config '{"maxTokens":1}' 2>&1)
   case "$out" in
     *use\ case\ details*)
-      bad "bedrock: $model needs the Anthropic use case form. Bedrock console -> Model access -> submit use case details, then re-run." ;;
+      bad "bedrock: $model needs the Anthropic use case details. Run: bash aws/scripts/submit-bedrock-use-case.sh" ;;
     *AccessDenied*|*don\'t\ have\ access*|*not\ authorized*)
-      bad "bedrock: no access to $model. Request it in the Bedrock console under Model access." ;;
+      bad "bedrock: no access to $model. Check the execution role has bedrock:InvokeModel on it - the Model access page no longer gates this." ;;
     *ResourceNotFound*)
       bad "bedrock: $model not found in $REGION (check the inference profile id)" ;;
     *ValidationException*)
