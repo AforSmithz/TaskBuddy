@@ -23,6 +23,29 @@ rm -rf "$OUT"
 mkdir -p "$OUT/web" "$OUT/static"
 
 echo "==> next build (standalone)"
+# The CDN hostname has to be baked into the build: `next.config.ts` is read at
+# build time and serialised into the standalone server, so setting this later as
+# a Lambda environment variable would do nothing. See the experimental.
+# serverActions.allowedOrigins comment in next.config.ts for what breaks without
+# it (every Server Action, with the reason visible only in CloudWatch).
+#
+# Resolved from the deployed stack so it cannot drift from the real
+# distribution. On the very first deploy the stack does not exist yet; the build
+# proceeds with an empty allowlist, which is correct - there is no CDN to trust
+# yet - and the deploy script rebuilds once the distribution exists.
+if [ -z "${TASKBUDDY_ALLOWED_ORIGINS:-}" ]; then
+  SITE=$(aws cloudformation describe-stacks \
+    --stack-name taskbuddy-web --region "${AWS_REGION:-ap-southeast-1}" \
+    --query "Stacks[0].Outputs[?OutputKey=='SiteUrl'].OutputValue" \
+    --output text 2>/dev/null || true)
+  if [ -n "${SITE:-}" ] && [ "$SITE" != "None" ]; then
+    TASKBUDDY_ALLOWED_ORIGINS="${SITE#https://}"
+    echo "    allowed Server Action origin: $TASKBUDDY_ALLOWED_ORIGINS"
+  else
+    echo "    no taskbuddy-web stack yet; building with an empty Server Action allowlist" >&2
+  fi
+fi
+export TASKBUDDY_ALLOWED_ORIGINS
 pnpm build
 
 if [ ! -d ".next/standalone" ]; then

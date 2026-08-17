@@ -29,6 +29,35 @@ const nextConfig: NextConfig = {
   // deliberately absent - if an <Image> is ever added, add sharp with it or
   // optimization silently falls back and slows every image request.
 
+  // Server Actions behind a CDN: without this, every single one is refused.
+  //
+  // Next compares the browser's `Origin` against the forwarded host to stop
+  // cross-site Server Action invocations. Behind CloudFront those two are never
+  // the same string. CloudFront must use the AllViewerExceptHostHeader origin
+  // request policy (a Lambda function URL routes on Host, so the viewer's Host
+  // cannot be forwarded), which means the origin sees:
+  //
+  //   x-forwarded-host: <id>.lambda-url.ap-southeast-1.on.aws
+  //   origin:           <id>.cloudfront.net
+  //
+  // and refuses with "Invalid Server Actions request". The browser gets an
+  // opaque "Something went wrong" from the error boundary, with the real reason
+  // only in the function's logs - so it reads like a broken action rather than a
+  // rejected one. Measured on the live distribution, 2026-08-19.
+  //
+  // Set from the environment rather than hardcoded: the CloudFront domain is a
+  // deploy-time output, and a custom domain will need adding here too. It is a
+  // CSRF allowlist, so it takes exact hosts and never a wildcard for the whole
+  // app. `aws/scripts/build-web.sh` resolves and passes it.
+  experimental: {
+    serverActions: {
+      allowedOrigins: (process.env.TASKBUDDY_ALLOWED_ORIGINS ?? "")
+        .split(",")
+        .map((o) => o.trim())
+        .filter(Boolean),
+    },
+  },
+
   // NO `eslint` KEY. Next 16 removed it along with `next lint`; leaving one in
   // place fails the build with "Unrecognized key(s) in object: 'eslint'". Lint
   // is a separate `pnpm lint` step now.
