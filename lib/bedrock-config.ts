@@ -72,6 +72,34 @@ export function bedrockRegion(): string {
  * "medium", and the two highest levels are where reasoning cost stops being
  * rounding error.
  */
+/**
+ * Whether to send `outputConfig.effort` at all.
+ *
+ * OFF, because Bedrock rejects it. The design assumed `effort` and
+ * `textFormat` compose in one `outputConfig` - and on the API shape they do -
+ * but the models this app actually calls refuse the field outright:
+ *
+ *   ValidationException (400): This model doesn't support the effort field.
+ *                              Remove effort and try again.
+ *
+ * Observed live on 2026-08-19 from the llm-worker, for BOTH
+ * `global.anthropic.claude-haiku-4-5-20251001-v1:0` and
+ * `global.anthropic.claude-sonnet-4-6`, which is to say for the primary and the
+ * fallback - so the chain exhausted itself and every LLM call in the app failed.
+ *
+ * The failure is quiet in exactly the way that matters: callers degrade to their
+ * offline heuristics, the job row still settles `succeeded`, and the dashboard
+ * shows its deterministic "Strategy draft" instead of an AI synthesis. Nothing
+ * surfaces as broken; the app just silently stops being the thing it is for. The
+ * only evidence is the worker's CloudWatch logs.
+ *
+ * Kept as a flag rather than deleted because `bedrockEffort` still maps the
+ * app's four levels correctly and the field is documented on Converse - so this
+ * is very likely a per-model gap that a future model version closes. Flip to
+ * true and re-run one real call per model to check.
+ */
+export const SEND_EFFORT = false;
+
 export function bedrockEffort(effort: string | undefined): string {
   switch (effort) {
     case "minimal":

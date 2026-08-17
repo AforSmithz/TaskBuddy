@@ -8,7 +8,13 @@ import {
   type SystemContentBlock,
   type TokenUsage,
 } from "@aws-sdk/client-bedrock-runtime";
-import { bedrockEffort, bedrockRegion, isLLMConfigured, modelChain } from "./bedrock-config";
+import {
+  SEND_EFFORT,
+  bedrockEffort,
+  bedrockRegion,
+  isLLMConfigured,
+  modelChain,
+} from "./bedrock-config";
 
 // Re-exported so callers have one import site for the whole LLM layer.
 export { isLLMConfigured } from "./bedrock-config";
@@ -315,7 +321,11 @@ async function invokeOnce(
           : {}),
       },
       outputConfig: {
-        effort: bedrockEffort(options.reasoningEffort),
+        // Conditional, not unconditional: these models reject `effort`
+        // outright. See SEND_EFFORT in bedrock-config.ts.
+        ...(SEND_EFFORT
+          ? { effort: bedrockEffort(options.reasoningEffort) }
+          : {}),
         ...(options.schema
           ? {
               textFormat: {
