@@ -186,3 +186,32 @@ export const LOG_RETENTION_DAYS = 30;
  */
 export const MONTHLY_BUDGET_USD = 10;
 
+/**
+ * Header CloudFront injects on every origin request, and the only thing that
+ * distinguishes "came through the CDN" from "someone found the function URL".
+ *
+ * WHY THE FUNCTION URL IS PUBLIC AT ALL. The original design put the URL behind
+ * `AuthType: AWS_IAM` with a CloudFront OAC signing each request with SigV4.
+ * That works for GET and is broken for everything else: OAC signs the body too,
+ * Lambda rejects unsigned payloads, and so the *browser* would have to send an
+ * `x-amz-content-sha256` computed over the request body. A browser cannot, and
+ * every Server Action in this app is a POST - which is to say login and every
+ * mutation returned:
+ *
+ *   403 "The request signature we calculated does not match the signature you
+ *        provided."
+ *
+ * None of the three OAC signing behaviours avoid it: `always` needs the client
+ * body hash, `never` requires a public function URL anyway, and `no-override`
+ * only changes which Authorization header wins. Measured against the live
+ * distribution on 2026-08-19, after which GETs worked and POSTs did not.
+ *
+ * So the origin is public and this header is the compensating control, which is
+ * the ordinary pattern for Next.js on Lambda behind CloudFront. It is weaker
+ * than IAM and worth being honest about: anyone holding this value can reach the
+ * origin directly. It is not, however, the thing protecting user data - every
+ * route still verifies a Cognito session, and `lib/actions.ts` still calls
+ * `requireUser()` ~55 times. What this prevents is bypassing the edge:
+ * the security headers, TLS policy, and any future WAF.
+ */
+export const ORIGIN_SECRET_HEADER = "x-taskbuddy-origin";

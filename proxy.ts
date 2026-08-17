@@ -31,6 +31,51 @@ import {
 // the ~55 `requireUser()` calls in `lib/actions.ts` remain the actual
 // enforcement boundary. Nothing here is a substitute for those.
 
+/**
+ * Header CloudFront injects on every origin request. Must match
+ * ORIGIN_SECRET_HEADER in aws/infra/lib/config.ts - the value is set in one
+ * place (the web stack sends it to the CDN and to this function's environment
+ * from the same variable), but the header NAME is written in both files.
+ */
+const ORIGIN_SECRET_HEADER = "x-taskbuddy-origin";
+
+/**
+ * Length-independent comparison, so the number of matching leading bytes is not
+ * readable from response timing. `crypto.timingSafeEqual` is not used because it
+ * throws on length mismatch and is not available in every runtime the proxy can
+ * be compiled for.
+ */
+function secretMatches(got: string | null, expected: string): boolean {
+  if (got === null) return false;
+  let diff = got.length ^ expected.length;
+  for (let i = 0; i < got.length; i++) {
+    diff |= got.charCodeAt(i) ^ expected.charCodeAt(i % expected.length);
+  }
+  return diff === 0;
+}
+
+/**
+ * Rejects anything that did not come through CloudFront.
+ *
+ * The Lambda function URL is `authType: NONE` - a public HTTPS endpoint - so
+ * this header is what keeps direct hits on the origin out. It is deliberately
+ * the FIRST thing in the proxy, ahead of even the demo-mode check: this is a
+ * network boundary, and it should not be possible to skip it by setting an
+ * application flag.
+ *
+ * When ORIGIN_SECRET is unset the check is skipped entirely, which is what
+ * `pnpm dev` and the offline harness rely on. That is safe in the way the
+ * demo-mode comment below describes it is NOT: the deployed stack refuses to
+ * synthesise without TASKBUDDY_ORIGIN_SECRET, so "unset" cannot happen in an
+ * environment that is actually behind CloudFront - it can only happen on a
+ * machine where there is no CloudFront to be behind.
+ */
+function cameThroughCloudFront(request: NextRequest): boolean {
+  const expected = process.env.ORIGIN_SECRET;
+  if (!expected) return true;
+  return secretMatches(request.headers.get(ORIGIN_SECRET_HEADER), expected);
+}
+
 /** Paths reachable without a session. */
 const PUBLIC_PATHS = ["/login", "/signup"];
 
@@ -42,6 +87,15 @@ function isPublic(pathname: string): boolean {
 
 export async function proxy(request: NextRequest): Promise<NextResponse> {
   const { pathname } = request.nextUrl;
+
+  // Before anything else. See cameThroughCloudFront.
+  //
+  // 404 rather than 403: a 403 confirms to a scanner that it found the origin
+  // and that a header is what is missing. A 404 says only that there is nothing
+  // here, which is also what CloudFront's own error page would suggest.
+  if (!cameThroughCloudFront(request)) {
+    return new NextResponse(null, { status: 404 }) as NextResponse;
+  }
 
   // Offline demo mode has no accounts at all, so there is nothing to gate.
   //

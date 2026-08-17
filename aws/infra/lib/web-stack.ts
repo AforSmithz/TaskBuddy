@@ -13,6 +13,7 @@ import type * as sqs from "aws-cdk-lib/aws-sqs";
 import type { Construct } from "constructs";
 import {
   APP,
+  ORIGIN_SECRET_HEADER,
   DB_APP_ROLE,
   DB_NAME,
   LOG_RETENTION_DAYS,
@@ -57,16 +58,38 @@ const STATIC_BUNDLE = "../.build/static";
  * timeout instead. This is a correctness constraint, not a performance
  * preference: buffered Server Actions are a broken app, not a slow one.
  *
- * The URL is AWS_IAM-authenticated and reachable only through CloudFront, which
- * signs each request with Origin Access Control. A Function URL with
- * `authType: NONE` would be an unauthenticated public endpoint sitting beside
- * the CDN, bypassing every header policy and cache rule set below.
+ * The URL is `authType: NONE` and is kept private by a secret header that only
+ * CloudFront sends, NOT by Origin Access Control. OAC was the original design
+ * and had to be abandoned: it signs the request body, Lambda refuses unsigned
+ * payloads, and a browser cannot compute the `x-amz-content-sha256` that would
+ * satisfy it - so every Server Action POST returned a signature mismatch while
+ * GETs sailed through. See ORIGIN_SECRET_HEADER in config.ts for the full
+ * measurement and for what this control does and does not buy.
  */
 export class WebStack extends Stack {
   readonly distribution: cloudfront.Distribution;
 
   constructor(scope: Construct, id: string, props: WebStackProps) {
     super(scope, id, props);
+
+    // Supplied at deploy time, like TASKBUDDY_ALERT_EMAIL, and required rather
+    // than defaulted. A generated-on-synth value would change on every deploy
+    // and a hardcoded one would be in git; an absent one must fail here, because
+    // the failure mode otherwise is an origin that accepts anything.
+    //
+    // It does land in the CloudFormation template and in the function's
+    // environment, so it is readable by anyone with CloudFormation or Lambda
+    // read access to this account. That is the accepted limit of this control:
+    // CloudFront custom headers are template literals, and CloudFront cannot
+    // read Secrets Manager.
+    const originSecret = process.env.TASKBUDDY_ORIGIN_SECRET;
+    if (!originSecret) {
+      throw new Error(
+        "TASKBUDDY_ORIGIN_SECRET is not set. It is the only thing stopping the " +
+          "public function URL from being reachable without CloudFront. " +
+          "Generate one with: openssl rand -hex 32",
+      );
+    }
 
     const assets = new s3.Bucket(this, "Assets", {
       bucketName: `${APP}-assets-${this.account}`,
@@ -126,6 +149,11 @@ export class WebStack extends Stack {
 
         EVENT_BUS_NAME: props.bus.eventBusName,
         JOB_QUEUE_URL: props.jobQueue.queueUrl,
+
+        // Checked by proxy.ts on every matched request. Set here and nowhere
+        // else, so the value the CDN sends and the value the app expects cannot
+        // drift apart.
+        ORIGIN_SECRET: originSecret,
       },
     });
 
@@ -157,7 +185,11 @@ export class WebStack extends Stack {
     props.jobQueue.grantSendMessages(web);
 
     const fnUrl = web.addFunctionUrl({
-      authType: lambda.FunctionUrlAuthType.AWS_IAM,
+      // NONE, not AWS_IAM, and ORIGIN_SECRET_HEADER is what replaces it.
+      // See config.ts for the measurement that forced this: OAC + AWS_IAM
+      // signs the request body, and a browser cannot produce the payload hash
+      // Lambda then demands, so every Server Action POST 403s.
+      authType: lambda.FunctionUrlAuthType.NONE,
       invokeMode: lambda.InvokeMode.RESPONSE_STREAM,
     });
 
@@ -184,7 +216,10 @@ export class WebStack extends Stack {
       },
     });
 
-    const appOrigin = origins.FunctionUrlOrigin.withOriginAccessControl(fnUrl, {
+    const appOrigin = new origins.FunctionUrlOrigin(fnUrl, {
+      // Not `withOriginAccessControl`. OAC would sign these requests, and a
+      // signed body is exactly what browsers cannot supply - see config.ts.
+      customHeaders: { [ORIGIN_SECRET_HEADER]: originSecret },
       // The origin ceiling that actually bites. CloudFront gives up on the
       // origin after this many seconds regardless of the Lambda timeout, so it
       // is the real budget for a server render - and the reason 43-second LLM
