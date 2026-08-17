@@ -78,7 +78,35 @@ async function connect(): Promise<Client> {
     database: process.env.PGDATABASE ?? "taskbuddy",
     password: await new Signer({ hostname: host, port, username: user, region }).getAuthToken(),
     ssl: { ca: RDS_CA_BUNDLE, rejectUnauthorized: true, servername: host },
-    connectionTimeoutMillis: 10_000,
+    // 18s, not 10s, and this function is where that mattered.
+    //
+    // This runs on a legacy account's FIRST sign-in, which is usually also the
+    // first database connection in a while - so the cluster is typically
+    // auto-paused and has to wake, which Aurora takes around 15 seconds to do
+    // (the same ~15s apply-sql.sh warns about). At 10s the connect lost that
+    // race. Observed live on 2026-08-19: two attempts died with
+    //
+    //   user migration failed: Error: timeout expired
+    //       at Timeout._onTimeout (/node_modules/pg/lib/client.js:170:28)
+    //
+    // roughly five seconds apart, and a third then succeeded against the
+    // by-then-awake cluster. To the person signing in that is a password that
+    // fails twice and then works, which reads as a wrong password rather than a
+    // cold database.
+    //
+    // Deliberately 18 and not 30: the function's own timeout is 20s
+    // (auth-stack.ts), and a connect ceiling above that would be unreachable -
+    // Lambda would kill the invocation first and the log would show a function
+    // timeout with no cause instead of the pg error above. Waiting longer cannot
+    // keep the cluster awake either way, since this is a ceiling on waiting and
+    // not a duration a connection is held for, so it costs nothing.
+    //
+    // This improves the odds of a single invocation succeeding; it does not
+    // promise the first sign-in after an idle period is instant. Cognito applies
+    // its own budget to trigger invocations and retries them, which is the
+    // pattern the timestamps above show. Scale-to-zero and a fast first login
+    // are in genuine tension here, and the cost control wins by design.
+    connectionTimeoutMillis: 18_000,
     statement_timeout: 10_000,
   });
   await client.connect();

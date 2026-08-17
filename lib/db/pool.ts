@@ -160,7 +160,29 @@ const POOL_TUNING = {
   max: 6,
   // Also the auto-pause enabler. See the header.
   idleTimeoutMillis: 10_000,
-  connectionTimeoutMillis: 10_000,
+  // NOT the same knob as the one above, and the difference matters.
+  //
+  // `idleTimeoutMillis` is the cost control: it drops connections fast so the
+  // cluster can pause. `connectionTimeoutMillis` is how long we are willing to
+  // WAIT for a connection - and once the cluster has paused, the next connection
+  // has to wake it, which Aurora takes around 15 seconds to do.
+  //
+  // At the previous 10s that wait always lost. Observed live on 2026-08-19: the
+  // first sign-in after an idle period failed twice with
+  //
+  //   user migration failed: Error: timeout expired
+  //       at Timeout._onTimeout (/node_modules/pg/lib/client.js:170:28)
+  //
+  // and only succeeded on the third attempt, once the cluster was already awake.
+  // Every cold path had the same bug; the Cognito migration trigger is just
+  // where it was visible, because a failed login is louder than a slow render.
+  //
+  // 30s covers the resume with margin and costs nothing: it is a ceiling on
+  // waiting, not a duration anything is held for, so it cannot keep the cluster
+  // awake. It stays well inside the 60s function timeout and the 60s CloudFront
+  // origin read timeout, so a genuinely unreachable database still fails as a
+  // connection error rather than as a gateway timeout with no cause attached.
+  connectionTimeoutMillis: 30_000,
   // Belt and braces against a leaked transaction: the cluster-side
   // idle_in_transaction_session_timeout is 30s, this is the client half.
   statement_timeout: 15_000,
