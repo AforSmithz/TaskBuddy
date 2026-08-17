@@ -41,6 +41,28 @@ export const DB_MAX_ACU = 4;
  */
 export const DB_AUTO_PAUSE_SECONDS = 900;
 
+/**
+ * Automated backup retention, in days. This is the PITR window.
+ *
+ * 7 is the design value and requires a **Paid** account plan. It is a named
+ * constant rather than an inline 7 because of how it fails otherwise.
+ *
+ * On the AWS Free account plan - the credit-based sandbox new accounts get by
+ * default since 2025-07-15 - this exact value is rejected at CreateDBCluster
+ * with "The specified backup retention period exceeds the maximum available to
+ * free tier customers", arriving as a CloudFormation rollback several minutes
+ * into the deploy and naming a quota rather than the plan behind it. The cap
+ * there is 1.
+ *
+ * Lowering this to 1 does NOT make the stack deploy on a Free plan. That was
+ * tried on 2026-08-19 and the next error was the real one: free-plan accounts
+ * must pass `WithExpressConfiguration` to CreateDBCluster, and that parameter
+ * does not exist on the `AWS::RDS::DBCluster` CloudFormation resource - so
+ * Aurora cannot be created by CDK on a Free plan at all, at any retention.
+ * The account was upgraded to Paid instead. See aws/CUTOVER.md.
+ */
+export const DB_BACKUP_RETENTION_DAYS = 7;
+
 /** Postgres major version. Aurora tracks community releases a little behind. */
 export const DB_ENGINE_VERSION = "16.13";
 
@@ -163,3 +185,4 @@ export const LOG_RETENTION_DAYS = 30;
  * credit allowance would only speak long after something had gone wrong.
  */
 export const MONTHLY_BUDGET_USD = 10;
+

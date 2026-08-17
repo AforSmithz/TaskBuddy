@@ -6,6 +6,7 @@ import {
   APP,
   DB_APP_ROLE,
   DB_AUTO_PAUSE_SECONDS,
+  DB_BACKUP_RETENTION_DAYS,
   DB_MAX_ACU,
   DB_MIN_ACU,
   DB_NAME,
@@ -159,7 +160,11 @@ export class DataStack extends Stack {
       enableDataApi: false,
 
       storageEncrypted: true,
-      backup: { retention: Duration.days(7), preferredWindow: "17:00-18:00" },
+      // 1 day, not 7: the Free account plan caps it. See DB_BACKUP_RETENTION_DAYS.
+      backup: {
+        retention: Duration.days(DB_BACKUP_RETENTION_DAYS),
+        preferredWindow: "17:00-18:00",
+      },
       // 17:00 UTC is midnight in Jakarta - outside the hours anyone is using it,
       // and inside the window the cluster would be paused anyway.
       preferredMaintenanceWindow: "Sun:18:00-Sun:19:00",
