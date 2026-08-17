@@ -64,7 +64,39 @@ grant rds_iam to taskbuddy_app;
 -- Explicitly deny the things this role must never have. `nobypassrls` is the
 -- important one: a BYPASSRLS role would sail straight through every policy in
 -- 01_schema.sql, FORCE or not.
-alter role taskbuddy_app with nosuperuser nocreatedb nocreaterole noreplication nobypassrls;
+--
+-- Two of the five attributes cannot be SET here, and that is Aurora, not a bug.
+-- The cluster master is `rds_superuser`, which is not a true superuser, and
+-- PostgreSQL requires you already hold an attribute to change it:
+--
+--   nosuperuser    ERROR: Only roles with the SUPERUSER attribute may change
+--                  the SUPERUSER attribute.
+--   noreplication  ERROR: Only roles with the REPLICATION attribute may change
+--                  the REPLICATION attribute.
+--
+-- `nobypassrls` - the one that actually matters - IS settable, and is set.
+alter role taskbuddy_app with nocreatedb nocreaterole nobypassrls;
+
+-- The two that could not be set are ASSERTED instead, because `create role
+-- ... login` above defaults both to false. Asserting is not decoration: the
+-- alternative is a script that appears to enforce a posture it silently could
+-- not apply. If either is ever true, this stops the deploy right here rather
+-- than handing the app a role that can bypass every policy in 01_schema.sql.
+do $$
+declare
+  is_super bool;
+  is_repl  bool;
+begin
+  select rolsuper, rolreplication into is_super, is_repl
+    from pg_roles where rolname = 'taskbuddy_app';
+  if is_super then
+    raise exception 'taskbuddy_app has SUPERUSER; it would bypass all RLS. Remove it with a superuser and re-run.';
+  end if;
+  if is_repl then
+    raise exception 'taskbuddy_app has REPLICATION; it must not. Remove it with a replication role and re-run.';
+  end if;
+end
+$$;
 
 -- ---------------------------------------------------------------------------
 -- Grants. Data only — never DDL.
@@ -124,10 +156,30 @@ select rolname, rolsuper, rolbypassrls, rolcreatedb, rolcreaterole
 from pg_roles
 where rolname = 'taskbuddy_app';
 
--- 4. The role authenticates by IAM, not by password. Expect rds_iam = true and
---    has_password = false. A `true` in the second column means `grant rds_iam`
---    did not take and the role is still password-authenticable.
-select
-  pg_has_role('taskbuddy_app', 'rds_iam', 'member')                       as rds_iam,
-  (select rolpassword is not null
-     from pg_authid where rolname = 'taskbuddy_app')                      as has_password;
+-- 4. The role authenticates by IAM, not by password.
+--
+-- This used to also read `rolpassword from pg_authid` to prove no password
+-- existed. That cannot work on Aurora: `pg_authid` holds password hashes and is
+-- readable only by a true superuser, so the cluster master - `rds_superuser` -
+-- gets "permission denied for table pg_authid" and the whole script stops one
+-- statement short of finishing. The check was unrunnable where it mattered.
+--
+-- Membership in `rds_iam` is the stronger statement anyway. It is not a hint
+-- that the app prefers IAM; RDS makes password authentication IMPOSSIBLE for a
+-- role holding it, whether or not a password was ever set. So the hash is moot
+-- and the membership is the control.
+--
+-- Raised rather than selected, because a printed row only helps if someone
+-- reads it. If this grant silently failed, every Lambda would get PAM
+-- authentication failures at runtime and nothing here would have said so.
+do $$
+begin
+  if not pg_has_role('taskbuddy_app', 'rds_iam', 'member') then
+    raise exception
+      'taskbuddy_app is not a member of rds_iam. IAM token auth will fail with '
+      '"PAM authentication failed" for a role whose grants all look correct. '
+      'Re-run `grant rds_iam to taskbuddy_app;` as the cluster master.';
+  end if;
+  raise notice 'ok: taskbuddy_app authenticates via rds_iam (password auth is impossible for it)';
+end
+$$;
