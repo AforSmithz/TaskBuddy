@@ -110,3 +110,26 @@ export const MONTHLY_BUDGET_USD = 10;
 // origin directly. It isn't what protects user data though - every route still verifies a
 // Cognito session. What it prevents is bypassing the edge (security headers, TLS policy, WAF).
 export const ORIGIN_SECRET_HEADER = "x-taskbuddy-origin";
+
+// --- CI/CD -----------------------------------------------------------------
+
+// The one repository allowed to mint credentials in this account. It is part of
+// an IAM trust policy, not a convenience constant: the `sub` claim GitHub signs
+// is `repo:<owner>/<repo>:<context>`, so a typo here doesn't fail loudly, it
+// produces a role nothing can assume.
+export const GITHUB_OWNER = "AforSmithz";
+export const GITHUB_REPO = "TaskBuddy";
+
+// Only this branch can deploy. A push to any other ref gets a token whose `sub`
+// doesn't match the deploy role's condition, so the assume-role call fails
+// before any AWS API is touched.
+export const GITHUB_DEPLOY_BRANCH = "main";
+
+// The bootstrap qualifier this account was bootstrapped with (the default).
+// It is in the ARNs of the four roles `cdk deploy` assumes, which is the only
+// thing the GitHub role is allowed to do - see cicd-stack.ts.
+export const CDK_QUALIFIER = "hnb659fds";
+
+// CloudFront only reports metrics in us-east-1, so the edge stack lives there
+// and the CI role needs the bootstrap roles of both regions.
+export const EDGE_REGION = "us-east-1";
