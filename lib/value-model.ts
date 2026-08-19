@@ -1,28 +1,20 @@
-import type { StrategyMoveKind } from "./types";
+import type { StrategyMoveKind } from "@/lib/types";
 
-// The Value Model (OVERHAUL §1.4 / §5 step 1) - the first-class, user-editable
-// policy the optimizer consults so the strategist optimizes *your* tradeoffs
-// instead of a hardcoded objective. Two levers in v1:
+// The Value Model - the user-editable policy the optimizer consults, so the strategist
+// optimizes YOUR tradeoffs instead of a hardcoded objective. Three levers:
 //
-//   1. AREA WEIGHTS - an importance multiplier per life-area. It scales a task's
-//      cost-of-delay (lib/allocate.ts), so a higher-weighted area's work is
-//      scheduled earlier and protected harder under contention.
-//   2. RECOVERY STYLE - a preference over *which kind* of recovery move to reach
-//      for ("keep the work, move dates" vs "protect the dates, cut scope"). It's
-//      applied only as a near-tie tiebreaker in the joint optimizer, so the
-//      forecast odds still decide - preference never overrides a real gain.
+//   1. AREA WEIGHTS - an importance multiplier per life-area, scaling a task's cost-of-delay
+//      so a higher-weighted area gets scheduled earlier and protected harder under contention.
+//   2. RECOVERY STYLE - a preference over which KIND of move to reach for ("keep the work, move
+//      dates" vs "protect the dates, cut scope"). Applied only as a near-tie tiebreak, so the
+//      odds still decide.
+//   3. PROJECT WEIGHTS - an importance multiplier per goal, overriding the area-derived read.
+//      Consumed ONLY by the strategist's cross-project cause aggregation, deliberately NOT
+//      wired into allocate.ts's cost-of-delay: areaWeights already scales that, and a second
+//      multiplier there would change scheduling, hence the client-replay parity surface.
 //
-//   3. PROJECT WEIGHTS (v2) - an importance multiplier per GOAL, overriding the
-//      area-derived read for that one goal. Consumed ONLY by the strategist's
-//      cross-project cause aggregation (`goalValue`, below). Deliberately NOT wired
-//      into `allocate.ts`'s cost-of-delay: `areaWeights` already scales that, and
-//      adding a second multiplier there would change scheduling - the odds path,
-//      hence the S1 client-replay parity surface. That's a separate slice.
-//
-// NOTE - v2 is still NOT the full policy object §1.4 envisions. Still hardcoded /
-// not yet user-editable: the cost-of-delay FACTOR weights (COD_WEIGHTS in
-// allocate.ts) and hard constraints beyond the existing `protected` flag on
-// recurring activities ("never trade sleep" lives there, not here yet).
+// Still hardcoded and not yet user-editable: the cost-of-delay factor weights in allocate.ts,
+// and hard constraints beyond the existing `protected` flag on recurring activities.
 
 /** v2 adds `projectWeights`. A v1 row normalizes forward (missing ⇒ `{}` ⇒ neutral). */
 export const VALUE_MODEL_VERSION = 2 as const;
@@ -60,12 +52,9 @@ export interface ValueModel {
   projectWeights: Record<string, number>;
 }
 
-/**
- * The move-kind bias for each recovery style. Positive = reach for this sooner;
- * negative = a last resort. These are TIEBREAKERS (small, bounded) - the joint
- * optimizer only consults them when two candidates are within an odds epsilon, so
- * they shape *taste*, never the math.
- */
+/** Move-kind bias per recovery style. Positive means reach for this sooner, negative means last
+ *  resort. Tiebreakers only - the optimizer consults them only within an odds epsilon, so they
+ *  shape taste, never the math. */
 export const RECOVERY_STYLE_PREFERENCES: Record<
   RecoveryStyle,
   Partial<Record<StrategyMoveKind, number>>
@@ -91,7 +80,7 @@ export const RECOVERY_STYLE_PREFERENCES: Record<
     triage: 0.5,
     defer: 0.5,
     defer_skill: 0.5,
-    // Hits the date by sliding a milestone chain out of the near-term push - 
+       // Hits the date by sliding a milestone chain out of the near-term push -
     // exactly the protect_dates thesis.
     reschedule_skill: 0.5,
     reshape: 0.5,
@@ -118,7 +107,6 @@ function isRecoveryStyle(x: unknown): x is RecoveryStyle {
   return x === "protect_work" || x === "protect_dates" || x === "balanced";
 }
 
-/** Importance multiplier for `area` - the clamped weight, or neutral when unset. */
 export function areaWeight(vm: ValueModel, area: string): number {
   const w = vm.areaWeights[area];
   return typeof w === "number" && Number.isFinite(w)
@@ -139,23 +127,18 @@ export interface ValuedWork {
   importance?: number;
 }
 
-/**
- * How much this goal is *worth* - the multiplier the strategist weights a goal by
- * when a portfolio-wide move has to aggregate across several of them.
+/** How much this goal is WORTH - the multiplier the strategist weights a goal by when a
+ *  portfolio-wide move aggregates across several. Most specific first:
  *
- * Precedence, most-specific first:
- *   1. An explicit `projectWeights[goalId]` the user set. Their word is final.
- *   2. Else the goal's work tells us: the EFFORT-weighted mean of its open tasks'
- *      area importance. A goal that is mostly high-weighted Work is worth more than
- *      one that is mostly neutral Errands, without the user restating it per goal.
- *      Effort-weighted (not a plain mean) so one trivial task in a precious area
- *      can't inflate a goal made mostly of neutral work.
- *   3. Else neutral.
+ *    1. An explicit projectWeights[goalId]. The user's word is final.
+ *    2. Else the goal's work tells us: the effort-weighted mean of its open tasks' area
+ *       importance, so a goal that's mostly high-weighted Work outranks one that's mostly
+ *       neutral Errands without restating it per goal. Effort-weighted rather than a plain mean
+ *       so one trivial task in a precious area can't inflate a goal made of neutral work.
+ *    3. Else neutral.
  *
- * NO-REGRET: with no project weights AND no area weights every task's `importance`
- * is 1 (or absent), so every goal returns exactly `NEUTRAL_PROJECT_WEIGHT` and any
- * caller multiplying by this is bit-identical to not having called it.
- */
+ *  With no project weights and no area weights every goal returns NEUTRAL_PROJECT_WEIGHT, so
+ *  multiplying by this is identical to not calling it. */
 export function goalValue(
   vm: ValueModel,
   goalId: string,
@@ -203,7 +186,7 @@ export function normalizeValueModel(raw: unknown): ValueModel {
     // A neutral PROJECT is NOT implicit: an unset goal falls back to its (possibly
     // non-neutral) area-derived value, so "this goal is deliberately neutral" is a
     // real statement that must survive normalization and override the fallback.
-    // A v1 row simply has no `projectWeights` ⇒ `{}` ⇒ every goal derives. Forward-
+       // A v1 row simply has no `projectWeights` ⇒ `{}` ⇒ every goal derives. Forward-
     // migration is a no-op by construction.
     projectWeights: normalizeWeightMap(r.projectWeights, { dropNeutral: false }),
   };

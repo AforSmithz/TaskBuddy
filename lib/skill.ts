@@ -1,21 +1,15 @@
-import type { SkillNode, SkillProgress } from "./types";
+import type { SkillNode, SkillProgress } from "@/lib/types";
 
-/**
- * Derive a learning goal's progress from its skill nodes. Pure - nothing is
- * stored, so it can't drift from the rows.
+/** Derive a learning goal's progress from its skill nodes. Pure - nothing is stored, so it can't
+ *  drift from the rows.
  *
- * The point of §5.3b is that two kinds of progress are NOT the same and we keep
- * them apart:
- *  - **effort** progress = attained minutes / total minutes (you put in the time);
- *  - **skill** progress = checkpoints met / total checkpoints (you can demonstrate
- *    a milestone). When a plan has no checkpoints we fall back to nodes attained,
- *    so skillPct is always defined.
- * They diverge exactly when you've ground out hours on prep without yet clearing a
- * milestone - which is the signal worth surfacing.
+ *  Two kinds of progress that are NOT the same, kept apart: EFFORT progress is attained minutes
+ *  over total (you put in the time), SKILL progress is checkpoints met over total (you can
+ *  demonstrate a milestone), falling back to nodes attained when a plan has no checkpoints. They
+ *  diverge exactly when you've ground out hours on prep without clearing a milestone, which is
+ *  the signal worth surfacing.
  *
- * `unlocked` is the actionable frontier: unattained nodes whose prerequisites are
- * all attained.
- */
+ *  `unlocked` is the actionable frontier: unattained nodes whose prerequisites are all attained. */
 export function skillProgress(nodes: SkillNode[]): SkillProgress {
   const total = nodes.length;
   const attainedNodes = nodes.filter((n) => n.attained);
@@ -65,11 +59,8 @@ export function skillProgress(nodes: SkillNode[]): SkillProgress {
   };
 }
 
-/**
- * Order nodes for display: a stable topological sort (prerequisites before
- * dependents), breaking ties by `sort_index`. Falls back gracefully if the
- * stored graph somehow contains a cycle (leftover nodes are appended).
- */
+/** Order nodes for display: a stable topological sort, breaking ties by sort_index. Falls back
+ *  gracefully if the stored graph somehow contains a cycle (leftovers are appended). */
 export function topoSortSkills(nodes: SkillNode[]): SkillNode[] {
   const byId = new Map(nodes.map((n) => [n.id, n]));
   const placed = new Set<string>();

@@ -5,7 +5,7 @@ import {
   type CompletionConfidence,
   type GoalCompletion,
   type GoalCriterion,
-} from "./types";
+} from "@/lib/types";
 
 /**
  * Derive a goal's completion from its definition-of-done criteria. A goal is

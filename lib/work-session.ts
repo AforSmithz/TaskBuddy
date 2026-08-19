@@ -6,8 +6,8 @@
 // from the UTC `completed_at` instant. Imports only pure modules - safe to call
 // from a "use client" component.
 
-import type { WorkSessionLocal } from "./types";
-import { windowOf } from "./velocity";
+import type { WorkSessionLocal } from "@/lib/types";
+import { windowOf } from "@/lib/velocity";
 
 /** Two-digit zero-pad for the local ISO date parts. */
 function pad(n: number): string {

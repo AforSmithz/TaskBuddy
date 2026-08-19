@@ -8,7 +8,7 @@ import type {
   Goal,
   GoalCriterion,
   RecurringActivity,
-} from "./types";
+} from "@/lib/types";
 
 export interface SampleEntry {
   notes: string;
@@ -179,7 +179,6 @@ export const SAMPLE_ACTIVITIES: RecurringActivity[] = [
   },
 ];
 
-/** ISO date `days` before `today` (UTC-stable). */
 function isoDaysAgo(today: string, days: number): string {
   const [y, m, d] = today.slice(0, 10).split("-").map(Number);
   const dt = new Date(Date.UTC(y, m - 1, d));

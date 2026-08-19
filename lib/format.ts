@@ -13,7 +13,6 @@ export function formatDate(value: string | null | undefined): string {
   return `${MONTHS[d.getMonth()]} ${d.getDate()}`;
 }
 
-/** Minutes -> "1h 30m" / "45m" / "2h". */
 export function formatMinutes(min: number | null | undefined): string {
   if (!min || min <= 0) return "—";
   const h = Math.floor(min / 60);
@@ -23,7 +22,6 @@ export function formatMinutes(min: number | null | undefined): string {
   return `${h}h ${m}m`;
 }
 
-/** Up to two uppercase initials from a name. */
 export function initials(name: string | null | undefined): string {
   if (!name) return "?";
   const parts = name.trim().split(/\s+/).filter(Boolean);

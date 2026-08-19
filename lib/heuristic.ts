@@ -1,4 +1,4 @@
-import type { ExtractionResult, ExtractedTask, Confidence } from "./types";
+import type { ExtractionResult, ExtractedTask, Confidence } from "@/lib/types";
 
 // Offline heuristic extractor.
 // Used when Bedrock is not configured so the full pipeline still works.
@@ -72,7 +72,6 @@ function parseDue(sentence: string): string | null {
   return null;
 }
 
-/** Urgency rating (1-5) from how soon a due date falls. */
 function urgencyFromDue(due: string | null): number {
   if (!due) return 1;
   const days = Math.round(
@@ -85,7 +84,6 @@ function urgencyFromDue(due: string | null): number {
   return 1;
 }
 
-/** Effort rating (1-5) from an estimated-minutes value. */
 function effortFromMinutes(min: number): number {
   if (min > 240) return 5;
   if (min > 120) return 4;
@@ -113,7 +111,6 @@ const HOBBY_RE =
 const PERSONAL_RE =
   /\b(family|kids?|home|house|move|apartment|doctor|dentist|health|budget|finance|saving|tax(?:es)?|wedding|birthday|trip|holiday|vacation|grocer|errand|chores?|personal|relationship|friends?)\b/i;
 
-/** Suggest a life-area for an entry from keyword cues; defaults to "Work". */
 function lifeArea(text: string): string {
   if (HOBBY_RE.test(text)) return "Hobby";
   if (PERSONAL_RE.test(text)) return "Personal";
@@ -245,7 +242,7 @@ export function heuristicExtract(rawInput: string): ExtractionResult {
       ? firstLine.replace(/[:.\s]+$/, "")
       : `Meeting notes — ${isoDate(new Date())}`;
 
-  // --- Decisions ---
+       // --- Decisions ---
   const decisions = sentences
     .filter((s) => DECISION_RE.test(s))
     .slice(0, 8)
@@ -255,7 +252,7 @@ export function heuristicExtract(rawInput: string): ExtractionResult {
       confidence: "Medium" as Confidence,
     }));
 
-  // --- Open questions ---
+     // --- Open questions ---
   const open_questions = sentences
     .filter((s) => s.endsWith("?") || QUESTION_RE.test(s))
     .slice(0, 8)
@@ -266,7 +263,7 @@ export function heuristicExtract(rawInput: string): ExtractionResult {
       confidence: "Medium" as Confidence,
     }));
 
-  // --- Explicit tasks ---
+     // --- Explicit tasks ---
   const taskSentences = sentences.filter(
     (s) => ACTION_RE.test(s) && !s.endsWith("?") && !DECISION_RE.test(s),
   );
@@ -303,7 +300,7 @@ export function heuristicExtract(rawInput: string): ExtractionResult {
     };
   });
 
-  // --- Suggested missing tasks ---
+   // --- Suggested missing tasks ---
   if (tasks.length > 0) {
     const suggestions: { title: string; category: string }[] = [
       { title: "Review assumptions before execution", category: "Planning" },

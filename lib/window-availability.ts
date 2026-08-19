@@ -1,22 +1,19 @@
-import { ALL_WINDOWS, type TimeWindow } from "./velocity";
+import { ALL_WINDOWS, type TimeWindow } from "@/lib/velocity";
 
-// Explicit per-window availability (OVERHAUL §5a S3b Phase 4, design Pillar 1 / decision #5).
+// Explicit per-window availability.
 //
-// By default the windowed forecast DERIVES how a day's hours split across the five
-// time-of-day windows from observed `work_sessions` (a shrunk session share). This lets a
-// user instead PIN that split - "I work mornings and evenings, never afternoons" - when the
-// inferred share is wrong or sparse. It is an OPTIONAL override, never a prerequisite: the
-// objective ships on the derived model, and pinning the share only bounds how much work can
-// claim each window's *learned velocity* - it authors no probability. With no velocity
-// learned the profile is still null (a share without a multiplier is byte-identical-neutral),
-// so a pin has no effect until the window velocity is earned. Pure / client-safe.
+// By default the windowed forecast DERIVES how a day's hours split across the five time-of-day
+// windows from observed work_sessions. This lets a user pin that split instead - "I work mornings
+// and evenings, never afternoons" - when the inferred share is wrong or sparse. An optional
+// override, never a prerequisite: pinning only bounds how much work can claim each window's
+// learned velocity, it authors no probability. With no velocity learned the profile is still
+// null, so a pin has no effect until window velocity is earned.
 
 export const WINDOW_AVAILABILITY_VERSION = 1;
 
-/** Per-user explicit window availability: a relative WEIGHT per window (≥ 0). All-zero ⇒
- *  unset (fall back to the derived share). The weights are normalised to a share when
- *  applied, so only their RATIO matters - "morning 2, evening 1" = morning gets twice the
- *  capacity of evening, afternoon none. */
+/** Per-user explicit window availability: a relative WEIGHT per window (>= 0). All-zero means
+ *  unset. Normalised to a share when applied, so only the RATIO matters - "morning 2, evening 1"
+ *  gives morning twice the capacity of evening and afternoon none. */
 export interface WindowAvailability {
   version: number;
   weights: Record<TimeWindow, number>;
