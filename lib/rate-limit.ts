@@ -2,32 +2,20 @@ import { headers } from "next/headers";
 
 // A small fixed-window limiter for the two unauthenticated Server Actions.
 //
-// WHAT THIS IS FOR, specifically. `loginAction` runs a real cost-12 bcrypt on
-// EVERY request, including ones whose email does not exist - that is deliberate
-// (lib/password.ts DUMMY_HASH), because answering a miss in 1 ms and a hit in
-// 290 ms is a free account-enumeration oracle. The cost of keeping that
-// property is that an unauthenticated endpoint burns ~290 ms of CPU per hit.
-// Under Vercel's Active CPU pricing that is billable, and under Fluid Compute
-// it competes with co-tenant requests on the same instance. A trivial script
-// can hold the app degraded and the meter running.
+// loginAction runs a real cost-12 bcrypt on EVERY request, including ones whose email doesn't
+// exist - deliberate, because answering a miss in 1ms and a hit in 290ms is a free account
+// enumeration oracle. The cost of that property is an unauthenticated endpoint burning ~290ms
+// of CPU per hit, which is billable and competes with co-tenant requests, so a trivial script
+// can hold the app degraded and the meter running. This sits IN FRONT of the bcrypt, so a
+// blocked attempt costs a Map lookup instead of a third of a second of CPU.
 //
-// This limiter sits IN FRONT of the bcrypt, so a blocked attempt costs a Map
-// lookup instead of a third of a second of CPU.
-//
-// WHAT THIS IS NOT. State is per instance and in memory:
-//
-//   - It does not coordinate across Fluid Compute instances. An attacker
-//     spreading load across instances gets a multiple of the limit.
-//   - It resets when an instance is recycled.
-//   - It cannot stop the request reaching the function at all, so the
-//     invocation is still billed - just not the bcrypt inside it.
-//
-// The real fix for all three is the Vercel Firewall rate-limit rule in
-// azure/VERCEL.md, which rejects at the edge before any function runs. This is
-// defence in depth underneath it, and the half worth having on its own: it is
-// the part that protects the expensive operation rather than the cheap one.
-// Deliberately no Redis or KV - a second network dependency on the login path
-// would cost more availability than it buys.
+// What it is not: state is per instance and in memory, so it doesn't coordinate across
+// instances (an attacker spreading load gets a multiple of the limit), it resets on recycle,
+// and it can't stop the request reaching the function at all - the invocation is still billed,
+// just not the bcrypt inside it. The real fix for all three is the edge rate-limit rule; this
+// is defence in depth underneath it, and the half worth having on its own because it protects
+// the expensive operation rather than the cheap one. No Redis or KV on purpose - a second
+// network dependency on the login path would cost more availability than it buys.
 
 interface Window {
   count: number;
@@ -37,11 +25,9 @@ interface Window {
 
 const WINDOW_MS = 60_000;
 
-/**
- * Cap on tracked keys. Without it, a spray across many source addresses turns
- * the limiter itself into unbounded memory growth on a 1 vCore instance - a
- * denial of service delivered through the thing meant to prevent one.
- */
+/** Cap on tracked keys. Without it a spray across many source addresses turns the limiter into
+ *  unbounded memory growth - a denial of service delivered through the thing meant to prevent
+ *  one. */
 const MAX_KEYS = 5_000;
 
 const windows = new Map<string, Window>();
@@ -63,15 +49,10 @@ function sweep(now: number): void {
   }
 }
 
-/**
- * Best-effort client address.
- *
- * `x-vercel-forwarded-for` is set by the platform and cannot be spoofed by the
- * client; `x-forwarded-for` can be, so it is only a local-development
- * fallback. When neither is present every caller collapses onto one bucket,
- * which fails toward over-limiting rather than under-limiting - the right
- * direction for a control that guards an expensive operation.
- */
+/** Best-effort client address. x-vercel-forwarded-for is set by the platform and can't be
+ *  spoofed; x-forwarded-for can be, so it's only a local-dev fallback. With neither present every
+ *  caller collapses onto one bucket, which fails toward over-limiting - the right direction for
+ *  something guarding an expensive operation. */
 async function clientKey(): Promise<string> {
   const h = await headers();
   const vercel = h.get("x-vercel-forwarded-for");
@@ -81,24 +62,16 @@ async function clientKey(): Promise<string> {
   return "unknown";
 }
 
-/**
- * The window accounting, with no Next runtime and no clock of its own.
- *
- * Split out for the same reason `lib/db/query.ts` is split from `shim.ts`: it
- * makes the part with the actual logic exercisable from a plain-Node tsx
- * harness. `now` is injected rather than read so a test can advance time
- * without sleeping through a real 60-second window.
- *
- * Returns true when the caller is over its limit.
- */
+/** The window accounting, with no Next runtime and no clock of its own. Split out for the same
+ *  reason query.ts is split from shim.ts: it makes the part with the actual logic exercisable
+ *  from a plain-Node harness. `now` is injected so a test can advance time without sleeping
+ *  through a real 60-second window. Returns true when the caller is over its limit. */
 export function consume(key: string, limit: number, now: number): boolean {
   const existing = windows.get(key);
   if (!existing || now - existing.startedAt >= WINDOW_MS) {
-    // Insert BEFORE sweeping, not after. Sweeping first trims to exactly
-    // MAX_KEYS and then this write pushes it to MAX_KEYS + 1, so the cap is
-    // never actually held. Map preserves insertion order and sweep evicts
-    // oldest-first, so the entry written here is the last candidate for
-    // eviction and survives its own sweep.
+     // Insert BEFORE sweeping, not after. Sweeping first trims to exactly MAX_KEYS and then this
+  // write pushes it to MAX_KEYS + 1, so the cap is never actually held. Map preserves insertion
+  // order and sweep evicts oldest-first, so this entry survives its own sweep.
     windows.delete(key); // re-insert at the end so its position matches its age
     windows.set(key, { count: 1, startedAt: now });
     sweep(now);
@@ -118,13 +91,9 @@ export function __windowCount(): number {
 }
 export const __MAX_KEYS = MAX_KEYS;
 
-/**
- * Consume one unit against `bucket` for the calling client.
- *
- * Returns true when the caller is over its limit and the work should be
- * skipped. Call this BEFORE anything expensive - the whole point is to not
- * reach the bcrypt.
- */
+/** Consume one unit against `bucket` for the calling client. True means over the limit and the
+ *  work should be skipped. Call BEFORE anything expensive - the whole point is not reaching the
+ *  bcrypt. */
 export async function isRateLimited(
   bucket: string,
   limit: number,
