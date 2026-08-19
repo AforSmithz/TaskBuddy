@@ -63,7 +63,7 @@ import type {
   TaskOrigin,
   TaskStatus,
   TriageMove,
-} from "./types";
+} from "@/lib/types";
 import {
   COMMITTED_PLAN_SCHEMA_VERSION,
   MOVE_CHOICE_SCHEMA_VERSION,
@@ -71,9 +71,9 @@ import {
   isJobAbandoned,
   isOnTrack,
   isTerminalJobStatus,
-} from "./types";
-import { extractEntry } from "./extraction";
-import { estimationModel } from "./generate";
+} from "@/lib/types";
+import { extractEntry } from "@/lib/extraction";
+import { estimationModel } from "@/lib/generate";
 import {
   energyWindows,
   fitVelocityModel,
@@ -82,8 +82,8 @@ import {
   workSessionResidualSamples,
   type ResidualSample,
   type VelocityModel,
-} from "./velocity";
-import { goalCompletion } from "./goal";
+} from "@/lib/velocity";
+import { goalCompletion } from "@/lib/goal";
 import {
   calibrateMovePrefWeights,
   diagnoseCause,
@@ -92,10 +92,10 @@ import {
   STYLE_PREF_WEIGHT,
   type CauseBaseline,
   type MovePrefWeights,
-} from "./grounding";
-import { bufferUrgency, isBufferLow } from "./buffer";
-import { formatMinutes } from "./format";
-import { computePriority } from "./priority";
+} from "@/lib/grounding";
+import { bufferUrgency, isBufferLow } from "@/lib/buffer";
+import { formatMinutes } from "@/lib/format";
+import { computePriority } from "@/lib/priority";
 import {
   dayCapacities,
   daySlackHours,
@@ -104,7 +104,7 @@ import {
   type DependencyEdge,
   type ScheduleDay,
   type SchedulableTask,
-} from "./schedule";
+} from "@/lib/schedule";
 import {
   deployableMinutes,
   earliestAchievableDeadline,
@@ -117,7 +117,7 @@ import {
   skillRecoveryMoves,
   type CandidateTask,
   type ForecastOptions,
-} from "./forecast";
+} from "@/lib/forecast";
 import {
   buildGlobalPlan,
   detectConflicts,
@@ -127,7 +127,7 @@ import {
   triageCandidates,
   type AllocTask,
   type GlobalPlan,
-} from "./allocate";
+} from "@/lib/allocate";
 import {
   ARRANGE_WEIGHTS,
   arrangementScore,
@@ -141,7 +141,7 @@ import {
   type ComfortSmoothResult,
   type GatedReorderResult,
   type WindowProfile,
-} from "./arrange";
+} from "@/lib/arrange";
 import {
   rollDecision,
   planRollKind,
@@ -153,34 +153,34 @@ import {
   type RollContext,
   type RollDecisionResult,
   type CalibratedHysteresis,
-} from "./rolling";
+} from "@/lib/rolling";
 import {
   SAMPLE_ACTIVITIES,
   SAMPLE_ENTRIES,
   SAMPLE_GOAL_CRITERIA,
   SAMPLE_PROJECTS,
   sampleActivityCompletions,
-} from "./sample-data";
+} from "@/lib/sample-data";
 import {
   currentWeekOwedDates,
   recurringAllocTasksForToday,
   recurringStateFor,
   spliceRecurringIntoOrder,
   RECURRING_LANE_ID,
-} from "./recurring";
+} from "@/lib/recurring";
 import {
   areaWeight,
   normalizeValueModel,
   DEFAULT_VALUE_MODEL,
   type RecoveryStyle,
   type ValueModel,
-} from "./value-model";
+} from "@/lib/value-model";
 import {
   normalizeWindowAvailability,
   windowShareOverride,
   EMPTY_WINDOW_AVAILABILITY,
   type WindowAvailability,
-} from "./window-availability";
+} from "@/lib/window-availability";
 import {
   forecastOptions,
   drainAsCommitments,
@@ -190,15 +190,13 @@ import {
   SKILL_TASK_PREFIX,
   type AllocContext,
   type ResolveInput,
-} from "./portfolio-state";
-import { getRequestClient } from "./db/shim";
-import { isDbConfigured } from "./db/pool";
+} from "@/lib/portfolio-state";
+import { getRequestClient } from "@/lib/db/shim";
+import { isDbConfigured } from "@/lib/db/pool";
 
-// Central data layer.
-// Uses PostgreSQL when configured; otherwise an in-memory store seeded with
-// sample data so the app is fully demoable without any backend setup.
-// Every query runs through a request-scoped client carrying the user's session,
-// so Row Level Security scopes reads and writes to that user.
+// Central data layer. Postgres when configured, otherwise an in-memory store
+// seeded with sample data so the app demos without a backend. Every query goes
+// through a request-scoped client carrying the session, so RLS scopes it.
 
 export { isDbConfigured };
 
@@ -213,36 +211,11 @@ async function currentUserId(supabase: RequestClient): Promise<string> {
   return user.id;
 }
 
-// --- Unwrapping a Supabase result -------------------------------------------
-//
-// Every query in this file - read or write - is unwrapped through `mustOk` /
-// `mustRows` / `mustOne`, all of which throw on `error`. Nothing here reaches for
-// `data` on its own, because taking the whole response as the argument is what
-// makes dropping `error` unrepresentable rather than merely discouraged.
-//
-// This matters more here than it would elsewhere. The calibration layer is built
-// so that NO DATA means FALL BACK TO THE PRIOR, bit-identically. That no-regret
-// property is deliberate, but it also means a failed query and an honestly empty
-// table produce the same dials. A read that swallowed its error was therefore
-// indistinguishable from a table with nothing in it yet: the query fails, the
-// caller sees `[]`, the weights sit at their documented defaults, and the UI says
-// a confident "no decisions yet". `move_choices` shipped exactly that way - the
-// table did not exist in the live database, and nothing anywhere looked wrong.
-//
-// So the DEFAULT is: a read failure is an exception, never an empty list. Two
-// narrow cases degrade instead, and both do it OUT LOUD (they log; the original
-// bug was silence), never by swallowing:
-//
-//   1. Soft-cap pruning (`bestEffortPrune`) - the row the caller just appended is
-//      the contract, and the cap is re-enforced on the next append.
-//   2. Terminal-display reads (`bestEffortRows`) - a read whose result is only
-//      rendered and never flows back into a forecast, strategy, calibration dial,
-//      undo/restore, or a gated write. The test is exactly that: if an empty result
-//      would corrupt a NUMBER or a DECISION, it throws; if it would only thin a
-//      panel, it degrades. This is what lets one pathological table (the
-//      `move_choices` scenario: broken while its neighbours are fine) drop a single
-//      audit panel instead of felling a whole decision page. A real outage still
-//      takes the decision reads - and with them the page - down, which is correct.
+// Every query here unwraps through mustOk/mustRows/mustOne, which throw on error.
+// A read failure has to be an exception, not an empty list: calibration falls back
+// to priors when there's no data, so a swallowed error looks identical to an empty
+// table. That's how move_choices shipped broken for weeks with nothing looking wrong.
+// bestEffortRows/bestEffortPrune are the two narrow exceptions, and they log.
 
 /** A settled PostgREST response: `.select()`, `.insert()`, `.update()`, `.delete()`. */
 interface PostgrestResult {
@@ -261,21 +234,15 @@ function mustRows<T>(res: PostgrestResult, what: string): T[] {
   return (res.data as T[] | null) ?? [];
 }
 
-/** The row from a `.maybeSingle()` read, or throw. `null` means genuinely absent - 
+/** The row from a `.maybeSingle()` read, or throw. `null` means genuinely absent -
  *  the one place a nullish `data` is a fact about the table and not about the query. */
 function mustOne<T>(res: PostgrestResult, what: string): T | null {
   mustOk(res, what);
   return (res.data as T | null) ?? null;
 }
 
-/**
- * Rows from a TERMINAL-DISPLAY read: on error, log and fall back to empty rather
- * than throw. Use this ONLY for a read whose result is purely rendered - never fed
- * to a forecast, strategy, calibration dial, undo/restore, or a gated write. For
- * anything decision-bearing use `mustRows`; degrading those is the silent-revert
- * bug this whole file exists to kill. The log is mandatory: degrade, but never
- * silently - an operator must still see that the read failed.
- */
+/** Rows for a display-only read: log and return [] on error. Never use for anything
+ *  that feeds a forecast, calibration dial, undo or gated write. */
 function bestEffortRows<T>(res: PostgrestResult, what: string): T[] {
   if (res.error) {
     console.error(`${what} read failed (degraded to empty, display-only):`, res.error.message);
@@ -284,16 +251,8 @@ function bestEffortRows<T>(res: PostgrestResult, what: string): T[] {
   return (res.data as T[] | null) ?? [];
 }
 
-/**
- * Run a soft-cap prune, logging and swallowing any failure. Deliberate, like
- * `bestEffortRows`: the row the caller just appended is the contract, the cap is
- * re-enforced on the next append, and a transient prune failure must never surface
- * on the user's action.
- *
- * The contrast with the reads is the whole point. There, swallowing turned a table
- * that did not exist into a table that looked empty. Here, nothing downstream can
- * observe the difference between a pruned and an unpruned history.
- */
+/** Soft-cap prune, logging and swallowing failures. The row we just appended is the
+ *  contract; the cap gets re-enforced on the next append. */
 async function bestEffortPrune(
   table: string,
   prune: () => Promise<void>,
@@ -309,9 +268,7 @@ async function bestEffortPrune(
 
 interface MemDB {
   projects: Goal[];
-  /** Definition-of-done criteria, keyed by goal_id on each row. */
   goalCriteria: GoalCriterion[];
-  /** Skill-graph nodes for learning goals, keyed by goal_id on each row. */
   skillNodes: SkillNode[];
   skillTaskLinks: SkillTaskLink[];
   entries: Entry[];
@@ -322,32 +279,27 @@ interface MemDB {
   availability: Availability[];
   overrides: AvailabilityOverride[];
   commitments: Commitment[];
-  /** Recurring activities (routines & goals) - the whole-life sources. */
   recurringActivities: RecurringActivity[];
   /** Logged sessions/skips of recurring activities - the completion log. */
   activityCompletions: ActivityCompletion[];
-  /** Real work sessions - the local when-signal the velocity loop accrues (S2). */
   workSessions: WorkSession[];
   /** Whether the pit-wall strategist auto-applies obvious triage (vs. surfacing it). */
   autoStrategy: boolean;
-  /** The user's value model (importance weights + recovery style), or null => default. */
   valueModel: ValueModel | null;
-  /** Explicit per-window availability override (S3b Phase 4), or null => derived share. */
   windowAvailability: WindowAvailability | null;
-  /** The cached portfolio strategy (Phase 4), or null until first generated. */
   portfolioStrategy: PortfolioStrategy | null;
-  /** Applied strategy bundles, newest-first - the plan version history (§1.3). */
+  /** Applied strategy bundles, newest-first - the plan version history. */
   planVersions: PlanVersion[];
-  /** The plan the user is currently following - the rolling-horizon committed row
-   *  (S3c-1), or null until first committed. */
+ /** The plan the user is currently following - the rolling-horizon committed row
+  * or null until first committed. */
   committedPlan: CommittedPlan | null;
   /** Retained automatic rolls of the committed plan, newest-first - the passive-roll
-   *  history (S3c-2), capped at `PLAN_ROLL_CAP`. */
+   *  history, capped at `PLAN_ROLL_CAP`. */
   planRolls: PlanRoll[];
-  /** Captured drag-to-reorder preference pairs, newest-first - the 🔴-tier calibration
-   *  signal (S3c-5), capped at `PLAN_REORDER_CAP`. */
+  /** Captured drag-to-reorder preference pairs, newest-first - the calibration
+   *  signal, capped at `PLAN_REORDER_CAP`. */
   planReorders: PlanReorder[];
-  /** Captured offered-vs-kept move slates, newest-first - the 🟠-tier calibration
+  /** Captured offered-vs-kept move slates, newest-first - the calibration
    *  signal (STYLE/CAUSE pref weights), capped at `MOVE_CHOICE_CAP`. */
   moveChoices: MoveChoice[];
   /** Attempts at the queue-backed LLM jobs, newest-first - what the pending UI
@@ -397,7 +349,6 @@ function memDB(): MemDB {
   return g.__taskbuddyDB;
 }
 
-/** Today as an ISO `YYYY-MM-DD` date. */
 function todayISO(): string {
   return new Date().toISOString().slice(0, 10);
 }
@@ -426,30 +377,19 @@ interface AssembledEntry {
 
 export interface AssembleOptions {
   kind?: EntryKind;
-  /**
-   * Life-area applied to every extracted task (Today-page tabs). When omitted,
-   * the area the extractor suggests for the entry is used.
-   */
+ /** Life-area for every extracted task. Falls back to whatever the extractor suggests. */
   area?: string;
   projectId?: string | null;
-  /**
-   * When true and no explicit project is given, attach the entry to the
-   * project the extractor suggests - reusing an existing project of that name
-   * or creating a new one.
-   */
+ /** With no explicit project, attach to the one the extractor suggests, reusing an
+  * existing project of that name or creating it. */
   autoProject?: boolean;
   parentEntryId?: string | null;
   status?: EntryStatus;
   createdAt?: string;
 }
 
-/**
- * Runs the full pipeline on raw input:
- * extract -> score priority -> resolve dependencies.
- * Every row is assigned a UUID up front so it can be persisted directly. The
- * recommended schedule is *not* part of this - it's a derived view computed on
- * read from live tasks + availability (see `getEntrySchedule`).
- */
+/** extract -> score priority -> resolve dependencies. UUIDs are assigned up front so
+ *  rows persist directly. The schedule isn't here, it's derived on read. */
 export async function assembleEntry(
   rawInput: string,
   opts: AssembleOptions = {},
@@ -458,10 +398,8 @@ export async function assembleEntry(
   const createdAt = opts.createdAt ?? new Date().toISOString();
   const entryId = crypto.randomUUID();
 
-  // When the project is left to TaskBuddy, fetch existing projects so the
-  // extractor can reuse one by name and so a suggestion can be resolved below.
-  // Skipped otherwise - notably during seeding, where listGoals() would
-  // re-enter ensureSeeded().
+  // Only when the project is left to us: the extractor needs existing projects to reuse
+  // one by name. Skipped during seeding, where listGoals would re-enter ensureSeeded.
   const resolveProject = opts.autoProject && !opts.projectId;
   const projects = resolveProject ? await listGoals() : [];
   const { result } = await extractEntry(rawInput, kind, {
@@ -640,7 +578,6 @@ export async function getGoal(id: string): Promise<Goal | null> {
   return memDB().projects.find((p) => p.id === id) ?? null;
 }
 
-/** Reclassify a goal as a project or a learning goal. */
 export async function setGoalKind(id: string, kind: GoalKind): Promise<void> {
   if (isDbConfigured()) {
     const supabase = await getRequestClient();
@@ -657,7 +594,6 @@ export async function setGoalKind(id: string, kind: GoalKind): Promise<void> {
 
 // --- Definition of done (goal criteria) -------------------------------------
 
-/** A goal's definition-of-done criteria, in display order. */
 export async function listGoalCriteria(
   goalId: string,
 ): Promise<GoalCriterion[]> {
@@ -678,7 +614,6 @@ export async function listGoalCriteria(
     .sort((a, b) => a.sort_index - b.sort_index);
 }
 
-/** Append a new (unmet) criterion to a goal's definition of done. */
 export async function addGoalCriterion(
   goalId: string,
   text: string,
@@ -706,10 +641,6 @@ export async function addGoalCriterion(
   }
 }
 
-/**
- * Mark a criterion met (at a given confidence) or unmet. Clearing `met` also
- * clears the recorded confidence.
- */
 export async function setGoalCriterionMet(
   id: string,
   met: boolean,
@@ -732,7 +663,6 @@ export async function setGoalCriterionMet(
   if (row) Object.assign(row, patch);
 }
 
-/** Remove a criterion from a goal's definition of done. */
 export async function removeGoalCriterion(id: string): Promise<void> {
   if (isDbConfigured()) {
     const supabase = await getRequestClient();
@@ -747,11 +677,8 @@ export async function removeGoalCriterion(id: string): Promise<void> {
   db.goalCriteria = db.goalCriteria.filter((c) => c.id !== id);
 }
 
-/**
- * Record how a scope-cutting recovery move degraded a criterion (§5 grounding
- * gate check 2). The original `text` is left intact; `degraded_note` carries the
- * compromise (e.g. "now: managed provider, no SSO"). Passing null clears it.
- */
+/** Record how a scope cut degraded a criterion. `text` stays intact; `degraded_note`
+ * carries the compromise ("now: managed provider, no SSO"). null clears it. */
 export async function setGoalCriterionDegraded(
   id: string,
   note: string | null,
@@ -789,7 +716,6 @@ export async function listAllGoalCriteria(): Promise<GoalCriterion[]> {
 
 // --- Skill graph (learning-goal decomposer) ---------------------------------
 
-/** A learning goal's skill nodes, oldest-first (already in graph order). */
 export async function listSkillNodes(goalId: string): Promise<SkillNode[]> {
   if (isDbConfigured()) {
     const supabase = await getRequestClient();
@@ -888,7 +814,6 @@ export async function insertSuggestedLinks(
   return created;
 }
 
-/** Confirm or dismiss one proposed link. */
 export async function setSkillTaskLinkStatus(
   linkId: string,
   status: SkillTaskLinkStatus,
@@ -906,11 +831,8 @@ export async function setSkillTaskLinkStatus(
   if (link) link.status = status;
 }
 
-/**
- * Persist a freshly decomposed skill graph for a goal, replacing any prior plan.
- * Maps the decomposer's `key` slugs to UUIDs so `prerequisites` becomes a graph
- * of real ids (exactly how task `depends_on` keys are wired in `assembleEntry`).
- */
+/** Persist a decomposed skill graph, replacing any prior plan. Maps the decomposer's
+ * `key` slugs to UUIDs so `prerequisites` becomes a graph of real ids. */
 export async function replaceSkillNodes(
   goalId: string,
   skills: ExtractedSkill[],
@@ -960,10 +882,8 @@ export async function replaceSkillNodes(
   db.skillNodes.push(...nodes);
 }
 
-/**
- * Mark a skill attained (at a confidence) or not-yet. Clearing attainment also
- * clears the recorded confidence and timestamp - mirrors task completion.
- */
+/** Mark a skill attained (at a confidence) or not. Clearing also clears confidence +
+ * timestamp, mirroring task completion. */
 export async function setSkillNodeAttained(
   id: string,
   attained: boolean,
@@ -987,11 +907,6 @@ export async function setSkillNodeAttained(
   if (row) Object.assign(row, patch);
 }
 
-/**
- * Park a skill node out of the current deadline push, or restore it (the
- * `defer_skill` recovery move + its Undo). Reversible - mirrors task deferral;
- * clearing it also clears the timestamp.
- */
 export async function setSkillNodeDeferred(
   id: string,
   deferred: boolean,
@@ -1013,13 +928,9 @@ export async function setSkillNodeDeferred(
   if (row) Object.assign(row, patch);
 }
 
-/**
- * Park (or restore) one pit-wall triage id, routed to the right store: a
- * `skill:<nodeId>` lane is a learning goal's skill node with no task row, so it
- * must go through `setSkillNodeDeferred`; every other id is a real task deferral.
- * The single router both triage apply surfaces share - Today's `applyTriageAction`
- * and the Strategy page's `triage` move - so a shed skill lane always sticks.
- */
+/** Park/restore one triage id. A `skill:<nodeId>` lane has no task row so it goes
+ *  through setSkillNodeDeferred; everything else is a task deferral. Both triage
+ *  surfaces route through here or a shed skill lane silently doesn't stick. */
 export async function setTriageItemDeferred(
   id: string,
   deferred: boolean,
@@ -1056,11 +967,8 @@ export async function createDraft(
   return assembled.entry.id;
 }
 
-/**
- * Finalise a draft: drop the declined tasks, apply the filing the user
- * confirmed in the review step (category, project, follow-up), and flip the
- * entry to active. The schedule is derived on read, so nothing to rebuild here.
- */
+/** Finalise a draft: drop declined tasks, apply the confirmed filing, flip to active.
+ * The schedule is derived on read, so there's nothing to rebuild. */
 export async function confirmDraft(
   entryId: string,
   declinedTaskIds: string[],
@@ -1137,7 +1045,6 @@ export async function confirmDraft(
   entry.parent_entry_id = parentEntryId;
 }
 
-/** Delete a draft entirely (used when the user discards it during review). */
 export async function discardDraft(entryId: string): Promise<void> {
   if (isDbConfigured()) {
     const supabase = await getRequestClient();
@@ -1217,11 +1124,8 @@ export async function getEntry(id: string): Promise<EntryDetail | null> {
   };
 }
 
-/**
- * The recommended schedule for an entry, derived live from its open tasks +
- * current availability. Multi-day, anchored at today; never persisted, so it
- * always reflects the latest estimates and time budget.
- */
+/** Recommended schedule for an entry, derived live from open tasks + availability.
+ * Never persisted, so it always reflects the latest estimates. */
 export async function getEntrySchedule(
   entry: EntryDetail,
 ): Promise<ScheduleDay[]> {
@@ -1250,7 +1154,6 @@ export async function getEntrySchedule(
   );
 }
 
-/** All tasks belonging to active (non-draft) entries. */
 export async function listAllTasks(): Promise<Task[]> {
   if (isDbConfigured()) {
     const supabase = await getRequestClient();
@@ -1277,7 +1180,6 @@ export async function listAllTasks(): Promise<Task[]> {
   return db.tasks.filter((t) => !draftIds.has(t.entry_id));
 }
 
-/** All dependency edges belonging to active (non-draft) entries. */
 export async function listAllDependencies(): Promise<TaskDependency[]> {
   if (isDbConfigured()) {
     const supabase = await getRequestClient();
@@ -1315,7 +1217,7 @@ export async function updateTask(
       | "completion_confidence"
       | "completed_at"
       // Blocker-resolution provenance (set by a resolve_blocker cascade, cleared on
-      // reopen/undo). §5.6 slice 6b.
+      // reopen/undo). slice 6b.
       | "resolved_by"
       // Reshaped in place by the strategist's scope-down move.
       | "title"
@@ -1406,7 +1308,6 @@ async function persistSupabase(a: AssembledEntry): Promise<void> {
 
 // --- Time budget ------------------------------------------------------------
 
-/** Set (or clear) a project's deadline - the forecast's finish line. */
 export async function setProjectDeadline(
   projectId: string,
   deadline: string | null,
@@ -1439,7 +1340,6 @@ export async function getAvailability(): Promise<Availability[]> {
   return mergeAvailability(memDB().availability);
 }
 
-/** Upsert one or more weekdays of the availability template. */
 export async function setAvailability(
   rows: { weekday: number; hours: number }[],
 ): Promise<void> {
@@ -1468,12 +1368,8 @@ export async function setAvailability(
   }
 }
 
-/**
- * The pit-wall automation mode. On = auto applies the obvious low-value triage
- * itself and escalates only genuine ties; off = surface every option, never
- * auto-apply (locked decision #3). Off by default - the conservative choice, so
- * a new user is never surprised by tasks the strategist deferred on its own.
- */
+/** Pit-wall automation. On = auto-apply obvious low-value triage, escalate ties.
+ *  Off by default so nothing gets deferred behind the user's back. */
 export async function getAutoStrategy(): Promise<boolean> {
   if (isDbConfigured()) {
     const supabase = await getRequestClient();
@@ -1487,7 +1383,6 @@ export async function getAutoStrategy(): Promise<boolean> {
   return memDB().autoStrategy;
 }
 
-/** Set the pit-wall automation mode (one row per user, upserted). */
 export async function setAutoStrategy(value: boolean): Promise<void> {
   if (isDbConfigured()) {
     const supabase = await getRequestClient();
@@ -1507,7 +1402,6 @@ export async function setAutoStrategy(value: boolean): Promise<void> {
   memDB().autoStrategy = value;
 }
 
-/** The user's value model - importance weights + recovery style. Defaults when unset. */
 export async function getValueModel(): Promise<ValueModel> {
   if (isDbConfigured()) {
     const supabase = await getRequestClient();
@@ -1524,7 +1418,6 @@ export async function getValueModel(): Promise<ValueModel> {
   return memDB().valueModel ?? { ...DEFAULT_VALUE_MODEL, areaWeights: {} };
 }
 
-/** Persist the value model (one row per user, upserted). Input is re-normalized. */
 export async function setValueModel(model: ValueModel): Promise<void> {
   const clean = normalizeValueModel(model);
   if (isDbConfigured()) {
@@ -1545,7 +1438,7 @@ export async function setValueModel(model: ValueModel): Promise<void> {
   memDB().valueModel = clean;
 }
 
-/** The user's explicit per-window availability (S3b Phase 4), or the unset default
+/** The user's explicit per-window availability, or the unset default
  *  (all-zero weights ⇒ the derived share is used). */
 export async function getWindowAvailability(): Promise<WindowAvailability> {
   if (isDbConfigured()) {
@@ -1563,7 +1456,6 @@ export async function getWindowAvailability(): Promise<WindowAvailability> {
   return memDB().windowAvailability ?? EMPTY_WINDOW_AVAILABILITY;
 }
 
-/** Persist the per-window availability (one row per user, upserted). Re-normalized. */
 export async function setWindowAvailability(avail: WindowAvailability): Promise<void> {
   const clean = normalizeWindowAvailability(avail);
   if (isDbConfigured()) {
@@ -1584,13 +1476,10 @@ export async function setWindowAvailability(avail: WindowAvailability): Promise<
   memDB().windowAvailability = clean;
 }
 
-// --- Portfolio strategy cache (Phase 4) -------------------------------------
+// --- Portfolio strategy cache -------------------------------------
 
-/**
- * The cached portfolio strategy for the signed-in user, or null if none has been
- * generated. The Today load path reads this (never the generator) and compares
- * its `fingerprint` to the current situation to decide fresh vs. stale.
- */
+/** The cached portfolio strategy, or null. The Today load path reads this, never the
+ * generator, and compares `fingerprint` to decide fresh vs stale. */
 export async function getCachedStrategy(): Promise<PortfolioStrategy | null> {
   if (isDbConfigured()) {
     const supabase = await getRequestClient();
@@ -1604,7 +1493,6 @@ export async function getCachedStrategy(): Promise<PortfolioStrategy | null> {
   return memDB().portfolioStrategy;
 }
 
-/** Persist the freshly generated portfolio strategy (one row per user, upserted). */
 export async function setCachedStrategy(
   strategy: PortfolioStrategy,
 ): Promise<void> {
@@ -1631,15 +1519,10 @@ export async function setCachedStrategy(
 
 // --- Asynchronous job runs (the queue-backed LLM path) ----------------------
 //
-// The bookkeeping that makes "the Server Action returned before the work
-// finished" survivable. Three actions publish an EventBridge event and return;
-// these rows are the only thing that lets the browser tell "queued" from
-// "nothing happened", and the only place a worker's failure can surface at all
-// (the worker has no render pass and no way to talk to a page).
-//
-// Written from BOTH runtimes: the Server Action creates the row, the SQS worker
-// settles it. Both reach the same RLS-scoped client - one through the session
-// cookie, one through `runAsUser` - so no function here takes a user id.
+// Three actions publish an EventBridge event and return before the work finishes.
+// These rows are the only way the browser tells "queued" from "nothing happened",
+// and the only place a worker failure can surface at all. Written from both
+// runtimes (action creates, SQS worker settles), both RLS-scoped, so no user id.
 
 interface JobRunRow {
   id: string;
@@ -1655,7 +1538,6 @@ interface JobRunRow {
 const JOB_RUN_COLUMNS =
   "id, type, subject_id, status, result, error, created_at, updated_at";
 
-/** Soft cap on retained job rows per user; older ones are pruned past this. */
 const JOB_RUN_CAP = 50;
 
 function toJobRun(row: JobRunRow): JobRun {
@@ -1671,16 +1553,9 @@ function toJobRun(row: JobRunRow): JobRun {
   };
 }
 
-/**
- * The newest job run of `type` for `subjectId`, whatever its state.
- *
- * The subject match is done in SQL, via `.isNull()` for the portfolio-wide case.
- * Filtering it in JS instead would mean reading a bounded page of rows and
- * hoping the one that matters is inside it - and it is not always: a job that
- * is genuinely still running sinks below any LIMIT as soon as enough jobs are
- * started after it, at which point the page shows an idle button for work that
- * is still going and the enqueue collides with the unique index.
- */
+/** Newest job run of `type` for `subjectId`, any state. Subject match is in SQL via
+ *  .isNull - filtering in JS means a long-running job sinks below the LIMIT and the
+ *  page shows an idle button for work that's still going. */
 export async function latestJobRun(
   type: string,
   subjectId: string | null = null,
@@ -1703,7 +1578,6 @@ export async function latestJobRun(
   );
 }
 
-/** One job run by id, or null. The read the poll loop makes. */
 export async function getJobRun(id: string): Promise<JobRun | null> {
   if (isDbConfigured()) {
     const supabase = await getRequestClient();
@@ -1721,16 +1595,9 @@ export async function getJobRun(id: string): Promise<JobRun | null> {
   return memDB().jobRuns.find((r) => r.id === id) ?? null;
 }
 
-/**
- * The job of `type` for `subjectId` that is still expected to finish, or null.
- *
- * "Still expected" is not the same as "not terminal". A row can be stranded:
- * the bus-to-queue delivery can fail into its own DLQ without a worker ever
- * seeing it, and a worker killed by its function timeout leaves a `running` row
- * with nobody left to settle it. `isJobAbandoned` is what stops either case from
- * pinning a button forever, and it is the reason the enqueue path below can
- * always make progress.
- */
+/** The job still expected to finish, or null. Not the same as "not terminal": a row
+ *  can be stranded by a bus-to-queue DLQ drop or a worker killed on timeout, so
+ *  isJobAbandoned is what keeps those from pinning a button forever. */
 export async function activeJobRun(
   type: string,
   subjectId: string | null = null,
@@ -1740,18 +1607,10 @@ export async function activeJobRun(
   return run;
 }
 
-/**
- * Take the one live slot for (type, subject), creating a row to publish against.
- *
- * Returns the EXISTING run when one is already in flight, rather than starting a
- * second copy: every one of these jobs is a billed model call, and the strategy
- * refresh in particular is fired automatically on mount by two different pages.
- * `reused: true` tells the caller not to publish.
- *
- * A stale live row is settled as `failed` first, so an abandoned job can never
- * permanently block its own retry - the partial unique index in 01_schema.sql
- * would otherwise reject the replacement insert.
- */
+/** Take the one live slot for (type, subject). Returns the EXISTING run if one is in
+ *  flight rather than starting a second billed model call (the strategy refresh fires
+ *  on mount from two pages); `reused: true` means don't publish. A stale live row is
+ *  failed first, otherwise the partial unique index rejects the replacement. */
 export async function startJobRun(
   type: string,
   subjectId: string | null = null,
@@ -1791,10 +1650,9 @@ export async function startJobRun(
       updated_at: run.updatedAt,
     });
     if (res.error) {
-      // Two clicks 50ms apart are two Lambda invocations that cannot see each
-      // other's uncommitted row, so the index - not the read above - is what
-      // actually enforces one live job. Losing that race is a success: the
-      // winner's row is the job.
+    // Two clicks 50ms apart are two Lambda invocations that can't see each other's
+    // uncommitted row, so the index - not the read above - enforces one live job.
+    // Losing the race is fine: the winner's row is the job.
       if (res.error.message.includes("job_runs_one_live_per_subject")) {
         const live = await latestJobRun(type, subjectId);
         if (live) return { run: live, reused: true };
@@ -1812,15 +1670,9 @@ export async function startJobRun(
   return { run, reused: false };
 }
 
-/**
- * Delete job rows older than the most recent `JOB_RUN_CAP` (soft cap).
- *
- * TERMINAL ROWS ONLY. Rank is by age, and a job that is genuinely still running
- * can fall past the cap if enough jobs were started after it - deleting it
- * would make its watcher's next poll return null, which the hook reads as "this
- * job no longer exists" and silently drops the pending state on work that is
- * still going.
- */
+/** Delete terminal job rows past JOB_RUN_CAP. Terminal only - rank is by age, and
+ *  deleting a still-running job makes its watcher's next poll return null, which the
+ *  hook reads as "gone" and drops the pending state on live work. */
 async function pruneJobRuns(supabase: RequestClient): Promise<void> {
   const older = mustRows<{ id: string; status: JobRunStatus }>(
     await supabase
@@ -1844,39 +1696,25 @@ async function pruneJobRuns(supabase: RequestClient): Promise<void> {
     );
 }
 
-/**
- * Move a job to `running`, and report whether this caller may run the body.
+/** Move a job to `running`; false means it's already settled. That happens on SQS
+ *  redelivery when the visibility timeout lapses just as the job completes, and
+ *  skipping matters because replaceSkillNodes wipes and rewrites the whole skill graph.
  *
- * FALSE MEANS "THIS JOB IS ALREADY SETTLED" - a redelivery of a message whose
- * work finished, which SQS produces whenever the visibility timeout lapses just
- * as a job completes. Skipping the body there matters because `replaceSkillNodes`
- * wipes and rewrites a goal's whole skill graph: re-running it would destroy
- * anything the user edited in between.
- *
- * IT DOES NOT MAKE REDELIVERY SAFE IN GENERAL, and the difference is worth being
- * precise about. A worker killed mid-job leaves the row `running`, which claims
- * successfully and re-runs the body - correctly, because that job never
- * finished. Nothing here can distinguish "died before doing the work" from
- * "died after committing it but before settling the row"; the first must retry
- * and the second must not, and they look identical. The narrow window this
- * leaves is the price of at-least-once delivery, not an oversight.
- */
+ *  This does NOT make redelivery safe in general. A worker killed mid-job leaves the
+ *  row `running`, claims fine and re-runs - correct, it never finished. But "died
+ *  before the work" and "died after committing, before settling" look identical here.
+ *  That window is the price of at-least-once. */
 export async function claimJobRun(id: string): Promise<boolean> {
   const run = await getJobRun(id);
   if (!run || isTerminalJobStatus(run.status)) return false;
-  // Clear the previous attempt's message on the way in. A row that failed once
-  // and succeeds on redelivery would otherwise keep its error text, and the
-  // card renders an error whenever one is present - a red failure underneath a
-  // result that actually worked.
+  // Clear the last attempt's message on the way in, or a row that failed once and then
+  // succeeded keeps its error text and the card renders red under a working result.
   await settleJobRun(id, "running", { error: null });
   return true;
 }
 
-/**
- * Write a job's state. The one writer for every transition after the insert, so
- * `updated_at` can never be forgotten - and `updated_at` is what the staleness
- * rule reads, which makes forgetting it look exactly like an abandoned job.
- */
+/** Write a job's state. The one writer for every post-insert transition, so `updated_at`
+ * can't be forgotten - and forgetting it looks exactly like an abandoned job. */
 export async function settleJobRun(
   id: string,
   status: JobRunStatus,
@@ -1906,15 +1744,10 @@ export async function settleJobRun(
   if (fields.error !== undefined) run.error = fields.error;
 }
 
-// --- Rolling-horizon committed plan (S3c-1) ---------------------------------
+// --- Rolling-horizon committed plan ---------------------------------
 
-/**
- * The plan the user is currently following (the rolling-horizon committed row), or null
- * if none has been committed yet. One row per user (mirrors the strategy cache). A row
- * whose `schemaVersion` doesn't match the current one is treated as absent - safe
- * invalidation to the no-regret fresh path rather than a mis-replay. Read on every load by
- * both read-path deciders (which persist nothing) and by the mutation-time roll.
- */
+/** The rolling-horizon committed plan, or null. One row per user. A schemaVersion
+ *  mismatch is treated as absent - safer to re-plan than mis-replay. */
 export async function getCommittedPlan(): Promise<CommittedPlan | null> {
   let plan: CommittedPlan | null;
   if (isDbConfigured()) {
@@ -1951,17 +1784,15 @@ export async function setCommittedPlan(plan: CommittedPlan): Promise<void> {
   memDB().committedPlan = plan;
 }
 
-// --- Passive-roll history (S3c-2) -------------------------------------------
+// --- Passive-roll history -------------------------------------------
 //
-// Each automatic roll of the committed plan (a material better-candidate or an anchor
-// advance, never a stay-put reload) is appended as a retained `PlanRoll` - the memory
-// that powers the "how my plan evolved" timeline and a roll-undo. A SIBLING to the plan
-// version history below, not an overload: a roll mutates no domain rows, only the
-// arrangement, so its undo restores a prior order THROUGH reconcile rather than writing
-// rows back (design §2). The arrangement lives in the `plan_order` jsonb column - `order`
-// is a reserved word that collides with PostgREST's `?order=` sort param.
+// Each automatic roll (a material better candidate or an anchor advance, never a
+// stay-put reload) is appended as a PlanRoll, powering the evolution timeline and
+// roll-undo. A roll mutates no domain rows, only the arrangement, so undo restores
+// an order through reconcile rather than writing rows back. Column is `plan_order`:
+// `order` collides with PostgREST's ?order= sort param.
 
-/** Soft cap on retained rolls per user; oldest pruned beyond this (design §3, mirrors
+/** Soft cap on retained rolls per user; oldest pruned beyond this (design, mirrors
  *  `PLAN_VERSION_CAP`). */
 const PLAN_ROLL_CAP = 50;
 
@@ -1997,7 +1828,6 @@ async function insertPlanRoll(roll: PlanRoll): Promise<void> {
   if (db.planRolls.length > PLAN_ROLL_CAP) db.planRolls.length = PLAN_ROLL_CAP;
 }
 
-/** Delete rolls older than the most recent `PLAN_ROLL_CAP` (soft cap). */
 async function prunePlanRolls(supabase: RequestClient): Promise<void> {
   const stale = mustRows<{ id: string }>(
     await supabase
@@ -2048,10 +1878,8 @@ function rowToPlanRoll(r: PlanRollRow): PlanRoll {
   };
 }
 
-/** The passive-roll history, newest-first (capped at `PLAN_ROLL_CAP`). Rows whose
- *  `schemaVersion` no longer matches the current arrangement shape are dropped - like a
- *  stale `CommittedPlan` they can't be replayed through reconcile, so they can neither be
- *  shown nor undone. Mirrors `listPlanVersions`. */
+/** Passive-roll history, newest first. Rows whose schemaVersion no longer matches the
+ * current arrangement shape are dropped: they can't be replayed through reconcile. */
 export async function listPlanRolls(): Promise<PlanRoll[]> {
   let rolls: PlanRoll[];
   if (isDbConfigured()) {
@@ -2090,7 +1918,7 @@ async function getPlanRoll(id: string): Promise<PlanRoll | null> {
 
 /** The roll immediately BEFORE `roll` by `rolledAt` for this user - the arrangement `roll`
  *  superseded, hence what its undo restores. Null when `roll` is the earliest retained (it was
- *  the first-ever commit): undo then falls back to a fresh build (design §4). */
+ *  the first-ever commit): undo then falls back to a fresh build. */
 async function priorPlanRoll(roll: PlanRoll): Promise<PlanRoll | null> {
   if (isDbConfigured()) {
     const supabase = await getRequestClient();
@@ -2129,15 +1957,11 @@ async function markPlanRollReverted(id: string): Promise<void> {
   if (r) r.revertedAt = revertedAt;
 }
 
-// --- Drag-to-reorder signal (S3c-5, design §6) -----------------------------
+// --- Drag-to-reorder signal ---------------------------------------
 //
-// The 🔴-tier calibration signal: when the user drags today's plan into an order that
-// is odds-neutral vs the solver's own order, we keep both orders as one revealed-
-// preference pair (`user_order ≻ app_order`). S4's `calibrateArrangeWeights` recomputes
-// the feature vector φ from the live feature functions over these two stored orders and
-// nudges `ArrangeWeights`. A SIBLING to the roll history above (mirrors it): dispose-side
-// bookkeeping, authors no odds. The jsonb columns are `app_order`/`user_order` - not a
-// bare `order`, a reserved word that collides with PostgREST's `?order=` sort param.
+// When the user drags today's plan into an odds-neutral order we keep both orders as
+// a revealed-preference pair (user ≻ app) and calibrateArrangeWeights nudges
+// ArrangeWeights off it. Columns are app_order/user_order, not `order` (PostgREST).
 
 /** Soft cap on retained reorder observations per user; oldest pruned beyond this
  *  (mirrors `PLAN_ROLL_CAP`). */
@@ -2172,7 +1996,6 @@ export async function insertPlanReorder(reorder: PlanReorder): Promise<void> {
     db.planReorders.length = PLAN_REORDER_CAP;
 }
 
-/** Delete reorders older than the most recent `PLAN_REORDER_CAP` (soft cap). */
 async function prunePlanReorders(supabase: RequestClient): Promise<void> {
   const stale = mustRows<{ id: string }>(
     await supabase
@@ -2215,10 +2038,8 @@ function rowToPlanReorder(r: PlanReorderRow): PlanReorder {
   };
 }
 
-/** The drag-to-reorder history, newest-first (capped at `PLAN_REORDER_CAP`). Rows whose
- *  `schemaVersion` no longer matches the current arrangement shape are dropped - like a
- *  stale `PlanRoll`, their stored orders can't be re-priced, so the calibrator skips
- *  them. Mirrors `listPlanRolls`. */
+/** Drag-to-reorder history, newest first. Stale-schema rows are dropped - their orders
+ * can't be re-priced, so the calibrator skips them. */
 export async function listPlanReorders(): Promise<PlanReorder[]> {
   let reorders: PlanReorder[];
   if (isDbConfigured()) {
@@ -2240,16 +2061,12 @@ export async function listPlanReorders(): Promise<PlanReorder[]> {
   );
 }
 
-// --- Offered-vs-kept move signal (step 5 slice 4 follow-on, limitation #3) ---
+// --- Offered-vs-kept move signal -------------------------------------------
 //
-// The 🟠 tier of the calibration cohort. `prefFor` sums a STYLE nudge and a CAUSE
-// nudge 1:1; nothing revealed whether that ratio is right, because `plan_versions`
-// keeps only the moves the user COMMITTED. Each row here keeps the whole slate the
-// strategist offered, flagged kept/declined, so `calibrateMovePrefWeights` can read
-// `kept ≻ declined` as a revealed preference over move families. A SIBLING to
-// `plan_reorders`: dispose-side bookkeeping, authors no odds, same cap and pruning.
+// prefFor sums a STYLE nudge and a CAUSE nudge 1:1 and nothing revealed whether that
+// ratio is right, because plan_versions only keeps moves the user COMMITTED. These
+// rows keep the whole offered slate flagged kept/declined so the ratio is learnable.
 
-/** Soft cap on retained choice observations per user (mirrors `PLAN_REORDER_CAP`). */
 const MOVE_CHOICE_CAP = 50;
 
 /** Append one offered-vs-kept observation and prune to the cap. Best-effort at the call
@@ -2279,7 +2096,6 @@ export async function insertMoveChoice(choice: MoveChoice): Promise<void> {
     db.moveChoices.length = MOVE_CHOICE_CAP;
 }
 
-/** Delete choices older than the most recent `MOVE_CHOICE_CAP` (soft cap). */
 async function pruneMoveChoices(supabase: RequestClient): Promise<void> {
   const stale = mustRows<{ id: string }>(
     await supabase
@@ -2342,20 +2158,16 @@ export async function listMoveChoices(): Promise<MoveChoice[]> {
   return choices.filter((c) => c.schemaVersion === MOVE_CHOICE_SCHEMA_VERSION);
 }
 
-// --- Plan version history (S1 step 3 / vision §1.3) -------------------------
+// --- Plan version history --------------------------------------------------
 //
-// Every applied strategy bundle is snapshotted as a `PlanVersion`: the committed
-// moves, the odds the user accepted, and a `restore` (prior row values + inserted
-// row ids). One snapshot per bundle ⇒ undo reverts the whole strategy at once.
-// `commitStrategyBundle` is the single server-side authority for *applying* a move
-// - the card routes every "Apply" through it, and each kind's snapshot + persist
-// live together in one `MOVE_SPECS` entry (S1 step 4), so the previewed odds and the
-// committed change can't drift.
+// Every applied strategy bundle is snapshotted: committed moves, accepted odds, and a
+// restore (prior row values + inserted ids). One snapshot per bundle, so undo reverts
+// the whole strategy at once. commitStrategyBundle is the only server-side authority
+// for applying a move.
 
-/** Soft cap on retained versions per user; oldest pruned beyond this (decision #3). */
+/** Soft cap on retained versions per user; oldest pruned beyond this. */
 const PLAN_VERSION_CAP = 50;
 
-/** Inserted-row ids returned by the recovery applies, so undo can delete them. */
 interface RecoveryInserts {
   insertedTaskIds: string[];
   insertedEntryIds: string[];
@@ -2375,7 +2187,6 @@ async function snapshotTaskFields(
   });
 }
 
-/** Batch-read tasks by id (current values) - for snapshotting + restore reads. */
 async function getTasksByIds(ids: string[]): Promise<Task[]> {
   if (ids.length === 0) return [];
   if (isDbConfigured()) {
@@ -2391,7 +2202,7 @@ async function getTasksByIds(ids: string[]): Promise<Task[]> {
 }
 
 /** Read a skill node's current attainment fields - the pre-image an `attain_skill`
- *  move snapshots so undo can revert it to unattained (§5.6). */
+ *  move snapshots so undo can revert it to unattained. */
 async function snapshotSkillNodeAttainment(
   id: string,
 ): Promise<(Partial<SkillNode> & { id: string })[]> {
@@ -2435,17 +2246,14 @@ async function snapshotSkillNodeDeferral(
   return [{ id, deferred: row.deferred, deferred_at: row.deferred_at }];
 }
 
-/** The FULL dependency rows where a task is the PREREQ (`depends_on_task_id ===
- *  blockerId`) - the edges a `resolve_blocker` cascade frees (§5.6 6b). Read from
- *  the LIVE active DAG (`listAllDependencies`) so the snapshot pre-image and the
- *  persist delete agree, an off-DAG/stale advisory id no-ops, and it mirrors the
- *  forecast arm's `deps.filter(depends_on_task_id !== blocker)` exactly. */
+/** Dependency rows where a task is the PREREQ - the edges a resolve_blocker cascade
+ * frees. Read from the LIVE DAG so the snapshot and the persist delete agree and a
+ * stale advisory id just no-ops. */
 async function getDependenciesByBlocker(blockerId: string): Promise<TaskDependency[]> {
   const all = await listAllDependencies();
   return all.filter((d) => d.depends_on_task_id === blockerId);
 }
 
-/** Delete dependency edges by id (supabase + memDB), mirroring `deleteTasks`. */
 async function deleteDependencies(ids: string[]): Promise<void> {
   if (ids.length === 0) return;
   if (isDbConfigured()) {
@@ -2462,7 +2270,7 @@ async function deleteDependencies(ids: string[]): Promise<void> {
   db.deps = db.deps.filter((d) => !set.has(d.id));
 }
 
-/** Re-insert FULL dependency rows - the undo of a `resolve_blocker` cascade (§5.6 6b).
+/** Re-insert FULL dependency rows - the undo of a `resolve_blocker` cascade.
  *  Re-inserting the ORIGINAL rows (same id/entry_id) restores DAG identity and
  *  re-satisfies whatever FK/RLS admitted them. Mirrors `deleteTasks` across stores. */
 async function insertDependencies(rows: TaskDependency[]): Promise<void> {
@@ -2479,38 +2287,31 @@ async function insertDependencies(rows: TaskDependency[]): Promise<void> {
   memDB().deps.push(...rows);
 }
 
-// --- Move spec registry (S1 step 4) ----------------------------------------
+// --- Move spec registry ----------------------------------------------------
 //
-// One `MoveSpec` per `StrategyMoveKind` co-locates that kind's two server-side DB
-// behaviors - the undo pre-image `snapshot` and the real `persist` - in a single
-// entry, so they can't silently drift apart as kinds evolve (before this they were
-// two separate switches ~60 lines apart, and `snapshot` has to capture exactly the
-// fields `persist` mutates or undo is wrong). Bundle apply-order is a cross-kind
-// policy, not a per-kind behavior, so it stays in `strategyApplyOrder`, not here.
+// One MoveSpec per kind, co-locating the undo pre-image `snapshot` with the real
+// `persist`. These used to be two switches ~60 lines apart and snapshot has to capture
+// exactly the fields persist mutates or undo is wrong.
 //
-// The forecast-domain twin of `persist` is the matching arm of `applyMoveToAlloc`
-// (lib/portfolio-state.ts) - it stays THERE because the live re-solve runs it
-// CLIENT-SIDE, so it can't share this `server-only` module (the deliberate step-1
-// split overrides the design's original single-object `MoveSpec`). The two halves
-// are bound only by the shared `StrategyMoveKind`: both this registry and
-// `applyMoveToAlloc` are exhaustive over it, so a new kind can't compile until it
-// has BOTH a forecast arm and a spec here. `persist` MUST encode the same effect its
-// forecast arm previews, or the odds the user accepts would be a lie (§0).
+// The forecast twin of `persist` is applyMoveToAlloc in portfolio-state.ts - it stays
+// there because the live re-solve runs it CLIENT-side and can't import this
+// server-only module. Both are exhaustive over StrategyMoveKind, so a new kind won't
+// compile without both halves. persist MUST match what its forecast arm previewed or
+// the odds the user accepted were a lie.
 
 /** Prior values of the rows one move mutates - its undo pre-image (id + only the
  *  fields that move's `persist` changes; restore writes exactly those back). */
 type MoveRowSnapshot = {
   tasks: (Partial<Task> & { id: string })[];
   goals: (Partial<Goal> & { id: string })[];
-  /** Prior attainment of skill nodes an `attain_skill` move flips (§5.6) - absent
+  /** Prior attainment of skill nodes an `attain_skill` move flips - absent
    *  for every other kind. */
   skillNodes?: (Partial<SkillNode> & { id: string })[];
-  /** FULL dependency rows a `resolve_blocker` cascade will DELETE (§5.6 6b) - captured
+  /** FULL dependency rows a `resolve_blocker` cascade will DELETE - captured
    *  as the pre-image so undo re-inserts the originals byte-identical; absent otherwise. */
   dependencies?: TaskDependency[];
 };
 
-/** The synthetic-row ids one move's `persist` inserted, so undo can delete them. */
 type MovePersistResult = Partial<
   Pick<RowSnapshot, "insertedTaskIds" | "insertedEntryIds" | "activityCompletionIds">
 >;
@@ -2540,12 +2341,9 @@ const MOVE_SPECS: { [K in StrategyMoveKind]: MoveSpec<K> } = {
     },
   },
   triage: {
-    // The batch may mix real tasks with a learning goal's sheddable skill lanes
-    // (`skill:<nodeId>`), so snapshot each id's pre-image from the right table - 
-    // task `deferred` for real ids, skill `deferred`/`deferred_at` for skill ids - 
-    // exactly the fields `persist` (via `setTriageItemDeferred`) mutates, so undo
-    // restores both. The restore loop is already field-aware (an entry carrying
-    // `deferred` un-parks via `setSkillNodeDeferred`).
+  // The batch mixes real tasks with sheddable skill lanes (`skill:<nodeId>`), so
+  // snapshot each id from the right table - task `deferred` vs skill
+  // `deferred`/`deferred_at`. The restore loop is field-aware.
     snapshot: async (p) => {
       const taskIds = p.taskIds.filter((id) => !id.startsWith(SKILL_TASK_PREFIX));
       const skillNodeIds = p.taskIds
@@ -2583,7 +2381,7 @@ const MOVE_SPECS: { [K in StrategyMoveKind]: MoveSpec<K> } = {
     },
   },
   resolve_blocker: {
-    // §5.6 6b - snapshot the blocker's done-fields + provenance AND the FULL edge rows
+     // 6b - snapshot the blocker's done-fields + provenance AND the FULL edge rows
     // the cascade will delete, so undo restores the task and re-inserts the exact edges.
     snapshot: async (p) => ({
       tasks: await snapshotTaskFields(
@@ -2594,11 +2392,10 @@ const MOVE_SPECS: { [K in StrategyMoveKind]: MoveSpec<K> } = {
       dependencies: await getDependenciesByBlocker(p.blockerTaskId),
     }),
     persist: async (p) => {
-      // Mark the blocker done (a check-in resolution is `self_assessed` - the invariant)
-      // + stamp the free-text provenance, then delete every edge INTO it. The edges are
-      // RE-DERIVED from the LIVE DAG here (never from the advisory `freedTaskIds`), so a
-      // stale entry simply no-ops - decision #8. Cascade is one-hop: a freed dependent
-      // becomes actionable but is NEVER auto-completed (the joint re-solve schedules it).
+    // Mark the blocker done (check-in resolutions are always self_assessed), stamp the
+    // provenance, then delete every edge into it. Edges are re-derived from the live
+    // DAG, never from the advisory freedTaskIds, so a stale entry no-ops. Cascade is
+    // one-hop: a freed dependent becomes actionable, never auto-completed.
       await updateTask(p.blockerTaskId, {
         status: "done",
         completion_confidence: p.confidence ?? "self_assessed",
@@ -2621,7 +2418,7 @@ const MOVE_SPECS: { [K in StrategyMoveKind]: MoveSpec<K> } = {
     persist: async (p) => {
       await updateTask(p.taskId, {
         status: "done",
-        // §5.6: provenance rides on the payload. A check-in "I finished X" carries
+        // provenance rides on the payload. A check-in "I finished X" carries
         // `self_assessed`; the strategist's own inference omits it → `inferred`.
         completion_confidence: p.confidence ?? "inferred",
         completed_at: new Date().toISOString(),
@@ -2655,10 +2452,8 @@ const MOVE_SPECS: { [K in StrategyMoveKind]: MoveSpec<K> } = {
     },
   },
   reschedule_skill: {
-    // Parks the whole milestone chain (`parkNodeIds`, which includes the descoped
-    // checkpoint). Snapshot each node's deferral pre-image so undo un-parks the exact
-    // set - the restore loop is already field-aware (an entry carrying `deferred`
-    // un-parks via `setSkillNodeDeferred`). Mirrors `triage`'s batch handling.
+  // Parks the whole milestone chain, descoped checkpoint included. Snapshot each node's
+  // pre-image so undo un-parks the exact set.
     snapshot: async (p) => ({
       tasks: [],
       goals: [],
@@ -2719,12 +2514,8 @@ const MOVE_SPECS: { [K in StrategyMoveKind]: MoveSpec<K> } = {
   },
 };
 
-/**
- * Look up a move's spec. TypeScript can't correlate the registry key with the
- * payload union (the known correlated-union limitation), so the looked-up spec is
- * widened to accept the full payload union at this single seam - sound because we
- * index `MOVE_SPECS` by the very `payload.kind` whose payload we then pass.
- */
+/** Look up a move's spec. TS can't correlate the registry key with the payload union,
+ *  so the spec is widened here - sound because we index by the payload's own kind. */
 function specFor(kind: StrategyMoveKind): MoveSpec<StrategyMoveKind> {
   return MOVE_SPECS[kind] as MoveSpec<StrategyMoveKind>;
 }
@@ -2736,14 +2527,9 @@ function strategyApplyOrder(a: StrategyMove, b: StrategyMove): number {
   return rank(a.payload.kind) - rank(b.payload.kind);
 }
 
-/**
- * Apply a strategy bundle and record it as a `PlanVersion`. (1) snapshot the prior
- * values of every row the moves will touch; (2) apply each move (deadline
- * reschedules last) capturing inserted ids; (3) persist the version. Returns the
- * version so the caller can offer an immediate Undo. `meta.odds*` are the previewed
- * numbers the user accepted (from the client re-solve) - informational, for the
- * history view.
- */
+/** Apply a bundle and record it as a PlanVersion: snapshot prior values, apply each
+ *  move (deadline reschedules last), persist the version. Returned so the caller can
+ *  offer Undo. meta.odds* are the numbers the user accepted, for the history view. */
 export async function commitStrategyBundle(
   moves: StrategyMove[],
   meta: { oddsBefore: number; oddsAfter: number; reason: string },
@@ -2756,7 +2542,7 @@ export async function commitStrategyBundle(
   const goalSnap = new Map<string, Partial<Goal> & { id: string }>();
   const skillSnap = new Map<string, Partial<SkillNode> & { id: string }>();
   // Dependency edges a resolve_blocker cascade deletes - deduped by edge id as a
-  // pre-image, so undo re-inserts each original exactly once (§5.6 6b).
+  // pre-image, so undo re-inserts each original exactly once.
   const depSnap = new Map<string, TaskDependency>();
   for (const move of ordered) {
     const { tasks, goals, skillNodes, dependencies } = await specFor(move.payload.kind).snapshot(move.payload, move);
@@ -2777,11 +2563,9 @@ export async function commitStrategyBundle(
     if (eff.activityCompletionIds) activityCompletionIds.push(...eff.activityCompletionIds);
   }
 
-  // Odds are informational (history display), but the columns are NOT NULL and
-  // `JSON.stringify(NaN/undefined)` → null - a degraded cache (no resolveInput, a
-  // non-finite combinedProbability) applied before auto-regen would otherwise throw
-  // on insert and kill the whole Apply. Coerce to a finite value so a commit never
-  // fails over a cosmetic number.
+  // Odds are display-only but the columns are NOT NULL, and JSON.stringify(NaN) → null.
+  // A degraded cache applied before auto-regen would throw on insert and kill the whole
+  // Apply, so coerce - a commit shouldn't fail over a cosmetic number.
   const safeOdds = (n: number) => (Number.isFinite(n) ? n : 0);
 
   const version: PlanVersion = {
@@ -2807,7 +2591,6 @@ export async function commitStrategyBundle(
   return version;
 }
 
-/** A plan_versions row (snake_case) ↔ the camelCase `PlanVersion` domain type. */
 interface PlanVersionRow {
   id: string;
   created_at: string;
@@ -2860,7 +2643,6 @@ async function insertPlanVersion(version: PlanVersion): Promise<void> {
     db.planVersions.length = PLAN_VERSION_CAP;
 }
 
-/** Delete versions older than the most recent `PLAN_VERSION_CAP` (soft cap). */
 async function prunePlanVersions(supabase: RequestClient): Promise<void> {
   const stale = mustRows<{ id: string }>(
     await supabase
@@ -2883,17 +2665,9 @@ async function prunePlanVersions(supabase: RequestClient): Promise<void> {
     );
 }
 
-/**
- * The plan version history, newest-first (capped at `PLAN_VERSION_CAP`).
- *
- * TERMINAL DISPLAY, so `bestEffortRows` (degrade + log), not `mustRows`: the only
- * consumer is the Strategy page's history timeline, and nothing reads this list back
- * into a number or a decision. The actual undo path reads the single row through
- * `getPlanVersion`, which still throws. So if `plan_versions` alone is unhealthy, the
- * timeline empties (and logs) instead of felling the whole Strategy page. Contrast
- * `listPlanRolls`, shown in the same timeline but load-bearing (four reconcile/undo
- * gathers consume it) - it throws.
- */
+/** Plan version history, newest first. Display-only, so bestEffortRows - if this table
+ *  alone is unhealthy the timeline empties instead of felling the Strategy page. The
+ *  undo path reads a single row via getPlanVersion, which still throws. */
 export async function listPlanVersions(): Promise<PlanVersion[]> {
   if (isDbConfigured()) {
     const supabase = await getRequestClient();
@@ -2941,11 +2715,8 @@ async function markPlanVersionReverted(id: string): Promise<void> {
   if (v) v.revertedAt = revertedAt;
 }
 
-/**
- * Revert one applied bundle whole (vision §8.2): write the snapshotted prior values
- * back, delete the synthetic rows the bundle inserted, and mark the version
- * reverted (it stays in history, struck through). No-op if already reverted.
- */
+/** Revert one applied bundle whole: write snapshotted values back, delete the rows it
+ * inserted, mark it reverted (stays in history, struck through). No-op if already done. */
 export async function undoPlanVersion(id: string): Promise<void> {
   const version = await getPlanVersion(id);
   if (!version || version.revertedAt) return;
@@ -2960,14 +2731,14 @@ export async function undoPlanVersion(id: string): Promise<void> {
   for (const goal of restore.goals) {
     if ("deadline" in goal) await setProjectDeadline(goal.id, goal.deadline ?? null);
   }
-  // Restore prior skill-node attainment (§5.6) / deferral (defer_skill) - each
+  // Restore prior skill-node attainment / deferral (defer_skill) - each
   // move snapshots only the fields it touched, so revert only those (an
   // attain_skill snapshot carries `attained`, a defer_skill one carries `deferred`).
   for (const n of restore.skillNodes ?? []) {
     if ("attained" in n) await setSkillNodeAttained(n.id, n.attained ?? false, n.attained_confidence ?? null);
     if ("deferred" in n) await setSkillNodeDeferred(n.id, n.deferred ?? false);
   }
-  // Re-insert the dependency edges a resolve_blocker cascade deleted (§5.6 6b) - the
+  // Re-insert the dependency edges a resolve_blocker cascade deleted - the
   // ORIGINAL rows, so the DAG is byte-identical. `?? []` for bundles persisted before
   // 6b (their jsonb `restore` has no `deletedDependencies` key).
   await insertDependencies(restore.deletedDependencies ?? []);
@@ -3028,7 +2799,6 @@ async function deleteActivityCompletions(ids: string[]): Promise<void> {
   db.activityCompletions = db.activityCompletions.filter((c) => !set.has(c.id));
 }
 
-/** Override the template for one specific date. */
 export async function setOverride(date: string, hours: number): Promise<void> {
   if (isDbConfigured()) {
     const supabase = await getRequestClient();
@@ -3051,7 +2821,6 @@ export async function setOverride(date: string, hours: number): Promise<void> {
   else db.overrides.push({ date, hours: Math.max(0, hours) });
 }
 
-/** Upcoming logged commitments (today onward). */
 export async function listCommitments(): Promise<Commitment[]> {
   const today = todayISO();
   if (isDbConfigured()) {
@@ -3077,15 +2846,10 @@ interface TimeBudget {
   commitments: Commitment[];
 }
 
-/**
- * Fold recurring activities' drain into the commitment set as synthetic
- * commitments - the SINGLE place recurring time-cost enters the budget (locked
- * invariant #1). Because every capacity consumer (`dayCapacities`,
- * `deployableMinutes`) subtracts commitment hours per date, the eaten time then
- * lands everywhere automatically. The agenda's synthetic recurring task is
- * display/order-only and must never be re-counted against capacity.
- */
-/** Recurring drain as synthetic `Commitment` rows (date + hours; the rest is cosmetic). */
+/** Recurring drain as synthetic Commitment rows - the single place recurring time-cost
+ *  enters the budget. Every capacity consumer subtracts commitment hours per date, so
+ *  it lands everywhere automatically. The agenda's synthetic recurring task is display
+ *  only and must never be counted against capacity again. */
 async function appendActivityDrain(budget: TimeBudget): Promise<TimeBudget> {
   const [activities, completions] = await Promise.all([
     listRecurringActivities(),
@@ -3130,14 +2894,12 @@ async function getRawTimeBudget(): Promise<TimeBudget> {
   };
 }
 
-/** Effective time-budget inputs for the forecast engine (recurring drain folded in). */
 async function getTimeBudget(): Promise<TimeBudget> {
   return appendActivityDrain(await getRawTimeBudget());
 }
 
 // --- Recurring activities (routines & goals) --------------------------------
 
-/** All recurring activities for the user (active and archived). */
 export async function listRecurringActivities(): Promise<RecurringActivity[]> {
   if (isDbConfigured()) {
     const supabase = await getRequestClient();
@@ -3155,7 +2917,6 @@ export async function listRecurringActivities(): Promise<RecurringActivity[]> {
   );
 }
 
-/** The full completion log for the user (all activities, all dates). */
 export async function listActivityCompletions(): Promise<ActivityCompletion[]> {
   if (isDbConfigured()) {
     const supabase = await getRequestClient();
@@ -3187,7 +2948,6 @@ export interface NewActivityInput {
   protected?: boolean;
 }
 
-/** Create a recurring activity. Streak habits (daily) default to protected. */
 export async function createRecurringActivity(
   input: NewActivityInput,
 ): Promise<string> {
@@ -3223,7 +2983,6 @@ export async function createRecurringActivity(
   return activity.id;
 }
 
-/** Patch a recurring activity (edit, protect toggle, or soft-archive). */
 export async function updateRecurringActivity(
   id: string,
   patch: Partial<
@@ -3266,7 +3025,6 @@ export async function updateRecurringActivity(
   return a;
 }
 
-/** Log a completed session for an activity on a date (defaults to today). */
 export async function logActivityCompletion(
   activityId: string,
   date?: string,
@@ -3293,16 +3051,10 @@ export async function logActivityCompletion(
   memDB().activityCompletions.push(row);
 }
 
-/**
- * Record one real work session - the local when-signal the velocity loop accrues
- * (OVERHAUL S2 slice B). `local` carries the CLIENT's local window/weekday/day (the
- * action runs server-side and can't read the browser clock), which resolves the
- * timezone gotcha. A session is task effort XOR a routine session.
- *
- * BEST-EFFORT by contract: this is pure telemetry accrual that must never regress
- * the completion that triggered it, so a failed insert is logged and swallowed - 
- * never thrown. Nothing reads these rows until slice C.
- */
+/** Record one work session - the local when-signal the velocity loop accrues. `local`
+ *  carries the CLIENT's window/weekday/day since the action can't read the browser
+ *  clock. Task effort XOR routine session. Best-effort: pure telemetry, and it must
+ *  never regress the completion that triggered it, so failures are logged not thrown. */
 export async function logWorkSession(input: {
   taskId?: string | null;
   activityId?: string | null;
@@ -3343,7 +3095,6 @@ export async function logWorkSession(input: {
   }
 }
 
-/** All work sessions, oldest-first - the slice-C velocity/energy reads' source. */
 export async function listWorkSessions(): Promise<WorkSession[]> {
   if (isDbConfigured()) {
     const supabase = await getRequestClient();
@@ -3359,11 +3110,8 @@ export async function listWorkSessions(): Promise<WorkSession[]> {
   return [...memDB().workSessions];
 }
 
-/**
- * Skip an activity's current instance for a date (defaults to today): resolves
- * that period's obligation - stops draining the budget and nagging - without
- * crediting a streak. Reversible via `unskipActivity`.
- */
+/** Skip an activity's current instance: resolves that period's obligation without
+ * crediting a streak. Reversible via unskipActivity. */
 export async function skipActivity(
   activityId: string,
   date?: string,
@@ -3390,7 +3138,6 @@ export async function skipActivity(
   memDB().activityCompletions.push(row);
 }
 
-/** Undo a skip (delete the skip rows for that activity + date). */
 export async function unskipActivity(
   activityId: string,
   date?: string,
@@ -3416,11 +3163,8 @@ export async function unskipActivity(
   );
 }
 
-/**
- * The derived state (status / streak / progress / due-today) of every active
- * recurring activity - the read the activities UI and the strategist consume.
- * Archived activities are excluded.
- */
+/** Derived state (status / streak / progress / due-today) of every active recurring
+ * activity. Archived ones excluded. */
 export async function getRecurringState(): Promise<RecurringState[]> {
   const [activities, completions] = await Promise.all([
     listRecurringActivities(),
@@ -3432,12 +3176,9 @@ export async function getRecurringState(): Promise<RecurringState[]> {
     .map((a) => recurringStateFor(a, completions, today));
 }
 
-/**
- * Skip an activity for the REST OF THIS WEEK - the apply behind a strategist
- * `skip_activity` move. Persists skip rows for exactly the current-week owed
- * instances the forecast probe freed, so the applied effect matches the shown
- * odds. Reversible by logging real sessions (or unskipping the dates).
- */
+/** Skip an activity for the rest of the week - the apply behind `skip_activity`.
+ *  Persists exactly the current-week owed instances the forecast probe freed, so the
+ *  effect matches the shown odds. */
 export async function skipActivityForWeek(activityId: string): Promise<string[]> {
   const [activities, completions] = await Promise.all([
     listRecurringActivities(),
@@ -3496,12 +3237,9 @@ function buildErrandsHoldingEntry(projectId: string): Entry {
   };
 }
 
-/**
- * The reserved deadline-less "Errands" project (and its holding entry) that
- * one-off errands attach to, created lazily on first use. An undeadlined project
- * still consumes the shared budget but receives no forecast probability - exactly
- * errand semantics - so errands reuse the whole task/agenda/defer machinery.
- */
+/** The reserved deadline-less "Errands" project, created lazily. An undeadlined
+ *  project consumes budget but gets no forecast probability, which is exactly errand
+ *  semantics, so errands reuse the whole task/agenda/defer machinery. */
 export async function getOrCreateErrandsProject(): Promise<{
   projectId: string;
   entryId: string;
@@ -3580,7 +3318,6 @@ export async function getOrCreateErrandsProject(): Promise<{
   return { projectId: proj.id, entryId: entry.id };
 }
 
-/** Create a one-off errand task (under the reserved Errands project). */
 export async function createErrandTask(
   title: string,
   dueDate?: string | null,
@@ -3643,19 +3380,12 @@ export async function createErrandTask(
 
 interface ForecastGather {
   projects: Goal[];
-  /** Open (not done, not deferred) tasks per project - the forecast input. */
   tasksByProject: Map<string, CandidateTask[]>;
-  /** All tasks per project (any status) - for divergence detection & sequencing. */
   allTasksByProject: Map<string, Task[]>;
-  /**
-   * A learning goal's unattained skill effort as synthetic work the ONE joint
-   * forecast reasons over (alloc tasks + prereq dep edges + remaining estimates).
-   * Keyed by goal id; only present for goals that have an open skill graph. This
-   * is how skill progress moves the odds (OVERHAUL §5.4 follow-on). Recovery's
-   * defer-moves deliberately ignore it - you can't yet "defer" a skill row.
-   */
+  /** A learning goal's unattained skill effort as synthetic work the joint forecast
+   *  reasons over. Keyed by goal id, only for goals with an open skill graph. Recovery's
+   *  defer-moves ignore it - you can't defer a skill row yet. */
   skillWorkByProject: Map<string, SkillWork>;
-  /** A goal's raw skill nodes (any state) - for the learning goal-cost read. */
   skillNodesByProject: Map<string, SkillNode[]>;
   /** A goal's definition-of-done criteria - for divergence detection & goal-cost. */
   criteriaByProject: Map<string, GoalCriterion[]>;
@@ -3663,34 +3393,20 @@ interface ForecastGather {
   deps: TaskDependency[];
   /** entry_id → the entry's goal (provenance only; tasks map to goals via `Task.goal_id`). */
   projectOfEntry: Map<string, string | null>;
-  /** projectId → deadline (or null) for EVERY project - the global allocator spans all. */
   deadlineByProject: Map<string, string | null>;
-  /** projectId → name for EVERY project - used to tag global order entries. */
   projectNameById: Map<string, string>;
   /** The user's estimation bias, fit from all completed tasks - calibrates the forecast. */
   model: EstimationModel;
-  /**
-   * The per-domain velocity model (OVERHAUL S2): `model` shrunk per `Task.area`,
-   * with `model` as its global prior. `buildAllocTasks` reads `forSegment(area)`
-   * to bias each task by its own domain velocity; a domain with no/sparse history
-   * resolves to the global prior, so the forecast starts at today's number.
-   */
+  /** Per-domain velocity: `model` shrunk per Task.area with `model` as the prior. A
+   *  domain with sparse history resolves to the global prior. */
   velocityModel: VelocityModel;
-  /**
-   * The GLOBAL per-window velocity (OVERHAUL S2 slice C) - `model` shrunk per
-   * time-of-day window over every goal's session-tagged residuals. The energy-
-   * window read renders from it, and `diagnoseCause`'s placement tempering uses it
-   * as the prior. Empty session history ⇒ resolves to the global prior (no-regret).
-   */
+  /** Global per-window velocity - `model` shrunk per time-of-day over session-tagged
+   *  residuals. Empty history resolves to the global prior. */
   windowVelocity: VelocityModel;
-  /** projectId → its tasks' window-tagged residuals - the per-goal placement sample. */
   windowedResidualsByProject: Map<string, ResidualSample[]>;
-  /**
-   * OVERHAUL S3b Phase 2 - the global per-window velocity profile (share +
-   * net-of-global multiplier) the windowed forecast flows over. Null until any
-   * window has session history, so the forecast stays the exact day-granular path
-   * (no-regret). Derived from `windowVelocity` + the session window counts.
-   */
+  /** Per-window profile (share + net-of-global multiplier) the windowed forecast flows
+   *  over. Null until some window has session history, so the forecast stays on the
+   *  day-granular path until then. */
   windowProfile: WindowProfile | null;
   availability: Availability[];
   overrides: AvailabilityOverride[];
@@ -3702,17 +3418,13 @@ interface ForecastGather {
   /** Recurring activities + their completion log - the inputs a skip-move re-drains. */
   activities: RecurringActivity[];
   completions: ActivityCompletion[];
-  /** The user's value model - importance weights + recovery style (OVERHAUL §5.1). */
   valueModel: ValueModel;
-  /** The drag-to-reorder history (S3c-5, the 🔴-tier signal) - revealed-preference pairs the
-   *  arrangement-weight calibrator learns `ArrangeWeights` from. Empty ⇒ prior weights (no-regret).
-   *  Raw data on the gather; the calibrated weights are derived later in `buildArrangement` (they
-   *  depend on the comfort-cap + thin-buffer that pass also computes). */
+ /** Drag-to-reorder pairs the arrangement-weight calibrator learns from. Raw here; the
+  * calibrated weights are derived in buildArrangement, which needs the comfort cap. */
   planReorders: PlanReorder[];
   today: string;
 }
 
-/** A learning goal's skill graph rendered as joint-forecast inputs. */
 interface SkillWork {
   /** One synthetic alloc task per unattained skill - enters the global plan. */
   tasks: AllocTask[];
@@ -3722,17 +3434,13 @@ interface SkillWork {
   estimates: number[];
 }
 
-// `SKILL_TASK_PREFIX` is defined in the client-safe portfolio-state module (the
-// `attain_skill` forecast arm rebuilds the same id client-side) and imported above;
-// the recovery/conflict code, which targets real rows, uses it to tell skill alloc
-// tasks apart from real task uuids.
+// SKILL_TASK_PREFIX lives in the client-safe portfolio-state module (the attain_skill
+// forecast arm rebuilds the same id client-side). Used here to tell skill alloc tasks
+// apart from real task uuids.
 
-/**
- * Turn a learning goal's skill nodes into work the joint forecast can reason
- * over. Attained skills are "done" and deferred skills are "parked" - both dropped,
- * exactly like done/deferred tasks; only the unattained, un-parked frontier consumes
- * budget and carries prerequisite ordering. Pure.
- */
+/** Skill nodes as work the joint forecast can reason over. Attained = done, deferred =
+ *  parked, both dropped like done/deferred tasks; only the live frontier consumes budget
+ *  and carries prereq ordering. Pure. */
 function skillAllocWork(
   nodes: SkillNode[],
   projectId: string,
@@ -3832,7 +3540,7 @@ async function gatherForecast(): Promise<ForecastGather> {
     const work = skillAllocWork(nodes, pid, projectNameById.get(pid) ?? "");
     if (work.tasks.length) skillWorkByProject.set(pid, work);
   }
-  // A goal's definition-of-done, grouped - divergence detection & the §5 goal-cost
+  // A goal's definition-of-done, grouped - divergence detection & the goal-cost
   // read it per goal off the single bulk fetch (no per-goal round-trips).
   const criteriaByProject = new Map<string, GoalCriterion[]>();
   for (const c of allGoalCriteria) {
@@ -3840,21 +3548,17 @@ async function gatherForecast(): Promise<ForecastGather> {
     list.push(c);
     criteriaByProject.set(c.goal_id, list);
   }
-  // Fit the global estimation bias once over every completed task (the bias is the
-  // user's, not a project's), then shrink it per life-area (S2) using that same
-  // fit as the prior - so a domain with one/sparse history stays at the global
-  // number and only a clearly-divergent domain shifts its own tasks' odds.
+  // Fit the global estimation bias once over all completed tasks (the bias is the user's,
+  // not a project's), then shrink per life-area against that fit, so a sparse domain
+  // stays at the global number and only a clearly divergent one moves its own odds.
   const model = estimationModel(tasks);
   const velocityModel = fitVelocityModel(
     taskResidualSamples(tasks),
     (s) => s.domain,
     model,
   );
-  // S2 slice C - the WHEN axis. Join each goal's work sessions (local window) to
-  // its tasks for window-tagged residuals: the global window velocity (the energy
-  // windows the strategy surface renders + the placement-tempering prior) and the
-  // per-goal sample the tempering asks "is this goal's overrun just its windows?"
-  // over. Empty until session capture accrues ⇒ both resolve to the global prior.
+  // The WHEN axis: join each goal's sessions to its tasks for window-tagged residuals.
+  // Empty until session capture accrues, at which point both fall back to the global prior.
   const tasksById = new Map(tasks.map((t) => [t.id, t]));
   const sessionsByProject = new Map<string, WorkSession[]>();
   for (const ws of workSessions) {
@@ -3870,13 +3574,10 @@ async function gatherForecast(): Promise<ForecastGather> {
   }
   const allWindowSamples = [...windowedResidualsByProject.values()].flat();
   const windowVelocity = fitVelocityModel(allWindowSamples, (s) => s.window, model);
-  // S3b Phase 2 - the windowed-forecast profile: per-window net multiplier (from the
-  // same shrunk window velocity the "reliable hours" card renders) + a shrunk session
-  // share that bounds how much work claims each window. Null until a session is logged,
-  // so the headline stays today's day-granular number until the loop has WHEN-data.
-  // S3b Phase 4 - an explicit per-window availability (when the user pinned one) OVERRIDES
-  // the derived share; the velocity multipliers still come from learned data, and the
-  // null-gate is unchanged, so a pin has no effect until window velocity is earned.
+  // Per-window net multiplier plus a shrunk session share bounding how much work claims
+  // each window. Null until a session is logged. An explicit pinned availability
+  // overrides the derived share; multipliers still come from learned data, so a pin does
+  // nothing until window velocity is earned.
   const windowProfile = windowProfileFromEnergy(
     energyWindows(allWindowSamples, model),
     model,
@@ -3966,12 +3667,9 @@ function allocContext(
   };
 }
 
-/**
- * Joint completion odds for every deadlined project from ONE Monte Carlo over
- * the global order built from `ctx.tasks`, optionally with some tasks shed
- * (`excluded` - the deferred set a triage probe is testing). Lower `iterations`
- * trades a little precision for speed on the repeated triage probes.
- */
+/** Joint odds for every deadlined project from ONE Monte Carlo over the global order,
+ *  optionally with some tasks shed (the set a triage probe is testing). Lower
+ *  `iterations` trades precision for speed on repeated probes. */
 function jointOdds(
   g: ForecastGather,
   ctx: AllocContext,
@@ -4001,12 +3699,8 @@ function jointOdds(
   return globalForecast(plan.order, ctx.capacities, g.deadlineByProject, g.today, opts);
 }
 
-/**
- * Contention-aware completion odds for every deadlined project, from ONE joint
- * Monte Carlo over the global order under a given commitment set. The single
- * source the per-project forecasts and recovery gating both draw their
- * probability from (locked decision #1).
- */
+/** Contention-aware odds for every deadlined project from ONE joint Monte Carlo. The
+ *  single source both per-project forecasts and recovery gating read. */
 function globalOdds(
   g: ForecastGather,
   commitments: Pick<Commitment, "date" | "hours">[],
@@ -4019,20 +3713,15 @@ function globalOdds(
  *  probes' `TRIAGE_PROBE_ITERATIONS` - a relative read is all the greedy needs). */
 const JOINT_PROBE_ITERATIONS = 2000;
 
-/**
- * The portfolio strategy's joint scorer: one gather + dashboard computation, plus
- * closures the optimizer and the bold-tier re-scorer probe against. Built once
- * per generation so the strategist does not double-gather (replaces its
- * `forecastDashboard()` call). All inputs are server-only (RLS-scoped gather);
- * the scorer closures are pure CPU over the captured state.
- */
+/** The strategy's joint scorer: one gather + dashboard computation plus the closures
+ *  the optimizer probes against. Built once per generation so the strategist doesn't
+ *  double-gather. */
 export interface JointScorer {
   forecasts: ProjectForecast[];
   recoveries: RecoveryPlan[];
   pitWall: PitWall;
   /** Active recurring activities - the pool of `skip_activity` candidates. */
   activities: RecurringActivity[];
-  /** The user's value model - the optimizer reads its recovery-style move prefs. */
   valueModel: ValueModel;
   /** Calibrated relative weights of the two odds-tie nudges (style vs diagnosed
    *  cause), learned from the offered-vs-kept history. Prior `{1, 1}` when unlearned. */
@@ -4050,16 +3739,10 @@ export interface JointScorer {
   resolveInput: ResolveInput;
 }
 
-/**
- * Per-day HOURS that skipping each active recurring activity this week frees back to
- * the shared pool - its current-week owed instances' drain, attributed by day (the
- * owed-date logic single-sourced via `currentWeekOwedDates`, matching the skip arm of
- * `applyMoveToAlloc`). The client adds the selected activities' series onto the SIGNED
- * base slack (`ResolveInput.baseSlackHours`) and floors ONCE, so any subset of skips
- * composes EXACTLY as the server's `jointOddsWithMoves` recompute does - even on an
- * over-subscribed day, where the old floored-per-skip deltas under-counted. An activity
- * with nothing owed this week frees nothing (a zero series).
- */
+/** Per-day hours that skipping each active activity frees back to the pool. The client
+ *  adds the selected series onto the SIGNED base slack and floors ONCE, so any subset of
+ *  skips composes exactly as the server's recompute does - floored-per-skip deltas
+ *  under-counted on over-subscribed days. Nothing owed this week frees nothing. */
 function skipDrainHoursByActivity(
   g: ForecastGather,
   ctx: AllocContext,
@@ -4078,10 +3761,8 @@ function skipDrainHoursByActivity(
   return out;
 }
 
-/** Serialize the generation-time gather slice into the plain-JSON `ResolveInput`
- *  the review screen re-solves move subsets against (OVERHAUL S1 / vision §8.2).
- *  `baseSlackHours` is the SIGNED slack (its floor is `ctx.capacities`) so multi-skip
- *  re-solves compose exactly; see `skipDrainHoursByActivity`. */
+/** Serialize the gather slice into the plain-JSON ResolveInput the review screen re-solves
+ * against. baseSlackHours is SIGNED so multi-skip re-solves compose exactly. */
 function buildResolveInput(
   g: ForecastGather,
   ctx: AllocContext,
@@ -4111,40 +3792,32 @@ function buildResolveInput(
     // client replays the SAME deterministic `arrangeOrder` on its re-derived order (the
     // reorder reads only inputs already in `ResolveInput`, so parity rides for free).
     arrangeReorder,
-    // S3c-5 (🔴 tier) - ship the calibrated soft-`J` term weights so the client's `arrangeOrder`
-    // replay weights `φ` exactly as the server did (else a learned weight would reshape the
-    // server's order but not the client's, breaking S1 parity). Prior `{1,1,1}` with no drags,
-    // where it's a no-op (== omitting), so no-regret holds.
+    // Ship the calibrated soft-J weights so the client's arrangeOrder weights φ exactly as
+    // the server did - otherwise a learned weight reshapes the server's order but not the
+    // client's and parity breaks.
     arrangeWeights,
-    // S3b Phase 3 `w_buffer` follow-on (graded in Phase 4) - ship the at-risk projects'
-    // thin-buffer URGENCY the scorer flagged on the base, as a JSON-safe record. The client
-    // rebuilds the Map and feeds the SAME `arrangeOrder`, so the buffer-biased order stays
-    // bit-identical (it can't be recomputed client-side - needs the per-project forecast dist).
+    // Ship the thin-buffer urgency as a JSON-safe record: the client rebuilds the Map and
+    // feeds the same arrangeOrder. It can't be recomputed client-side, it needs the
+    // per-project forecast distribution.
     thinBufferUrgency: Object.fromEntries(thinBuffer),
-    // S3c-1 - when the rolling-horizon wrapper is showing a STICKY committed plan, ship its
-    // order (task-id sequence, already reconciled to the current set) so the client's empty
-    // (base) subset prices it VERBATIM (reorder OFF) instead of re-deriving + re-arranging - 
-    // the server already arranged + gated it, so this is a pure replay and the base re-solve
-    // stays client==server EXACT. Null (fresh candidate) ⇒ the pre-S3c path, bit-for-bit.
+    // When showing a STICKY committed plan, ship its order so the client's base subset
+    // prices it verbatim instead of re-deriving and re-arranging. Null (fresh candidate)
+    // takes the old path.
     committedOrder: committedOrder ?? undefined,
   };
 }
 
-// --- Rolling-horizon roll cycle (S3c-1) -------------------------------------
+// --- Rolling-horizon roll cycle -------------------------------------
 //
-// The S3b arrangement pipeline (`buildGlobalPlan → comfortSmooth → gatedReorder`) prices the
-// best arrangement RIGHT NOW; S3c decides which already-priced arrangement to keep committing
-// to as time advances. `buildArrangement` is the shared pipeline both read paths and the
-// mutation-time roll run (so all three price identically); `rollContextFor` wraps it as the
-// pure `rollDecision`'s inputs (with the MC reprice + soft-J scorer injected as closures - the
-// odds engine stays here, the decision logic lives in `lib/rolling.ts`). Reads DECIDE what to
-// show and persist nothing; the write path (`commitRollingPlan`) is the only writer. See
-// `design/s3c-rolling-horizon-wrapper.md`.
+// S3b prices the best arrangement right now; S3c decides which already-priced
+// arrangement to keep committing to as time advances. buildArrangement is the shared
+// pipeline both read paths and the mutation-time roll run, so all three price
+// identically. Reads decide what to show and persist nothing; commitRollingPlan is the
+// only writer. See design/s3c-rolling-horizon-wrapper.md.
 
-/** The S3b arrangement bundle for a gather: the canonical plan, the comfort decision, the
- *  thin-buffer urgency map, and the odds-gated candidate arrangement (order + priced odds) the
- *  user would otherwise follow. Computed once and shared by every S3c call site so the
- *  displayed plan, the strategy base, and the roll all price the SAME candidate. */
+/** The arrangement bundle for a gather: canonical plan, comfort decision, thin-buffer
+ * urgency, and the odds-gated candidate. Computed once and shared by every call site so
+ * the displayed plan, the strategy base and the roll all price the SAME candidate. */
 interface ArrangementBundle {
   canonical: GlobalPlan;
   smoothed: ComfortSmoothResult;
@@ -4154,7 +3827,7 @@ interface ArrangementBundle {
    *  its priced odds, `.changed` the single boolean the S1 client + probes replay. */
   reorder: GatedReorderResult;
   arrangeReorder: boolean;
-  /** The calibrated arrangement weights (S3c-5 🔴 tier) learned from the drag history - the
+  /** The calibrated arrangement weights learned from the drag history - the
    *  soft-`J` term weights the reorder + scorer used. Prior `{1,1,1}` with no drags (no-regret).
    *  Shipped to the client so its `arrangeOrder` replay stays bit-identical (S1 parity). */
   weights: ArrangeWeights;
@@ -4180,12 +3853,10 @@ function buildArrangement(g: ForecastGather, ctx: AllocContext): ArrangementBund
   });
   const comfortCapMinutes = smoothed.comfortCapMinutes;
   const thinBuffer = thinBufferUrgencyMap(g, g.commitments, smoothed.joint.byProject);
-  // S3c-5 (🔴 tier): calibrate the soft `J` term weights from the drag-to-reorder history, priced
-  // under THIS pass's arrange context (window profile + comfort cap + thin buffer) so `φ` is the
-  // same feature vector the reorder scores. Computed AFTER the comfort/thin-buffer decision (the
-  // weights read them) but BEFORE the reorder (which reads the weights) - no circularity, since
-  // neither `comfortSmooth` nor `thinBufferUrgencyMap` reads the weights. No drags ⇒ prior
-  // `{1,1,1}`, so the reorder + every downstream pricing is byte-identical to pre-S3c-5.
+  // Calibrate the soft J weights off the drag history, priced under THIS pass's arrange
+  // context so φ is the same feature vector the reorder scores. After the comfort/buffer
+  // decision (weights read them), before the reorder (reads the weights). No drags ⇒
+  // prior {1,1,1}.
   const weights = calibrateArrangeWeights(g.planReorders, ctx.capacities, g.today, {
     windowProfile: g.windowProfile,
     comfortCapMinutes,
@@ -4224,14 +3895,10 @@ function buildArrangement(g: ForecastGather, ctx: AllocContext): ArrangementBund
   };
 }
 
-/**
- * A stable hash of the situation the committed plan is anchored to - the roll trigger. Reuses
- * the `computePortfolioFingerprint` discipline (bucketed due-dates so far-future edits don't
- * churn) but reads the already-built gather (pure, no re-query) and EXTENDS it with the
- * window-profile + velocity generation (`g.windowProfile` / `g.model`) so an S2 model update is
- * itself a legitimate roll trigger, and the value model (importance re-ranks under contention).
- * An unchanged fingerprint + anchor ⇒ nothing plan-relevant moved ⇒ the roll stays put cheaply.
- */
+/** Stable hash of the situation the committed plan is anchored to - the roll trigger.
+ *  Bucketed due-dates so far-future edits don't churn. Reads the already-built gather
+ *  and extends it with the window profile + velocity generation, so a model update is
+ *  itself a legit trigger. Unchanged fingerprint + anchor ⇒ stay put cheaply. */
 function rollFingerprint(g: ForecastGather, ctx: AllocContext): string {
   // Coarse due bucket relative to today - bucketing (not the raw date) keeps far-future
   // deadline edits from churning the fingerprint while still catching a deadline crossing into
@@ -4300,25 +3967,20 @@ function repriceOptionsFor(
 }
 
 /** The cookie the client `LocalNowBeacon` stamps with the browser's local day + minute-of-day
- *  (S3c-4). Read-only server-side; the value the intra-day frozen zone sharpens against. */
+ * . Read-only server-side; the value the intra-day frozen zone sharpens against. */
 const LOCAL_NOW_COOKIE = "tb_local_now";
 
-/**
- * Read the client-captured local "now" from the request cookie (S3c-4) - the S2 timezone-gotcha
- * resolution: the browser stamps its OWN local day/minute (`LocalNowBeacon`), never re-derived
- * from the server's UTC clock. Returns `undefined` on any absence / malformation / out-of-range
- * value, so the roll falls back to date-granular churn, byte-identical to S3c-1 (the no-regret
- * path). Never throws: a bad cookie, or a call outside a request scope, must not break a render - 
- * the anchor-dependent fallbacks (date mismatch, no day-0 capacity) live in `resolveElapsedToday`.
- * Format is `YYYY-MM-DD|minutesSinceMidnight`; parsed + bounds-checked here.
- */
+/** The client-captured local "now" from the request cookie - the browser stamps its own
+ *  day/minute rather than us re-deriving from the server's UTC clock. Returns undefined
+ *  on anything malformed or out of range, falling back to date-granular churn. Never
+ *  throws: a bad cookie must not break a render. Format `YYYY-MM-DD|minutesSinceMidnight`. */
 async function readClientLocalNow(): Promise<LocalNow | undefined> {
   try {
     const raw = (await cookies()).get(LOCAL_NOW_COOKIE)?.value;
     if (!raw) return undefined;
     const [date, minsStr] = raw.split("|");
     if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return undefined;
-    // Digit-shape guard BEFORE Number(): an empty / non-numeric minutes segment (`"2026-07-08|"`)
+       // Digit-shape guard BEFORE Number(): an empty / non-numeric minutes segment (`"2026-07-08|"`)
     // would otherwise coerce to 0 and read as midnight. Reject it ⇒ date-granular fallback.
     if (!minsStr || !/^\d+$/.test(minsStr)) return undefined;
     const minutesSinceMidnight = Number(minsStr);
@@ -4329,12 +3991,10 @@ async function readClientLocalNow(): Promise<LocalNow | undefined> {
   }
 }
 
-/** Build the pure `rollDecision` inputs for a gather + its arrangement bundle. The Monte-Carlo
- *  reprice and the soft-`J` scorer are injected as closures over the CURRENT situation, so the
- *  reconciled committed plan is priced apples-to-apples with the candidate (same comfort cap +
- *  window pricing), and the decision module authors no odds itself. `localNow` (S3c-4, the
- *  client-captured clock; `undefined` ⇒ date-granular) enters ONLY the churn near-weight - never
- *  odds, the persisted plan, or the fingerprint (a clock tick is not a situation change). */
+/** Pure rollDecision inputs for a gather + its arrangement bundle. The MC reprice and
+ *  soft-J scorer are injected as closures over the current situation so committed and
+ *  candidate are priced apples-to-apples. `localNow` enters only the churn near-weight,
+ *  never odds or the fingerprint - a clock tick is not a situation change. */
 function rollContextFor(
   g: ForecastGather,
   ctx: AllocContext,
@@ -4356,22 +4016,17 @@ function rollContextFor(
     scoreJ: (order) => arrangementScore(order, ctx.capacities, g.today, bundle.arrangeOpts),
     capacities: ctx.capacities,
     arrangeOpts: bundle.arrangeOpts,
-    // S3c-5 (🟡 tier): the hysteresis knobs, EB-calibrated from the user's roll-undo history
+    // S3c-5: the hysteresis knobs, EB-calibrated from the user's roll-undo history
     // (`undefined` ⇒ rollDecision falls back to the documented constants, the no-regret path).
     stabilityMargin: hysteresis?.stabilityMargin,
     churnCost: hysteresis?.churnCost,
   };
 }
 
-/**
- * Roll the committed plan forward and PERSIST the winner - the write-path mutation (§4 step 6).
- * Called after every mutation (the situation-changing events); the read paths decide what to
- * show but never write. Fast path: an unchanged fingerprint + anchor with an existing row means
- * nothing plan-relevant moved, so it re-prices nothing and writes nothing. The mutation hook
- * (`afterMutation` in `actions.ts`) calls this best-effort - swallowing any failure so a roll
- * can never break the mutation that triggered it (the read path still shows a correct plan, and
- * the next mutation re-rolls). Returns the decision for observability.
- */
+/** Roll the committed plan forward and persist the winner. Called after every mutation;
+ *  read paths decide what to show but never write. Unchanged fingerprint + anchor means
+ *  nothing moved, so it prices and writes nothing. afterMutation calls this best-effort
+ *  so a roll can never break the mutation that triggered it. */
 export async function commitRollingPlan(): Promise<RollDecisionResult | null> {
   const g = await gatherForecast();
   const ctx = allocContext(g, g.commitments);
@@ -4385,22 +4040,17 @@ export async function commitRollingPlan(): Promise<RollDecisionResult | null> {
     return null;
   }
   const bundle = buildArrangement(g, ctx);
-  // S3c-4: the client's local "now" sharpens the frozen zone to the imminent part of today. It
-  // rides ONLY the churn near-weight - it is deliberately NOT in `rollFingerprint`, so the fast
-  // path above still short-circuits on a pure clock tick (a tick is not a situation change); it
-  // only refines which sticky arrangement the gate prefers once a real mutation forces the roll.
-  // S3c-5 (🟡 tier): calibrate the hysteresis knobs from the roll-undo history. Fetched only
-  // past the fast path (a genuine re-plan), in parallel with the client clock - no rolls ⇒ the
-  // documented constants, so a first-ever roll is byte-identical to pre-S3c-5.
+  // The client clock sharpens the frozen zone to the imminent part of today. Deliberately
+  // NOT in rollFingerprint, so the fast path still short-circuits on a pure clock tick.
+  // Hysteresis knobs come from the roll-undo history, fetched only past the fast path.
+  // No rolls ⇒ the documented constants.
   const [localNow, rolls] = await Promise.all([readClientLocalNow(), listPlanRolls()]);
   const hysteresis = calibrateHysteresis(rolls);
   const decision = rollDecision(rollContextFor(g, ctx, bundle, committed, localNow, hysteresis));
   if (decision.shouldPersist) {
     await setCommittedPlan(decision.toPersist);
-    // Persist-on-roll (S3c-2): retain a history entry for a GENUINE plan change (a
-    // material better-candidate or an anchor advance), never a stay-put freshen - so the
-    // timeline shows real evolution, not every reload. Same best-effort guard as the
-    // upsert above: a throw here is swallowed by the mutation hook's try/catch.
+    // Retain history only for a GENUINE plan change, never a stay-put freshen, so the
+    // timeline shows real evolution instead of every reload.
     const rollKind = planRollKind(decision, committed);
     if (rollKind) {
       const plan = decision.toPersist;
@@ -4421,21 +4071,15 @@ export async function commitRollingPlan(): Promise<RollDecisionResult | null> {
   return decision;
 }
 
-/**
- * Undo one automatic roll (design/s3c2-passive-roll-history.md §4) - the ARRANGEMENT
- * counterpart to `undoPlanVersion`. NOT a row restore: it takes the arrangement `roll`
- * superseded (the immediately-prior roll's order, or a fresh build if `roll` was the
- * first-ever commit) and re-commits it, but only after feeding it back through the S3c-1
- * read path via `undoRollDecision` - reconcile against the current task set (a completed /
- * deleted-since task is dropped, never resurrected) then re-price, with odds/feasibility
- * overriding a stale restore. The stored order is a PREFERENCE SEED, not restored truth.
+/** Undo one automatic roll - the arrangement counterpart to undoPlanVersion. Not a row
+ *  restore: it takes the order `roll` superseded and re-commits it, but only after
+ *  feeding it back through the read path - reconciled against the current task set (a
+ *  since-completed task is dropped, never resurrected) then re-priced. The stored order
+ *  is a preference seed, not restored truth.
  *
- * Re-commits under the CURRENT fingerprint + anchor so the roll `revalidateAll` fires right
- * after this stays put: the restore holds against the soft stability gate (otherwise the very
- * gain that caused the roll would re-adopt the candidate and make undo a no-op). Idempotent - 
- * a second undo of an already-reverted roll is a no-op. The undone roll stays in history with
- * `revertedAt` set (struck-through in the timeline), same as `undoPlanVersion`.
- */
+ *  Re-commits under the CURRENT fingerprint so the revalidateAll roll right after stays
+ *  put, otherwise the gain that caused the roll re-adopts the candidate and undo is a
+ *  no-op. Idempotent. The undone roll stays in history with revertedAt set. */
 export async function undoPlanRoll(id: string): Promise<void> {
   const roll = await getPlanRoll(id);
   if (!roll || roll.revertedAt) return; // idempotent - gone, or already reverted
@@ -4476,27 +4120,20 @@ export async function undoPlanRoll(id: string): Promise<void> {
 /** What a drag-to-reorder produced, for the client's optimistic UI + warning. */
 export interface ReorderOutcome {
   /** True ⇒ the honored order cost more than ε of odds - the client shows a "this costs some
-   *  odds" note (design §9.1 honor-with-warning). */
+   *  odds" note. */
   oddsCost: boolean;
   /** True ⇒ an odds-neutral, genuinely-resequencing drag was accrued as a calibration
    *  observation (a `plan_reorders` row). False ⇒ honored but not taught from. */
   recorded: boolean;
 }
 
-/**
- * Honor a drag-to-reorder of TODAY's plan and, when it's odds-neutral, accrue it as a
- * revealed-preference observation (OVERHAUL §5a substrate S3c-5, design §6). The dragged order is
- * a PREFERENCE SEED fed through the same reconcile + re-price the roll-undo uses, then committed
- * under the CURRENT fingerprint so the `revalidateAll` roll that fires right after stays put
- * (mirrors `undoPlanRoll`). Unlike an undo, a deliberate drag is ALWAYS honored - even one that
- * costs odds (design decision §9.1); the odds comparison only sets the "costs odds" warning and
- * gates whether the pair teaches `calibrateArrangeWeights` (S4). The whole decision is the pure
- * `reorderDecision`; this wraps it with the real pricers + the commit + the accrual.
- *
- * `date` is the plan day the drag was for (today, v1); the stored row uses the server's `g.today`
- * as the authoritative day so a stale client date can't mislabel it. Best-effort on the accrual,
- * like `insertPlanRoll`: a history-append failure must never lose the honored reorder.
- */
+/** Honor a drag-to-reorder of today's plan and, when it's odds-neutral, accrue it as a
+ *  revealed-preference pair. The dragged order is a seed fed through the same reconcile +
+ *  re-price as roll-undo, then committed under the current fingerprint so the roll right
+ *  after stays put. Unlike an undo, a deliberate drag is ALWAYS honored even if it costs
+ *  odds; the comparison only sets the warning and gates whether the pair teaches the
+ *  calibrator. `date` is the plan day it was for; the stored row uses the server's
+ *  g.today so a stale client date can't mislabel it. Accrual is best-effort. */
 export async function reorderToday(
   date: string,
   orderedTaskIds: string[],
@@ -4526,7 +4163,7 @@ export async function reorderToday(
     scoreJ: (order) => arrangementScore(order, ctx.capacities, g.today, bundle.arrangeOpts),
   });
 
-  // Honor unconditionally - commit the dragged order under the current fingerprint (design §9.1).
+  // Honor unconditionally - commit the dragged order under the current fingerprint.
   await setCommittedPlan({
     schemaVersion: COMMITTED_PLAN_SCHEMA_VERSION,
     order: result.order,
@@ -4536,7 +4173,7 @@ export async function reorderToday(
     committedAt: new Date().toISOString(),
   });
 
-  // Accrue only the odds-neutral, genuinely-resequencing drags (design §4b) - the 🔴-tier signal
+  // Accrue only the odds-neutral, genuinely-resequencing drags - the signal
   // S4's `calibrateArrangeWeights` learns from.
   let recorded = false;
   if (result.record) {
@@ -4556,29 +4193,16 @@ export async function reorderToday(
   return { oddsCost: result.oddsCost, recorded };
 }
 
-/**
- * S3c-6 - read-side idempotent anchor-roll. On a QUIET new day (a committed plan exists and the
- * roll decision kept it STICKY, but its frozen-zone `anchor` predates today) advance the stored
- * anchor to today FROM THE READ PATH, so the persisted frozen zone is fresh without waiting for
- * the next mutation. v1 already displays correctly regardless (`packGlobal` re-buckets from
- * `g.today`); this only tightens the stored `anchor` / `fingerprint` so the frozen-zone day is
- * accurate and the next mutation's fast path can short-circuit. It authors no odds and no new
- * arrangement - it re-anchors the plan the decision ALREADY chose to keep.
+/** Read-side idempotent anchor-roll. On a quiet new day (committed plan exists, decision
+ *  kept it sticky, anchor predates today) advance the stored anchor from the read path so
+ *  the frozen zone is fresh without waiting for a mutation. Display is already correct
+ *  either way - this only tightens the stored anchor/fingerprint.
  *
- * Two guarantees keep this a safe write from a read (design §7 S3c-6 + the advance-silently call):
- *   - Gated on `decision.sticky`: a read NEVER persists a *material* re-arrangement. A genuine
- *     roll still waits for the mutation path (the sole writer of arrangement changes); here we
- *     only bump the anchor of a plan that stayed sticky.
- *   - No history row, just the convergent singleton `committed_plan` upsert: a silent day-advance
- *     is bookkeeping, not a timeline event, so concurrent loads on the same new day converge on
- *     the same anchor instead of double-logging an "anchor" roll. Best-effort - a write failure
- *     must never break a render (the displayed sticky plan is already correct), and it must not
- *     revalidate (we are inside a Server Component render; display already == the persisted order).
- *
- * Idempotent: after the write `committed.anchor === today`, so a second load the same day returns
- * before touching the DB. `decision.toPersist.anchor` is the read's `g.today`, so comparing the
- * stored anchor against it is the "is the frozen-zone day stale" test.
- */
+ *  Two things keep a write-from-a-read safe: it's gated on decision.sticky (a read never
+ *  persists a material re-arrangement), and it's a convergent singleton upsert with no
+ *  history row, so concurrent loads on the same day converge instead of double-logging.
+ *  Best-effort, and it must not revalidate - we're inside a Server Component render.
+ *  Idempotent: after the write anchor === today, so the next load returns early. */
 async function advanceAnchorOnQuietDay(
   committed: CommittedPlan | null,
   decision: RollDecisionResult,
@@ -4594,12 +4218,10 @@ async function advanceAnchorOnQuietDay(
 }
 
 export async function createJointScorer(): Promise<JointScorer> {
-  // The cached strategy is the temporal baseline for cause-diagnosis: the
-  // optimizer reads each recovery's `cause` for the step-5 response-class
-  // tiebreak, and `constraint_change` can only be diagnosed against it (a task
-  // added since, or odds that have since dropped). Without it the optimizer's
-  // causes would silently collapse to the residual-only classes. Loaded in
-  // parallel with the gather so it adds no latency.
+  // The cached strategy is the temporal baseline for cause diagnosis - constraint_change
+  // can only be diagnosed against it (a task added since, odds that have since dropped).
+  // Without it the causes collapse to the residual-only classes. Loaded in parallel with
+  // the gather so it costs no latency.
   const [g, cachedStrategy, committed, localNow, rolls, moveChoices] = await Promise.all([
     gatherForecast(),
     getCachedStrategy(),
@@ -4609,24 +4231,16 @@ export async function createJointScorer(): Promise<JointScorer> {
     listMoveChoices(),
   ]);
   const ctx = allocContext(g, g.commitments);
-  // The S3b arrangement pipeline decides the comfort cap, the thin-buffer urgency, and the
-  // odds-gated within-day reorder ONCE on the base canonical order (the same decision
-  // `forecastDashboard` makes), then meters EVERY joint re-solve by them: the base, the
-  // optimizer's move probes, the cumulative display, AND the client subset re-solve. No-regret:
-  // no cap / no reorder signal ⇒ the exact pre-S3b (windowed) path, bit-for-bit.
+  // Decide the comfort cap, thin-buffer urgency and reorder ONCE on the base order (same
+  // decision forecastDashboard makes), then meter every joint re-solve by them: base,
+  // move probes, cumulative display, and the client subset re-solve.
   const bundle = buildArrangement(g, ctx);
   const { comfortCapMinutes, thinBuffer, arrangeReorder, weights: arrangeWeights } = bundle;
-  // S3c-1 rolling horizon - decide whether to keep committing to the plan the user is already
-  // following (sticky) or adopt the fresh candidate. Reads persist NOTHING (the mutation-time
-  // roll is the sole writer); this only picks the "before" the strategy page reasons from.
-  // When sticky, the committed order is priced + shipped VERBATIM with the reorder flag OFF,
-  // so the S1 client re-solve of the empty (base) subset stays EXACT (decision #5). Move-probes
-  // (non-empty subsets) still use the fresh arrangement - a strategy move is a re-plan, never a
-  // sticky hold. No-regret: no committed row ⇒ the candidate verbatim ⇒ pre-S3c path, bit-for-bit.
-  // S3c-4: `localNow` sharpens the frozen zone to the imminent part of today (read-only; never
-  // persisted, never in odds or the fingerprint) - `undefined` ⇒ date-granular, exactly S3c-1.
-  // S3c-5 (🟡 tier): the read decides what to SHOW with the same calibrated hysteresis the
-  // write path commits under, so display and persist never disagree on stickiness.
+  // Rolling horizon: keep committing to the plan the user is following unless the date
+  // rolled, the fingerprint moved, or the candidate's gain clears the hysteresis. This
+  // read persists nothing. When sticky the committed order is priced and shipped verbatim
+  // with the reorder flag off, so the client's base re-solve stays exact. Move-probes
+  // still use the fresh arrangement - a strategy move is a re-plan, never a sticky hold.
   const decision = rollDecision(
     rollContextFor(g, ctx, bundle, committed, localNow, calibrateHysteresis(rolls)),
   );
@@ -4652,7 +4266,7 @@ export async function createJointScorer(): Promise<JointScorer> {
     pitWall,
     activities: g.activities.filter((a) => a.active),
     valueModel: g.valueModel,
-    // 🟠 tier: the style-vs-cause tiebreak ratio, learned off the offered-vs-kept
+    // The style-vs-cause tiebreak ratio, learned off the offered-vs-kept
     // history. No rows ⇒ the co-equal 1.0/1.0 prior, bit-identically.
     movePrefWeights: calibrateMovePrefWeights(moveChoices),
     baseByProject,
@@ -4665,34 +4279,26 @@ export async function createJointScorer(): Promise<JointScorer> {
 
 // --- The pit wall: conflict detection + contention-aware triage -------------
 
-/** How many lowest-WSJF tasks a triage search probes before giving up. */
 const MAX_TRIAGE_PROBES = 12;
-/** Fewer MC iterations on the repeated triage probes - they only need a relative read. */
 const TRIAGE_PROBE_ITERATIONS = 2000;
 /** A deferral counts as helping only if it lifts some project's odds by at least this. */
 const TRIAGE_MIN_GAIN = 0.01;
 /** Two still-failing projects whose values are this close are a genuine tie to escalate. */
 const COMPARABLE_VALUE_RATIO = 0.75;
 
-/**
- * What the global allocation can't satisfy, and what to do about it. `conflicts`
- * names the projects that can't make their deadlines once they share the hours;
- * `triage` is the recommended low-value work to shed to recover the savable ones
- * (best-first); `needsDecision` is the one case auto-triage won't resolve - two
- * comparable-value projects colliding, where the user must pick which to protect.
- */
+/** What the global allocation can't satisfy. `conflicts` names the projects that miss
+ *  their deadlines once they share hours; `triage` is the low-value work to shed
+ *  (best-first); `needsDecision` is the one case auto-triage won't touch - two
+ *  comparable-value projects colliding, where the user picks. */
 export interface PitWall {
   conflicts: Conflict[];
   triage: TriageMove[];
   needsDecision: boolean;
-  /**
-   * When `needsDecision`, the mutually-exclusive resolutions of the tie - one
-   * per colliding project, "protect this one, shed the others". Empty otherwise.
-   */
+ /** When `needsDecision`, the mutually-exclusive resolutions - one per colliding project,
+  * "protect this one, shed the others". Empty otherwise. */
   options: PitWallOption[];
 }
 
-/** Conflicts in the point-estimate global plan for this gather (no Monte Carlo). */
 function planConflicts(g: ForecastGather, ctx: AllocContext): Conflict[] {
   const plan = buildGlobalPlan({
     tasks: ctx.tasks,
@@ -4704,17 +4310,11 @@ function planConflicts(g: ForecastGather, ctx: AllocContext): Conflict[] {
   return detectConflicts(plan.order, ctx.capacities, g.deadlineByProject, g.today);
 }
 
-/**
- * The pit wall for a gather: which deadlined projects can't make it under
- * contention, the lowest-WSJF work to shed to recover the savable ones, and
- * whether what's left is a comparable-value tie that must be escalated.
- *
- * Triage is contention-aware (the G3 promise): each candidate deferral is scored
- * by re-running the *joint* Monte Carlo with that task (and the ones already
- * shed) removed, so the recovered odds account for the freed shared hours - not a
- * solo per-project estimate. Walks candidates lowest-WSJF first and keeps a
- * deferral only when it meaningfully lifts some project's odds (locked #3).
- */
+/** The pit wall for a gather. Triage is contention-aware: each candidate deferral is
+ *  scored by re-running the JOINT Monte Carlo with that task (and the already-shed ones)
+ *  removed, so recovered odds account for the freed shared hours rather than a solo
+ *  per-project estimate. Walks lowest-WSJF first, keeps a deferral only when it
+ *  meaningfully lifts something. */
 function buildPitWall(
   g: ForecastGather,
   ctx: AllocContext,
@@ -4728,18 +4328,15 @@ function buildPitWall(
   const onTrackEverywhere = (odds: Map<string, number>) =>
     g.projects.every((p) => isOnTrack(odds.get(p.id) ?? 1));
 
-  // Open-task count per project - so triage can scope a project *down* but never
-  // shed its last task. Deferring a project's entire open work would read as a
-  // vacuous 100% ("no work left ⇒ finished"), which is abandonment, not recovery
-  // - and abandonment is the escalated decision below, never an auto move.
+    // Open-task count per project, so triage can scope a project down but never shed its
+    // last task. Deferring all of a project's work reads as a vacuous 100%, which is
+    // abandonment, not recovery - that's the escalated decision below.
   const openCount = new Map<string, number>();
   for (const t of ctx.tasks) openCount.set(t.projectId, (openCount.get(t.projectId) ?? 0) + 1);
 
-  // Shed the lowest-WSJF open work of the conflicted (over-budget) projects - 
-  // the obvious low-value doomed work auto can relieve on its own (locked #3).
-  // A learning goal's sheddable skill lanes (non-checkpoint leaves) compete in
-  // the same shed order; the `skill:<nodeId>` id routes to `setSkillNodeDeferred`
-  // on persist, and only these eligible ids are offered so the shed always sticks.
+  // Shed the lowest-WSJF open work of the over-budget projects. Sheddable skill lanes
+  // compete in the same order; the `skill:<nodeId>` id routes to setSkillNodeDeferred on
+  // persist, and only eligible ids are offered so the shed always sticks.
   const conflictedIds = new Set(conflicts.map((c) => c.projectId));
   const sheddableSkillIds = new Set<string>();
   for (const nodes of g.skillNodesByProject.values()) {
@@ -4797,10 +4394,9 @@ function buildPitWall(
     }
   }
 
-  // Escalate ONLY a genuine tie: two projects whose deadlines collide over the
-  // shared hours and whose aggregate values are close enough that auto can't say
-  // which to protect - the one manual call (locked #3). A collision with a clear
-  // low-value loser isn't a tie: triage above already sheds the loser's work.
+  // Escalate ONLY a real tie: colliding deadlines whose aggregate values are close enough
+  // that auto can't pick. A collision with a clear loser isn't a tie - triage already
+  // shed the loser's work.
   const collisionValues = conflicts
     .filter((c) => c.kind === "deadline_collision")
     .map((c) => projectValue(ctx.tasks, c.projectId, g.deadlineByProject, g.today))
@@ -4815,15 +4411,10 @@ function buildPitWall(
   return { conflicts, triage, needsDecision, options };
 }
 
-/**
- * The mutually-exclusive ways to resolve a genuine comparable-value tie: for
- * each colliding project, "protect this one" means deferring the *other*
- * colliding projects' entire open work so the protected one gets the contested
- * hours. That's the abandonment auto-triage refuses to do on its own (it never
- * sheds a project's last task - line ~1080); here the user makes that call
- * deliberately, so each option's `probabilityAfter` is the protected project's
- * recovered joint odds once the sacrifice set is shed (one MC probe per option).
- */
+/** The mutually-exclusive ways to resolve a real tie: "protect this one" defers the
+ *  other colliding projects' entire open work. That's the abandonment auto-triage
+ *  refuses to do on its own - here the user makes the call, so each option's
+ *  probabilityAfter is the protected project's recovered odds (one MC probe each). */
 function escalationOptions(
   g: ForecastGather,
   ctx: AllocContext,
@@ -4856,12 +4447,9 @@ function escalationOptions(
   });
 }
 
-/**
- * Forecast every deadlined project under a commitment set. Per-project
- * expected/deployable/slack still come from the project's own footprint, but the
- * headline `probability` is the honest, contention-aware joint odds (`odds`),
- * which the caller computes once per commitment set and shares across projects.
- */
+/** Forecast every deadlined project under a commitment set. Per-project numbers come
+ *  from each project's own footprint, but the headline probability is the joint
+ *  contention-aware odds the caller computes once and shares. */
 function buildForecasts(
   g: ForecastGather,
   commitments: Pick<Commitment, "date" | "hours">[],
@@ -4895,19 +4483,12 @@ function buildForecasts(
   });
 }
 
-/**
- * The canonical thin-buffer URGENCY map (OVERHAUL S3b `w_buffer` lever, graded in Phase 4):
- * projectId → urgency `(0,1]` for each deadlined project whose critical-chain buffer is "thin"
- * - on-track but below comfortable - under the BASE plan's odds, graded by HOW thin
- * (`bufferUrgency`, `lib/buffer.ts`: rising as the odds approach the on-track line). The
- * within-day reorder biases their work into the day's fast windows in proportion to urgency,
- * so the THINNEST deadline gets the strongest claim on the hours it is most likely to finish
- * in (widening its buffer). Decided ONCE on the base - like the comfort cap + reorder flag - 
- * then replayed for every move subset and shipped to the client (which lacks the per-project
- * forecast distribution the buffer math needs). Reads each project's solo forecast
- * (p50/p90/deployable) with the joint `baselineOdds` as its probability - exactly the
- * `ProjectForecast` `buildForecasts` already returns. Non-thin projects are omitted.
- */
+/** projectId → urgency (0,1] for each deadlined project whose critical-chain buffer is
+ *  thin - on track but not comfortable - graded by how thin. The within-day reorder
+ *  biases their work into the day's fast windows in proportion, so the thinnest deadline
+ *  gets the strongest claim on the hours it's most likely to finish in. Decided once on
+ *  the base, then replayed for every move subset and shipped to the client, which lacks
+ *  the per-project distribution the buffer math needs. Non-thin projects are omitted. */
 function thinBufferUrgencyMap(
   g: ForecastGather,
   commitments: Pick<Commitment, "date" | "hours">[],
@@ -4921,26 +4502,20 @@ function thinBufferUrgencyMap(
   return urgency;
 }
 
-/**
- * Live forecasts + proactive recovery plans for the Today dashboard. Runs a
- * single gather (both were previously computed off separate gathers).
- */
+/** Forecasts + recovery plans for the Today dashboard, off a single gather. */
 export async function forecastDashboard(): Promise<{
   forecasts: ProjectForecast[];
   recoveries: RecoveryPlan[];
   pitWall: PitWall;
   /** The single global allocation the Today views derive from (order + unified schedule). */
   globalPlan: GlobalPlan;
-  /**
-   * The agenda's ranking (S3c-7): the FOLLOWED order - the arranged, roll-sticky plan the
-   * `globalPlan.days` buckets pack, so the agenda and the plan card agree on what's next - 
-   * PLUS today's due recurring instances, floated up via an ordering-only `today` deadline.
-   * Recurring rides this order for display only: its time is already drained into capacity,
-   * so it never enters the forecast (`globalPlan`/`jointOdds` stay over real project work).
-   */
+  /** The agenda's ranking: the FOLLOWED order (arranged, roll-sticky) the plan card also
+   *  shows, plus today's due recurring instances floated up via an ordering-only `today`
+   *  deadline. Recurring rides this for display only - its time is already drained into
+   *  capacity, so it never enters the forecast. */
   agendaOrder: GlobalPlan["order"];
   model: EstimationModel;
-  /** How the calibration seam (S3c-5) has tuned the plan's soft knobs to the user - the
+  /** How the calibration seam has tuned the plan's soft knobs to the user - the
    *  read-only "how your plan is tuned to you" surface. Defaults everywhere until evidence. */
   tuning: PlanTuning;
 }> {
@@ -4956,24 +4531,13 @@ export async function forecastDashboard(): Promise<{
       listMoveChoices(),
     ]);
   const ctx = allocContext(g, g.commitments);
-  // The S3b arrangement pipeline over all current open work (no triage shedding): the canonical
-  // cross-project order, the comfort-cap decision (spread HARD work across days within slack),
-  // the thin-buffer urgency, and the odds-gated within-day reorder (cut context switches + slot
-  // hard/at-risk work into learned-fast windows). Recurring is NOT in here, so the schedule /
-  // forecast never double-count its already-drained hours. No-regret: no cap / no reorder signal
-  // ⇒ the canonical plan, bit-for-bit.
+  // The arrangement pipeline over all open work, no triage shedding: canonical order,
+  // comfort cap, thin-buffer urgency, odds-gated reorder. Recurring is NOT in here so the
+  // schedule never double-counts its already-drained hours.
   const bundle = buildArrangement(g, ctx);
-  // S3c-1 rolling horizon: keep committing to the plan the user is following (sticky) unless the
-  // date rolled, the situation moved the fingerprint, or the fresh candidate's soft gain clears
-  // the churn-scaled hysteresis (feasibility/odds always dominating). This READ decides what to
-  // show and persists nothing (the mutation-time roll is the sole writer); a stale anchor on a
-  // quiet new day is harmless - `packGlobal` re-buckets from `g.today` regardless. `decision.order`
-  // IS the display order in both cases (== the fresh candidate when not sticky). No committed row
-  // ⇒ the candidate verbatim ⇒ the exact pre-S3c dashboard, bit-for-bit. S3c-4: `localNow` (the
-  // client clock, read-only) sharpens the frozen zone to the imminent part of today; `undefined`
-  // ⇒ date-granular churn, exactly S3c-1.
-  // S3c-5 (🟡 tier): same calibrated hysteresis as the write path, so the dashboard's sticky/roll
-  // choice matches what the mutation-time roll would persist.
+  // Rolling horizon (see commitRollingPlan). This read decides what to show and persists
+  // nothing. A stale anchor on a quiet new day is harmless - packGlobal re-buckets from
+  // g.today regardless. decision.order IS the display order either way.
   const hysteresis = calibrateHysteresis(rolls);
   const decision = rollDecision(
     rollContextFor(g, ctx, bundle, committed, localNow, hysteresis),
@@ -4997,22 +4561,18 @@ export async function forecastDashboard(): Promise<{
   const recoveries = g.projects
     .map((p) => buildRecoveryPlan(g, p, odds, pitWall.conflicts, cachedStrategy))
     .filter((plan): plan is RecoveryPlan => plan !== null);
-  // The displayed plan packs the FOLLOWED order (sticky committed or fresh candidate),
-  // comfort-capped when smoothing fired, so the shown days match its priced odds (display ==
-  // priced). `globalPlan.order` stays the canonical order - display metadata + stable priority
-  // ranks, unaffected by the within-day arrangement / stickiness (which live in `days`).
+    // The displayed plan packs the FOLLOWED order, comfort-capped when smoothing fired, so
+    // the shown days match its priced odds. globalPlan.order stays the canonical order for
+    // display metadata and stable ranks.
   const globalPlan: GlobalPlan = {
     order: bundle.canonical.order,
     days: packGlobal(decision.order, ctx.budget, g.today, bundle.comfortCapMinutes),
   };
-  // The agenda order (S3c-7): the FOLLOWED plan - arranged, comfort-capped, odds-gated and
-  // roll-sticky, exactly what `TodayPlan` shows - plus today's due recurring instances, ranked
-  // as if due today (ordering-only) so a due routine/goal surfaces near the top. The union plan
-  // below is built solely to place the routines; `spliceRecurringIntoOrder` reproduces
-  // `decision.order`'s real-task sequence verbatim, so the agenda's ranking and the plan card
-  // can't disagree about what to do next, and the agenda inherits the roll's stickiness for free
-  // (no second committed row / roll cycle to keep in lockstep). Routine minutes stay OUT of
-  // `ctx.tasks`, the schedule and the forecast - they're already drained into capacity.
+  // The agenda order: the followed plan exactly as TodayPlan shows it, plus today's due
+  // recurring instances ranked as if due today. The union plan below exists only to place
+  // the routines - spliceRecurringIntoOrder reproduces decision.order's real-task sequence
+  // verbatim, so agenda and plan card can't disagree, and the agenda inherits stickiness
+  // for free. Routine minutes stay out of ctx.tasks; they're already drained into capacity.
   const recurringTasks = recurringAllocTasksForToday(activities, completions, g.today);
   const orderingDeadlines = new Map(g.deadlineByProject);
   orderingDeadlines.set(RECURRING_LANE_ID, g.today);
@@ -5025,14 +4585,10 @@ export async function forecastDashboard(): Promise<{
     today: g.today,
   }).order;
   const agendaOrder = spliceRecurringIntoOrder(decision.order, unionOrder);
-  // S3c-5 S5 - the "how your plan is tuned to you" read: the SAME calibrated knobs the plan was
-  // just built under (arrange weights off `bundle`, hysteresis off `rolls`) plus the sample counts
-  // behind them. Server-computed and shipped whole; the surface renders, computing nothing.
-  //
-  // The 🟠 move-pref tier joins them here rather than on the strategist's own surface: it is the
-  // third knob the same calibration seam learns, and it belongs beside the two the plan already
-  // exposes. `calibrateMovePrefWeights` is the SAME call `createJointScorer` makes, over the same
-  // rows, so the dials show exactly the weights the next strategist run will arbitrate ties with.
+  // The "how your plan is tuned to you" read: the same calibrated knobs the plan was just
+  // built under, plus the sample counts behind them. Computed server-side and shipped
+  // whole; the surface renders and computes nothing. The move-pref tier joins them here
+  // because it's the third knob the same seam learns.
   const materialRolls = rolls.filter((r) => r.kind === "material");
   const movePrefs = calibrateMovePrefWeights(moveChoices);
   const tuning: PlanTuning = {
@@ -5064,15 +4620,11 @@ export async function forecastDashboard(): Promise<{
   return { forecasts, recoveries, pitWall, globalPlan, agendaOrder, model: g.model, tuning };
 }
 
-/**
- * Do the Value Model's area weights currently change the plan at all? The weights
- * scale each task's cost-of-delay, so they only re-rank work under contention
- * (overload → WSJF) or when goals share a deadline; with enough slack the order is
- * pure earliest-deadline-first and the weights are inert. Compares the canonical
- * order under the saved weights against a neutral (importance = 1) build, so the
- * settings page can honestly tell the user when their weights aren't doing anything
- * yet. Cheap: two deterministic plan builds, no Monte Carlo.
- */
+/** Do the Value Model's area weights change the plan at all right now? They scale
+ * cost-of-delay, so they only re-rank under contention or shared deadlines - with slack
+ * the order is pure earliest-deadline-first and the weights are inert. Compares the
+ * canonical order against a neutral (importance = 1) build so the settings page can say
+ * so honestly. Two deterministic plan builds, no Monte Carlo. */
 export async function valueWeightsAffectPlan(): Promise<boolean> {
   const g = await gatherForecast();
   const ctx = allocContext(g, g.commitments);
@@ -5093,10 +4645,6 @@ export async function valueWeightsAffectPlan(): Promise<boolean> {
   );
 }
 
-/**
- * Forecast + recovery for a single project (project page), off one gather.
- * Both are null when the project has no deadline / doesn't exist.
- */
 export async function forecastProjectWithRecovery(projectId: string): Promise<{
   forecast: ProjectForecast | null;
   recovery: RecoveryPlan | null;
@@ -5122,10 +4670,8 @@ export async function forecastProjectWithRecovery(projectId: string): Promise<{
   };
 }
 
-/**
- * Log a commitment and return any "pit calls" it triggers: projects whose
- * completion probability dropped, each with the moves that would recover it.
- */
+/** Log a commitment and return any pit calls it triggers: projects whose odds dropped,
+ * each with the moves that would recover them. */
 export async function logCommitment(
   date: string,
   hours: number,
@@ -5200,26 +4746,18 @@ export async function logCommitment(
 
 // --- Divergence detection & recovery ----------------------------------------
 
-/**
- * Probability target a recovery plan aims to restore the project to - the same
- * line the forecast meter calls "on track" (see `isOnTrack`), so the callout
- * and the meter never disagree about whether a project is in trouble.
- */
+/** Probability a recovery plan aims to restore the project to - the same line the meter
+ * calls "on track", so the callout and the meter never disagree. */
 const RECOVERY_TARGET = ON_TRACK_PROBABILITY;
-/** A deadline within this many days counts as "imminent". */
 const IMMINENT_DAYS = 3;
 
-/** Whole days from ISO date `a` to ISO date `b` (UTC, b − a). */
 function daysBetween(a: string, b: string): number {
   const da = Date.parse(`${a.slice(0, 10)}T00:00:00Z`);
   const db = Date.parse(`${b.slice(0, 10)}T00:00:00Z`);
   return Math.round((db - da) / 86_400_000);
 }
 
-/**
- * Decide whether a project is off-track, and why, from signals that already
- * exist in the forecast and task data. Pure - caller supplies `today`.
- */
+/** Whether a project is off-track and why, from signals already in the forecast. Pure. */
 export function detectDivergence(
   fc: ForecastResult,
   deadline: string | null,
@@ -5267,12 +4805,9 @@ export function detectDivergence(
     });
   }
 
-  // Critical-chain buffer early-warning (§5a S3a): the deadline clears the
-  // on-track line but not the comfortable one, so the p90−p50 safety margin is
-  // mostly committed and a single overrun could flip the goal. Advisory - the
-  // forecast probability is unchanged (`forecast()` owns the odds, §0). The
-  // `isBufferLow` gate is inherently on-track, so this never double-lists with the
-  // critical `at_risk` / `over_budget` reasons above (and `isOnTrack ⇒ slack > 0`).
+  // Critical-chain buffer warning: past the on-track line but not the comfortable one, so
+  // the p90-p50 margin is mostly committed and one overrun could flip it. Advisory only.
+  // isBufferLow is inherently on-track, so this never double-lists with at_risk above.
   if (isBufferLow(fc)) {
     reasons.push({
       kind: "buffer_low",
@@ -5305,11 +4840,9 @@ export function detectDivergence(
     });
   }
 
-  // Provisional completion (advisory): work marked done - or DoD criteria met - 
-  // at less than `verified` confidence. The forecast probability is unchanged
-  // (a done task frees its budget either way); this only nudges the user to
-  // confirm before treating the goal as truly finished. A done task with no
-  // recorded confidence (legacy / pre-feature) is left alone, not flagged.
+  // Provisional completion: work done, or DoD criteria met, below `verified` confidence.
+  // Advisory - a done task frees its budget either way. Just nudges the user to confirm
+  // before treating the goal as finished. No recorded confidence (legacy) isn't flagged.
   const provisionalDone = tasks.filter(
     (t) =>
       t.status === "done" &&
@@ -5342,11 +4875,8 @@ export function detectDivergence(
   return reasons;
 }
 
-/**
- * Assemble a recovery plan for one project from an already-gathered forecast
- * state. Returns null when on-track or the project has no deadline. Pure given
- * the gather - no I/O - so it can run for many projects off a single gather.
- */
+/** Recovery plan for one project from an already-gathered state. Null when on-track or
+ * undeadlined. Pure given the gather, so it can run for many projects off one. */
 function buildRecoveryPlan(
   g: ForecastGather,
   project: Goal,
@@ -5379,7 +4909,7 @@ function buildRecoveryPlan(
   };
 
   const allTasks = g.allTasksByProject.get(projectId) ?? [];
-  // The goal's definition of done - real now (was [] before §5 gate slice 3), so
+  // The goal's definition of done - real now (was [] before gate slice 3), so
   // a met-but-unverified DoD surfaces as a provisional-completion symptom.
   const criteria = g.criteriaByProject.get(projectId) ?? [];
   // Fold in any cross-project conflict touching this project (the pit-wall reason).
@@ -5472,10 +5002,9 @@ function buildRecoveryPlan(
     .filter((t) => t.status === "blocked")
     .map((t) => ({ taskId: t.id, title: t.title, blockedBy: t.blocked_by }));
 
-  // Diagnose the cause behind a genuine divergence (off-track only - a
-  // warning-only flag has no cause to explain). The baseline comes from the last
-  // cached strategy when the caller supplies one; without it constraint_change
-  // simply can't fire and the cause falls through to the residual-based classes.
+    // Diagnose the cause behind a real divergence (off-track only - a warning has no cause).
+    // Without a cached-strategy baseline, constraint_change can't fire and the cause falls
+    // through to the residual classes.
   const completedTasks = allTasks.filter((t) => t.status === "done");
   const baseline: CauseBaseline | null = baselineStrategy
     ? {
@@ -5496,7 +5025,7 @@ function buildRecoveryPlan(
       })
     : null;
 
-  // Cost to the goal beyond the deadline (§5 gate check 3): the unmet definition
+    // Cost to the goal beyond the deadline: the unmet definition
   // of done / skill milestones a deadline-buying move does nothing for. Shown
   // beside the moves so an odds gain can't hide that the goal's bar is unmoved.
   const goalCost = offTrack
@@ -5525,9 +5054,7 @@ function buildRecoveryPlan(
 /** Everything the strategist needs to propose corrective tasks for one project. */
 export interface RecoveryContext {
   project: Goal;
-  /** Open (not done, not deferred) tasks - full rows, for prompt context. */
   openTasks: Task[];
-  /** Completed (done) tasks - the per-goal residual sample for cause-diagnosis. */
   completedTasks: Task[];
   /** The goal's definition-of-done - for the gate's degraded-DoD + goal-cost checks. */
   criteria: GoalCriterion[];
@@ -5535,7 +5062,6 @@ export interface RecoveryContext {
   deployable: number;
   /** Why the project was flagged off-track. */
   reasons: DivergenceReason[];
-  /** Current completion probability, before any suggested task. */
   currentProbability: number;
   /** The user's learned estimation bias - the same one the forecast uses. */
   model: EstimationModel;
@@ -5547,12 +5073,9 @@ export interface RecoveryContext {
   cause: CauseDiagnosis | null;
 }
 
-/**
- * Gather everything the LLM strategist needs to propose corrective tasks for
- * one project - off the same forecast gather the deterministic recovery plan
- * uses. Returns null when the project has no deadline or isn't flagged
- * off-track, so the strategist never runs on a healthy project.
- */
+/** Everything the LLM strategist needs to propose corrective tasks for one project, off
+ * the same gather the deterministic plan uses. Null unless the project is deadlined and
+ * flagged off-track, so the strategist never runs on a healthy project. */
 export async function getRecoveryContext(
   projectId: string,
 ): Promise<RecoveryContext | null> {
@@ -5589,10 +5112,9 @@ export async function getRecoveryContext(
   const openTasks = allTasks.filter((t) => t.status !== "done" && !t.deferred);
   const completedTasks = allTasks.filter((t) => t.status === "done");
 
-  // Baseline = the last cached strategy: its per-project odds snapshot + when it
-  // was generated. During portfolio generation this is the still-current `prev`
-  // (not yet overwritten), so cause-diagnosis compares "now" against the world
-  // the standing plan was built for. Cheap, additive - no new persistence (S1).
+  // Baseline is the last cached strategy. During portfolio generation that's the still
+  // current `prev`, so cause diagnosis compares now against the world the standing plan
+  // was built for.
   const cached = await getCachedStrategy();
   const baseline: CauseBaseline | null = cached
     ? {
@@ -5633,11 +5155,8 @@ export async function getRecoveryContext(
   };
 }
 
-/**
- * Deterministic preview: the probability the project would have if these
- * suggested tasks were added to its open work. The forecast scores it - never
- * the LLM. Pure given the context, so the strategist can call it without I/O.
- */
+/** Preview: the probability the project would have with these suggested tasks added. The
+ * forecast scores it, never the LLM. Pure, so the strategist can call it without I/O. */
 export function previewProbabilityWithTasks(
   ctx: RecoveryContext,
   tasks: SuggestedTask[],
@@ -5649,11 +5168,8 @@ export function previewProbabilityWithTasks(
   return forecast(estimates, ctx.deployable, forecastOptions(ctx.model)).probability;
 }
 
-/**
- * Persist user-accepted corrective tasks under a synthetic recovery entry
- * (kind "plan") owned by the project. Tasks inherit the project through the
- * entry, exactly like extracted tasks - no schema change.
- */
+/** Persist accepted corrective tasks under a synthetic recovery entry owned by the
+ * project. Tasks inherit the project through the entry, like extracted tasks. */
 export async function addCorrectiveTasks(
   projectId: string,
   tasks: SuggestedTask[],
@@ -5682,12 +5198,8 @@ export async function addCorrectiveTasks(
 
 // --- LLM strategist: modify existing tasks ----------------------------------
 
-/**
- * Deterministic preview: the probability the project would have if these
- * modifications were applied - each reshaped task's original estimate removed
- * and its replacements' estimates added. The forecast scores it, never the LLM.
- * Pure given the context, so the strategist can call it without I/O.
- */
+/** Preview: the probability with these modifications applied - each reshaped task's
+ * original estimate removed, its replacements' added. Scored by the forecast, not the LLM. */
 export function previewProbabilityWithModifications(
   ctx: RecoveryContext,
   mods: TaskModification[],
@@ -5702,14 +5214,9 @@ export function previewProbabilityWithModifications(
   return forecast(estimates, ctx.deployable, forecastOptions(ctx.model)).probability;
 }
 
-/**
- * Apply user-accepted task modifications:
- * - "scope_down" rewrites the existing task in place (lighter title, trimmed
- *   description, smaller estimate) - reversible by editing the task.
- * - "split" defers the original monolith (so it leaves the forecast and the
- *   working views, reversibly) and persists the smaller steps under a synthetic
- *   recovery entry, mirroring `addCorrectiveTasks`.
- */
+/** Apply accepted modifications. "scope_down" rewrites the task in place (lighter title,
+ * smaller estimate), reversible by editing it. "split" defers the original monolith so it
+ * leaves the forecast reversibly, and persists the smaller steps under a recovery entry. */
 export async function applyTaskModifications(
   projectId: string,
   mods: TaskModification[],
@@ -5732,11 +5239,10 @@ export async function applyTaskModifications(
         description: part.description,
         estimated_minutes: part.estimated_minutes,
       });
-      // Materialize the trimmed work as a debt task (§5 gate check 4): scope_down
-      // is the one reshape that genuinely erases work - the estimate shrinks in
-      // place with no other record. The debt task makes that cost owed, not
-      // erased. It's deferred (so it stays OUT of this deadline's forecast - the
-      // cut's odds gain holds) and due past the deadline, marked origin "debt".
+      // Materialize the trimmed work as a debt task. scope_down is the one reshape that
+      // genuinely erases work - the estimate shrinks in place with no other record - so
+      // this makes the cost owed rather than erased. Deferred (stays out of this
+      // deadline's forecast, so the cut's gain holds) and due past the deadline.
       const trimmed = mod.originalEstimate - part.estimated_minutes;
       if (trimmed > 0) {
         newRows.push(
@@ -5779,12 +5285,8 @@ export async function applyTaskModifications(
 
 // --- LLM strategist: re-route the whole plan --------------------------------
 
-/**
- * Deterministic preview: the probability the project would have if its entire
- * open plan were replaced by these alternative tasks. The forecast scores it,
- * never the LLM. Pure given the context, so the strategist can call it without
- * I/O.
- */
+/** Preview: the probability if the whole open plan were replaced by these alternatives.
+ * Scored by the forecast, never the LLM. */
 export function previewProbabilityWithReroute(
   ctx: RecoveryContext,
   tasks: { estimated_minutes: number }[],
@@ -5793,13 +5295,8 @@ export function previewProbabilityWithReroute(
   return forecast(estimates, ctx.deployable, forecastOptions(ctx.model)).probability;
 }
 
-/**
- * Apply a user-accepted re-route: defer every current open task out of the
- * forecast (reversibly, exactly like a split's monolith) and persist the
- * alternative approach's tasks under a synthetic recovery entry - the whole open
- * plan swapped for a lighter route. Self-contained via the passed task ids,
- * mirroring `applyTaskModifications`.
- */
+/** Apply an accepted re-route: defer every open task out of the forecast (reversibly,
+ * like a split's monolith) and persist the alternative tasks under a recovery entry. */
 export async function applyReroute(
   projectId: string,
   replacedTaskIds: string[],
@@ -5835,10 +5332,9 @@ export async function applyReroute(
     createdAt,
   );
 
-  // §5 gate check 2: a lighter route that lowers the goal's definition of done
-  // records how on each compromised criterion - the original text stays intact,
-  // the note carries the compromise - so switching approach can't quietly
-  // redefine the goal down ("no silent erosion").
+  // A lighter route that lowers the definition of done records how on each compromised
+  // criterion - original text intact, note carries the compromise - so switching approach
+  // can't quietly redefine the goal down.
   for (const d of degradedCriteria) {
     await setGoalCriterionDegraded(d.criterionId, d.note);
   }
@@ -5847,7 +5343,6 @@ export async function applyReroute(
 
 // --- Recovery-entry persistence (shared by Generate + Modify) ---------------
 
-/** A factor-bearing row to file under a recovery entry. */
 type RecoveryTaskInput = FactorScores & {
   title: string;
   description: string;
@@ -5863,7 +5358,6 @@ type RecoveryTaskInput = FactorScores & {
   origin?: TaskOrigin | null;
 };
 
-/** Build a persistable Task row from strategist output, scored deterministically. */
 function buildRecoveryTaskRow(
   input: RecoveryTaskInput,
   entryId: string,
@@ -5906,10 +5400,8 @@ function buildRecoveryTaskRow(
   };
 }
 
-/** Days a debt task is parked past the goal deadline before it comes due. */
 const DEBT_DUE_BUFFER_DAYS = 7;
 
-/** Map minutes onto the strategist's 1-5 effort scale (5 = >4h … 1 = <30m). */
 function effortFromMinutes(min: number): number {
   if (min > 240) return 5;
   if (min > 120) return 4;
@@ -5918,7 +5410,6 @@ function effortFromMinutes(min: number): number {
   return 1;
 }
 
-/** The day a debt task comes due - `buffer` days past the deadline, or null. */
 function dueAfterDeadline(deadline: string | null): string | null {
   if (!deadline) return null;
   const ms =
@@ -5927,12 +5418,9 @@ function dueAfterDeadline(deadline: string | null): string | null {
   return new Date(ms).toISOString().slice(0, 10);
 }
 
-/**
- * Build the deferred follow-up that captures work a scope-cut trimmed (§5 gate
- * check 4). Parked (deferred) so it stays out of the current deadline's forecast
- * - the cut's odds gain holds - yet persisted as a real, owed task: due past the
- * deadline, area inherited, origin "debt", provenance in its reason.
- */
+/** The deferred follow-up capturing work a scope cut trimmed. Parked so it stays out of
+ * the current deadline's forecast, but persisted as a real owed task: due past the
+ * deadline, area inherited, origin "debt". */
 function buildDebtTaskRow(
   originalTitle: string,
   trimmedMinutes: number,
@@ -5965,11 +5453,8 @@ function buildDebtTaskRow(
   );
 }
 
-/**
- * Persist task rows under a synthetic recovery entry (kind "plan") owned by the
- * project - the same vehicle Generate uses, so reshaped/added tasks inherit the
- * project through the entry with no schema change. No-op when there are no rows.
- */
+/** Persist task rows under a synthetic recovery entry owned by the project - the same
+ * vehicle Generate uses. No-op when there are no rows. */
 async function persistRecoveryEntry(
   project: Goal,
   summary: string,

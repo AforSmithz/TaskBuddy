@@ -51,26 +51,26 @@ import {
   updateTask,
   type NewActivityInput,
   type ReorderOutcome,
-} from "./store";
-import { buildEODSummary, generateFollowUp, type EODSummary } from "./generate";
-import { skillProgress } from "./skill";
+} from "@/lib/store";
+import { buildEODSummary, generateFollowUp, type EODSummary } from "@/lib/generate";
+import { skillProgress } from "@/lib/skill";
 import {
   generateCorrectiveTasks,
   generateReroute,
   generateTaskModifications,
-} from "./strategist";
-import { interpretCheckin, resolveCheckin, proposeFromCheckin } from "./checkin";
-import { SKILL_TASK_PREFIX, type ResolveInput } from "./portfolio-state";
-import { requireUser } from "./auth";
+} from "@/lib/strategist";
+import { interpretCheckin, resolveCheckin, proposeFromCheckin } from "@/lib/checkin";
+import { SKILL_TASK_PREFIX, type ResolveInput } from "@/lib/portfolio-state";
+import { requireUser } from "@/lib/auth";
 import {
   decomposeGoalJob,
   refreshStrategyJob,
   suggestSkillLinksJob,
   type Job,
-} from "./job-handlers";
-import { isQueueConfigured, publish } from "./jobs";
-import type { ValueModel } from "./value-model";
-import type { WindowAvailability } from "./window-availability";
+} from "@/lib/job-handlers";
+import { isQueueConfigured, publish } from "@/lib/jobs";
+import type { ValueModel } from "@/lib/value-model";
+import type { WindowAvailability } from "@/lib/window-availability";
 import type {
   CheckinCandidate,
   CheckinReview,
@@ -97,8 +97,8 @@ import type {
   TaskModification,
   TaskStatus,
   WorkSessionLocal,
-} from "./types";
-import { MOVE_CHOICE_SCHEMA_VERSION } from "./types";
+} from "@/lib/types";
+import { MOVE_CHOICE_SCHEMA_VERSION } from "@/lib/types";
 
 // Server Actions - the single mutation layer for TaskBuddy.
 
@@ -125,16 +125,11 @@ function revalidatePaths() {
   revalidatePath("/strategy");
 }
 
-/**
- * Run after every mutation: roll the rolling-horizon committed plan forward (S3c-1) then
- * revalidate the affected paths. Mutations are exactly the situation-changing events (complete /
- * add / defer / reroute / log-time → model update), so this is where the committed row is kept
- * fresh; the read paths only DECIDE what to show and persist nothing (design §Decisions #6). The
- * roll is best-effort - any failure is swallowed so it can never break the mutation that
- * triggered it (the next mutation re-rolls, and the read path shows a correct plan meanwhile).
- * The date-guard lives inside `commitRollingPlan` (an unchanged fingerprint + anchor is a cheap
- * no-op). Named `revalidateAll` at the call sites for continuity with the pre-S3c signature.
- */
+/** Runs after every mutation: roll the committed plan forward, then revalidate. Mutations are
+ *  exactly the situation-changing events, so this is where the committed row is kept fresh -
+ *  read paths only decide what to show and persist nothing. Best-effort: any failure is
+ *  swallowed so a roll can't break the mutation that triggered it. Still called revalidateAll
+ *  at the call sites for continuity with the old signature. */
 async function revalidateAll() {
   try {
     await commitRollingPlan();
@@ -146,34 +141,26 @@ async function revalidateAll() {
 
 // --- The queue seam ---------------------------------------------------------
 //
-// Three actions below used to run a model call while the user waited; the
-// measured worst case was 43 seconds. They now publish an event and return, and
-// `job_runs` is how the browser finds out what happened. See aws/README.md
-// "Event-driven, and why it is not decoration" for what the queue buys beyond
-// the wait: retries that outlive the request, failures that reach a DLQ instead
-// of a console line, and a concurrency cap the platform enforces.
+// Three actions below used to run a model call while the user waited; worst case measured 43
+// seconds. They now publish an event and return, and job_runs is how the browser finds out
+// what happened. See aws/README.md for what the queue buys beyond the wait: retries that
+// outlive the request, failures that reach a DLQ, and an enforced concurrency cap.
 
-/**
- * Hand one long job to the queue - or run it here, when there is no queue.
+/** Hand one long job to the queue, or run it here when there's no queue.
  *
- * THE INLINE PATH IS NOT A FALLBACK BOLTED ON FOR SAFETY, it is the local
- * development path and the deployment-without-the-events-stack path. With no
- * `EVENT_BUS_NAME` this runs exactly what the action ran before, in-request, so
- * behaviour is unchanged anywhere the bus is absent. `lib/job-handlers.ts` holds
- * the body either way, so the two paths cannot drift.
+ *  The inline path is NOT a safety fallback, it's the local dev path and the
+ *  deployment-without-the-events-stack path. With no EVENT_BUS_NAME this runs exactly what the
+ *  action ran before, in-request. job-handlers.ts holds the body either way so the two can't
+ *  drift.
  *
- * It is chosen by whether a bus is CONFIGURED, never by whether a publish
- * succeeded. Those are different failures: the first is a deployment shape, the
- * second is an outage, and quietly answering an outage by running the model
- * call in the web request would reintroduce the exact latency this migration
- * removed, on the day the infrastructure is least healthy.
+ *  Chosen by whether a bus is CONFIGURED, never by whether a publish succeeded. Those are
+ *  different failures - the first is a deployment shape, the second is an outage - and quietly
+ *  answering an outage by running the model call in the web request would reintroduce the exact
+ *  latency this removed, on the day the infrastructure is least healthy.
  *
- * A failure on the inline path is RECORDED rather than thrown. The caller is a
- * `useTransition` in a client component and an action that throws surfaces as a
- * generic error boundary with no way back; a `failed` row renders the real
- * message next to a retry button, which is the same affordance the queued path
- * needs anyway.
- */
+ *  A failure on the inline path is RECORDED, not thrown: the caller is a useTransition in a
+ *  client component, and a throw surfaces as a generic error boundary with no way back. A
+ *  `failed` row renders the real message next to a retry button. */
 async function enqueue(
   type: Job["type"],
   subjectId: string | null,
@@ -194,11 +181,9 @@ async function enqueue(
     };
   }
 
-  // THE TEST IS "IS THERE A BUS", NOT "DID THE PUBLISH WORK". A publish that
-  // fails against a bus that exists is an outage, and running a 43-second model
-  // call inside the web request is precisely what this migration removed - it
-  // would risk the request timeout on the one path least able to afford it.
-  // Failing here is recoverable: the row records why, and the user can retry.
+  // The test is "is there a bus", not "did the publish work". A publish that fails against a
+  // bus that exists is an outage, and running a 43-second model call inside the web request is
+  // exactly what this removed. Failing here is recoverable - the row records why.
   if (isQueueConfigured()) {
     if (await publish(toJob(run.id))) {
       return {
@@ -234,22 +219,15 @@ async function enqueue(
   }
 }
 
-/**
- * Read one job's state - the poll the pending UI runs while it waits.
+/** Read one job's state - the poll the pending UI runs while it waits.
  *
- * THIS IS ALSO WHERE THE ASYNC PATH GETS ITS REVALIDATION. A worker writes
- * skill nodes or a strategy from a Lambda that has no render pass, so nothing
- * it does can invalidate a page on its own. The first poll that observes a
- * finished job is running inside a request that can, so it revalidates there.
+ *  This is also where the async path gets its revalidation: a worker writes from a Lambda with
+ *  no render pass, so nothing it does can invalidate a page on its own. The first poll that
+ *  observes a finished job is inside a request that can, so it revalidates there.
  *
- * The cost is bounded but not free, and worth stating precisely: each watcher
- * observes the terminal state once (it stops polling immediately after), so
- * this is once per open tab watching the job rather than once per tick - and
- * `revalidateAll` rolls the plan, which is a real piece of work. Two tabs on
- * Today therefore roll twice. That is the same shape the synchronous action
- * had, one roll per completion per caller, and two users with two tabs is not
- * a load worth adding coordination for.
- */
+ *  Each watcher observes the terminal state once (it stops polling right after), so this is
+ *  once per open tab watching the job, not once per tick. Two tabs on Today roll twice - the
+ *  same shape the synchronous action had, and not worth adding coordination for. */
 export async function pollJobRunAction(jobId: string): Promise<JobRun | null> {
   await requireUser();
   const run = await getJobRun(jobId);
@@ -314,7 +292,7 @@ export async function createEntryAction(
     };
   }
 
-  // redirect() throws internally, so it must run outside the try/catch.
+   // redirect() throws internally, so it must run outside the try/catch.
   redirect(`/entries/${entryId}/review`);
 }
 
@@ -333,7 +311,6 @@ export async function confirmDraftAction(
   redirect(`/entries/${entryId}`);
 }
 
-/** Discard a draft entirely (nothing is kept). */
 export async function discardDraftAction(entryId: string): Promise<void> {
   await requireUser();
   await discardDraft(entryId);
@@ -341,12 +318,9 @@ export async function discardDraftAction(entryId: string): Promise<void> {
   redirect("/create");
 }
 
-/**
- * Move a task to a new Kanban status. Completing it tags the completion with a
- * confidence (manual checkbox → `self_assessed`; strategist auto-complete →
- * `inferred`; an explicit verify → `verified`) and stamps `completed_at`;
- * reopening it clears both.
- */
+/** Move a task to a new status. Completing tags the completion with a confidence (manual
+ *  checkbox = self_assessed, strategist = inferred, explicit verify = verified) and stamps
+ *  completed_at; reopening clears both. */
 export async function updateTaskStatusAction(
   taskId: string,
   status: TaskStatus,
@@ -357,14 +331,13 @@ export async function updateTaskStatusAction(
   const patch: Partial<Task> =
     status === "done"
       ? { status, completion_confidence: confidence, completed_at: new Date().toISOString() }
-      : // Reopening clears all done-provenance, incl. any blocker-resolution note (§5.6 6b).
+      : // Reopening clears all done-provenance, incl. any blocker-resolution note.
         { status, completion_confidence: null, completed_at: null, resolved_by: null };
   await updateTask(taskId, patch);
-  // S2 slice B: accrue the local when-signal for a genuine user completion. Inferred
-  // (strategist) completions are excluded - there is no client clock to honestly
-  // stamp a local window. minutes=0: the task's real length lives on
-  // `tasks.actual_minutes` (slice C joins it); this row adds the local window/weekday
-  // the UTC `completed_at` instant can't give.
+  // Accrue the local when-signal for a genuine user completion. Inferred (strategist)
+  // completions are excluded - there's no client clock to honestly stamp a window with.
+  // minutes=0 because the real length lives on tasks.actual_minutes; this row only adds the
+  // local window/weekday the UTC completed_at can't give.
   if (status === "done" && confidence !== "inferred" && local) {
     await logWorkSession({ taskId, minutes: 0, kind: "complete", local });
   }
@@ -380,7 +353,6 @@ export async function verifyTaskAction(taskId: string): Promise<void> {
 
 // --- Definition of done (goal criteria) -------------------------------------
 
-/** Add a criterion to a goal's definition of done. */
 export async function addGoalCriterionAction(
   goalId: string,
   text: string,
@@ -391,7 +363,6 @@ export async function addGoalCriterionAction(
   await revalidateAll();
 }
 
-/** Mark a criterion met (at a confidence) or unmet. */
 export async function setGoalCriterionMetAction(
   id: string,
   met: boolean,
@@ -412,15 +383,10 @@ export async function setGoalKindAction(
   await revalidateAll();
 }
 
-/**
- * Decompose a learning goal into a skill graph (the LLM-proposes decomposer).
- * Replaces any prior plan. No-ops for project goals - their decomposition is the
- * task DAG from extraction.
- *
- * The slowest job in the app: 43 seconds measured, which is what made it the
- * first one worth moving off the request path. Returns a handle to watch, not a
- * finished plan - the skills appear on the next render after the job lands.
- */
+/** Decompose a learning goal into a skill graph, replacing any prior plan. No-ops for project
+ *  goals - their decomposition is the task DAG from extraction. The slowest job in the app at
+ *  43 seconds measured, which is what made it the first one worth moving off the request path.
+ *  Returns a handle to watch, not a finished plan. */
 export async function decomposeGoalAction(goalId: string): Promise<JobHandle> {
   const user = await requireUser();
   return enqueue(
@@ -436,12 +402,9 @@ export async function decomposeGoalAction(goalId: string): Promise<JobHandle> {
   );
 }
 
-/**
- * Propose skill-node ↔ task links for a learning goal (the LLM-proposes half). Every
- * proposal lands as `suggested` and does nothing until confirmed - spillover reads only
- * confirmed edges. Pairs already on record in ANY status are excluded before the call,
- * so a dismissed link is never re-proposed.
- */
+/** Propose skill-node <-> task links for a learning goal. Every proposal lands as `suggested`
+ *  and does nothing until confirmed - spillover reads only confirmed edges. Pairs already on
+ *  record in ANY status are excluded first, so a dismissed link is never re-proposed. */
 export async function suggestSkillLinksAction(
   goalId: string,
 ): Promise<JobHandle> {
@@ -473,7 +436,6 @@ export async function setSkillLinkStatusAction(
   await revalidateAll();
 }
 
-/** Mark a skill node attained (at a confidence) or not-yet. */
 export async function setSkillAttainedAction(
   id: string,
   attained: boolean,
@@ -484,14 +446,12 @@ export async function setSkillAttainedAction(
   await revalidateAll();
 }
 
-/** Remove a criterion from a goal's definition of done. */
 export async function removeGoalCriterionAction(id: string): Promise<void> {
   await requireUser();
   await removeGoalCriterion(id);
   await revalidateAll();
 }
 
-/** Assign a task to a life-area (Today-page tabs). */
 export async function updateTaskAreaAction(
   taskId: string,
   area: string,
@@ -514,24 +474,17 @@ export async function deferTaskAction(
   await revalidateAll();
 }
 
-/**
- * Apply a pit-wall triage move in one shot: defer a batch of work (the
- * lowest-value tasks auto chose to shed, or a colliding project's open work the
- * user chose to sacrifice). The batch may mix real tasks with a learning goal's
- * skill lanes; `setTriageItemDeferred` routes each to the right persist. Like a
- * single defer, each is reversible from the project's Deferred section.
- */
+/** Apply a pit-wall triage move in one shot: defer a batch of work. The batch may mix real
+ *  tasks with skill lanes; setTriageItemDeferred routes each to the right persist. Reversible
+ *  from the project's Deferred section, like a single defer. */
 export async function applyTriageAction(taskIds: string[]): Promise<void> {
   await requireUser();
   await Promise.all(taskIds.map((id) => setTriageItemDeferred(id, true)));
   await revalidateAll();
 }
 
-/**
- * Reverse a triage batch: bring the deferred work back into scope. Backs the
- * pit wall's "Undo" on an auto-applied deferral, so an automatic move is never a
- * one-way door. Mirrors `applyTriageAction`'s task/skill routing.
- */
+/** Reverse a triage batch. Backs the pit wall's Undo on an auto-applied deferral, so an
+ *  automatic move is never a one-way door. */
 export async function undoTriageAction(taskIds: string[]): Promise<void> {
   await requireUser();
   await Promise.all(taskIds.map((id) => setTriageItemDeferred(id, false)));
@@ -558,7 +511,6 @@ export async function unblockTaskAction(taskId: string): Promise<void> {
   await revalidateAll();
 }
 
-/** Record actual time spent on a task (estimated vs actual tracking). */
 export async function logActualTimeAction(
   taskId: string,
   minutes: number,
@@ -572,7 +524,6 @@ export async function logActualTimeAction(
 
 // --- Time budget & forecast -------------------------------------------------
 
-/** Set or clear a project's deadline (the forecast's finish line). */
 export async function setProjectDeadlineAction(
   projectId: string,
   deadline: string | null,
@@ -591,34 +542,24 @@ export async function setAvailabilityAction(
   await revalidateAll();
 }
 
-/**
- * Toggle the pit-wall automation mode. On = the strategist auto-defers the
- * obvious low-value doomed work and only escalates genuine ties; off = it surfaces
- * every move for the user to apply. Revalidates so the pit wall re-renders in the
- * chosen mode (and, if turning on mid-conflict, applies the pending triage).
- */
+/** Toggle pit-wall automation. On = auto-defer the obvious low-value doomed work and only
+ *  escalate real ties. Revalidates so the pit wall re-renders in the chosen mode. */
 export async function setAutoStrategyAction(value: boolean): Promise<void> {
   await requireUser();
   await setAutoStrategy(value);
   revalidatePath("/");
 }
 
-/**
- * Save the Value Model (area importance + recovery style). It re-weights the
- * allocator's cost-of-delay and the strategist's move preference, so revalidate
- * everywhere odds/order surface. The payload is re-normalized server-side.
- */
+/** Save the Value Model. It re-weights the allocator's cost-of-delay and the strategist's move
+ *  preference, so revalidate everywhere odds/order surface. Re-normalized server-side. */
 export async function updateValueModelAction(model: ValueModel): Promise<void> {
   await requireUser();
   await setValueModel(model);
   await revalidateAll();
 }
 
-/**
- * Save the explicit per-window availability (S3b Phase 4). It overrides the derived
- * window share the windowed forecast uses, so revalidate everywhere odds/order surface.
- * The payload is re-normalized server-side; all-zero weights ⇒ unset (use the derived share).
- */
+/** Save the explicit per-window availability. Overrides the derived share the windowed
+ *  forecast uses, so revalidate everywhere odds/order surface. All-zero weights unset it. */
 export async function updateWindowAvailabilityAction(
   avail: WindowAvailability,
 ): Promise<void> {
@@ -638,7 +579,7 @@ export async function setOverrideAction(
 }
 
 /**
- * Log a commitment ("friends 6-9pm") and return the pit calls it triggers - 
+ * Log a commitment ("friends 6-9pm") and return the pit calls it triggers -
  * projects whose completion probability dropped, with recovery moves.
  */
 export async function logCommitmentAction(
@@ -660,11 +601,8 @@ export async function logCommitmentAction(
   }
 }
 
-/**
- * Ask the LLM strategist for net-new corrective tasks for an off-track project.
- * Read-only (nothing is persisted until the user accepts), so no revalidation.
- * Returns null when there's no genuine gap to fill or the LLM is unavailable.
- */
+/** Ask the strategist for net-new corrective tasks. Read-only - nothing is persisted until the
+ *  user accepts. Null when there's no genuine gap or the LLM is unavailable. */
 export async function suggestRecoveryTasksAction(
   projectId: string,
 ): Promise<RecoverySuggestion | null> {
@@ -687,11 +625,8 @@ export async function acceptRecoveryTasksAction(
   await revalidateAll();
 }
 
-/**
- * Ask the LLM strategist to reshape existing tasks (scope down / split) so an
- * off-track project fits its budget. Read-only - nothing is persisted until the
- * user accepts. Returns null when no reshape usefully improves the odds.
- */
+/** Ask the strategist to reshape existing tasks (scope down / split) to fit the budget.
+ *  Read-only. Null when no reshape usefully improves the odds. */
 export async function suggestModificationsAction(
   projectId: string,
 ): Promise<ModificationSuggestion | null> {
@@ -714,12 +649,8 @@ export async function applyModificationsAction(
   await revalidateAll();
 }
 
-/**
- * Ask the LLM strategist for a whole-plan re-route - a different approach to the
- * same deliverable - when the current path won't fit. Read-only; nothing is
- * persisted until the user switches. Returns null when no genuinely lighter route
- * exists or the forecast says it wouldn't meaningfully help.
- */
+/** Ask the strategist for a whole-plan re-route - a different approach to the same deliverable.
+ *  Read-only. Null when no genuinely lighter route exists. */
 export async function suggestRerouteAction(
   projectId: string,
 ): Promise<RerouteSuggestion | null> {
@@ -747,27 +678,20 @@ export async function applyRerouteAction(
   await revalidateAll();
 }
 
-// --- Strategy bundles: snapshot-on-commit + undo (S1 step 3 / §1.3) ----------
+// --- Strategy bundles: snapshot-on-commit + undo ----------
 
-/**
- * Apply a strategy bundle (one move or a whole tier) as a single snapshotted unit
- * - the ONE path the card's "Apply" buttons take. Records a `PlanVersion` so the
- * change is undoable whole (vision §1.3/§8.2) and returns it, so the card can offer
- * an immediate Undo. `oddsBefore`/`oddsAfter` are the previewed numbers the user
- * accepted (the client re-solve), surfaced later in the history view.
- */
+/** Apply a strategy bundle (one move or a whole tier) as a single snapshotted unit - the one
+ *  path every "Apply" button takes. Records a PlanVersion so the change is undoable whole and
+ *  returns it so the card can offer an immediate Undo. */
 export async function commitStrategyBundleAction(
   moves: StrategyMove[],
   oddsBefore: number,
   oddsAfter: number,
   reason: string,
-  /**
-   * The moves that were on the table and the user UNCHECKED - the other half of the
-   * revealed preference `kept ≻ declined` (see `MoveChoice`). Passed ONLY by the
-   * strategist card's whole-slate Apply, where declining is a real decision. Omitted
-   * by the per-row Apply (applying one move is not a rejection of the rest) and by the
-   * §5.6 check-in review (its moves are user-asserted facts, not recovery taste).
-   */
+  /** The moves that were on the table and the user UNCHECKED - the other half of "kept ≻
+   *  declined". Passed ONLY by the whole-slate Apply, where declining is a real decision.
+   *  Omitted by the per-row Apply (applying one move isn't a rejection of the rest) and by the
+   *  check-in review, whose moves are asserted facts, not recovery taste. */
   declined?: StrategyMove[],
 ): Promise<PlanVersion> {
   await requireUser();
@@ -781,16 +705,9 @@ export async function commitStrategyBundleAction(
   return version;
 }
 
-/**
- * Retain one offered-vs-kept observation for the 🟠-tier calibration of
- * `STYLE_PREF_WEIGHT` / `CAUSE_PREF_WEIGHT`. The φ INPUTS come off each move's
- * `causes` (baked in by `optimizeJointPlan` at generation time, so this costs no
- * scorer) and the value model's current lean.
- *
- * Best-effort by design: a bookkeeping failure must never surface on a bundle the
- * user already applied and that already committed successfully. Mirrors how
- * `reorderTodayAction` accrues `plan_reorders` inside its swallowed path.
- */
+/** Retain one offered-vs-kept observation for calibration. The φ inputs come off each move's
+ *  baked-in `causes`, so this costs no scorer run. Best-effort: a bookkeeping failure must
+ *  never surface on a bundle the user already applied successfully. */
 async function recordMoveChoice(
   kept: StrategyMove[],
   declined: StrategyMove[],
@@ -826,7 +743,7 @@ function toOfferedMove(m: StrategyMove, kept: boolean): OfferedMove {
   };
 }
 
-// --- §5.6 NL check-in / reflection loop -------------------------------------
+// --- NL check-in / reflection loop -------------------------------------
 
 /** The serialized result the capture bar renders: the reviewable proposals + the
  *  client re-solve inputs (so Family-A toggles re-solve live, like the strategy
@@ -837,21 +754,18 @@ export interface CheckinRunResult {
   baseAllOnTime: number;
   source: "llm" | "heuristic";
   /** Deterministic end-of-day reflection (done / blocked / tomorrow's focus),
-   *  shown beside the post-commit outcome summary as reflective context (§5.6
-   *  slice 6a "outcome summary"). Derived server-side; never computed client-side. */
+   *  shown beside the post-commit outcome summary as reflective context. Derived
+   *  server-side; never computed client-side. */
   eod: EODSummary;
 }
 
 /** How many candidate entities the interpret prompt sees (the rest still resolve).
- *  Caps the prompt, not the resolution blast radius (design §"candidate set"). */
+ *  Caps the prompt, not the resolution blast radius. */
 const CHECKIN_PROMPT_CAP = 60;
 
-/** Derive the check-in candidate set from the already-computed joint scorer - the
- *  open real tasks + the unattained skill-node frontier are ALREADY in
- *  `resolveInput.tasks` (skill nodes namespaced with `SKILL_TASK_PREFIX`), so this
- *  re-gathers nothing. Activities come off the scorer. Handles are stable within a
- *  run (T#/S#/A#). Returns the resolve set + the global unattained skill set
- *  (the spillover blast radius). */
+/** Derive the check-in candidate set from the already-computed joint scorer - open tasks and
+ *  the unattained skill frontier are ALREADY in resolveInput.tasks, so this re-gathers nothing.
+ *  Handles are stable within a run (T#/S#/A#). */
 function checkinCandidates(scorer: JointScorer): {
   candidates: CheckinCandidate[];
   skillNodes: CheckinCandidate[];
@@ -896,12 +810,9 @@ function checkinCandidates(scorer: JointScorer): {
   return { candidates, skillNodes };
 }
 
-/**
- * The unlocked frontier across every learning goal: unattained nodes whose prerequisites
- * are all attained. `skillProgress` reasons about ONE goal's graph (its `attainedIds` set
- * is goal-local), so group first - a flat call would let one goal's attainments unlock
- * another goal's nodes. This is the set that INFERRED attainment is confined to.
- */
+/** The unlocked frontier across every learning goal. skillProgress reasons about ONE goal's
+ *  graph (attainedIds is goal-local), so group first - a flat call would let one goal's
+ *  attainments unlock another's nodes. This is what inferred attainment is confined to. */
 function unlockedFrontier(allNodes: SkillNode[]): ReadonlySet<string> {
   const byGoal = new Map<string, SkillNode[]>();
   for (const n of allNodes) {
@@ -916,11 +827,9 @@ function unlockedFrontier(allNodes: SkillNode[]): ReadonlySet<string> {
   return unlocked;
 }
 
-/** Order the prompt candidate set so the scoped goal's own entities come first
- *  before the cap - the scope is the disambiguation. Resolution still runs against
- *  the FULL set (an off-scope reference still resolves), so this only biases what
- *  the model SEES, never the blast radius. A stable partition (no reordering
- *  within each side) keeps the un-scoped ordering intact. */
+/** Put the scoped goal's own entities first before the cap - the scope is the disambiguation.
+ *  Resolution still runs against the FULL set, so this only biases what the model SEES, never
+ *  the blast radius. Stable partition, so the un-scoped ordering is intact. */
 function rankForScope(
   candidates: CheckinCandidate[],
   scope: CheckinScope | undefined,
@@ -931,16 +840,11 @@ function rankForScope(
   return [...inScope, ...rest];
 }
 
-/**
- * Run the interpret → resolve → propose loop over a free-form check-in (§5.6). The
- * review/commit half is the existing S1 machinery - the capture bar commits the
- * accepted Family-A subset via `commitStrategyBundleAction` and runs the Family-B
- * actions individually. No mutation happens here; this is read-only interpretation.
+/** Run interpret -> resolve -> propose over a free-form check-in. The review/commit half is the
+ *  existing bundle machinery. No mutation happens here, it's read-only interpretation.
  *
- * `scope` (§5.6 slice 6a) binds the check-in to one goal - its entities rank first
- * in the interpret prompt, and an `add_task` intent becomes a Family-A `add_tasks`
- * move on that goal instead of a standalone capture. Absent for the global bar.
- */
+ *  `scope` binds the check-in to one goal: its entities rank first in the prompt, and an
+ *  add_task intent becomes an add_tasks move on that goal instead of a standalone capture. */
 export async function runCheckinAction(
   rawReport: string,
   scope?: CheckinScope,
@@ -970,7 +874,7 @@ export async function runCheckinAction(
       baseAllOnTime: scorer.baseAllOnTime,
       cumulative: scorer.cumulative,
       scope,
-      // §5.6 6b - the live structural DAG, so a completed/resolved intent on a blocker
+      // 6b - the live structural DAG, so a completed/resolved intent on a blocker
       // promotes to a cascade (chosen by graph role, not the model).
       deps: scorer.resolveInput.deps,
       // Confirmed skill↔task edges + the candidate set, so linked spillover can credit
@@ -993,33 +897,26 @@ export async function runCheckinAction(
   };
 }
 
-/** Revert one applied bundle whole (vision §8.2): restore its snapshot, then refresh. */
+/** Revert one applied bundle whole: restore its snapshot, then refresh. */
 export async function undoPlanVersionAction(id: string): Promise<void> {
   await requireUser();
   await undoPlanVersion(id);
   await revalidateAll();
 }
 
-/**
- * Undo one automatic roll (S3c-2): restore the arrangement it superseded THROUGH
- * reconcile + re-price (never a row restore), then refresh. The `revalidateAll` roll
- * fires under the current fingerprint, so it stays put and the restore holds against
- * the soft stability gate (design/s3c2-passive-roll-history.md §4).
- */
+/** Undo one automatic roll: restore the arrangement it superseded through reconcile + re-price
+ *  (never a row restore), then refresh. The revalidateAll roll fires under the current
+ *  fingerprint so it stays put and the restore holds against the stability gate. */
 export async function undoPlanRollAction(id: string): Promise<void> {
   await requireUser();
   await undoPlanRoll(id);
   await revalidateAll();
 }
 
-/**
- * Honor a drag-to-reorder of today's plan (S3c-5 §6): commit the dragged order as a preference
- * seed (reconcile + re-price under the current fingerprint) and, when it's odds-neutral, accrue it
- * as a calibration observation. A deliberate drag is always honored (design §9.1) - the returned
- * `oddsCost` tells the client whether to surface the "this costs some odds" note. `revalidateAll`
- * then re-rolls under the fresh fingerprint, so the just-committed order stays put and the page
- * re-renders from it.
- */
+/** Honor a drag-to-reorder of today's plan: commit the dragged order as a preference seed and,
+ *  when it's odds-neutral, accrue it as a calibration observation. A deliberate drag is always
+ *  honored - the returned oddsCost tells the client whether to show the "this costs some odds"
+ *  note. */
 export async function reorderTodayAction(
   date: string,
   orderedTaskIds: string[],
@@ -1030,13 +927,9 @@ export async function reorderTodayAction(
   return outcome;
 }
 
-/**
- * Regenerate the portfolio strategy and cache it - the ONLY trigger that runs the
- * synthesis LLM (locked decision #4). Both "Am I on track?" and the stale-banner
- * "Refresh" call this; the Today/Strategy load paths never do. Passes the
- * previously cached strategy for time-drift continuity, persists the result, and
- * revalidates both pages that render it.
- */
+/** Regenerate the portfolio strategy and cache it - the only trigger that runs the synthesis
+ *  LLM. Both "Am I on track?" and the stale-banner Refresh call this; the load paths never do.
+ *  Passes the previous strategy for time-drift continuity. */
 export async function refreshPortfolioStrategyAction(): Promise<JobHandle> {
   const user = await requireUser();
   return enqueue(
@@ -1050,7 +943,6 @@ export async function refreshPortfolioStrategyAction(): Promise<JobHandle> {
   );
 }
 
-/** Generate a follow-up message for an entry's open questions and blockers. */
 export async function generateFollowUpAction(
   entryId: string,
 ): Promise<{ message: string | null; error: string | null }> {
@@ -1071,7 +963,6 @@ export async function generateFollowUpAction(
 
 // --- Recurring activities (routines & goals) + errands ----------------------
 
-/** Create a recurring activity (routine or goal). */
 export async function createActivityAction(
   input: NewActivityInput,
 ): Promise<void> {
@@ -1100,14 +991,12 @@ export async function setActivityProtectedAction(
   await revalidateAll();
 }
 
-/** Soft-archive a recurring activity (keeps completion history). */
 export async function archiveActivityAction(id: string): Promise<void> {
   await requireUser();
   await updateRecurringActivity(id, { active: false });
   await revalidateAll();
 }
 
-/** Log a completed session for an activity today (minutes default to its estimate). */
 export async function logActivityCompletionAction(
   activityId: string,
   minutes?: number,
@@ -1123,7 +1012,6 @@ export async function logActivityCompletionAction(
   await revalidateAll();
 }
 
-/** Skip an activity's current instance today (reversible). */
 export async function skipActivityAction(
   activityId: string,
   date?: string,

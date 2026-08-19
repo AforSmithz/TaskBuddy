@@ -15,13 +15,13 @@ import type {
   SuggestedTask,
   Task,
   TaskModification,
-} from "./types";
-import { isOnTrack } from "./types";
-import { aggregateCauseMovePref, causeMovePref } from "./grounding";
-import { goalValue, movePref, type ValueModel } from "./value-model";
-import type { AllocTask } from "./allocate";
-import type { ChatMessage } from "./bedrock";
-import { isLLMConfigured } from "./extraction";
+} from "@/lib/types";
+import { isOnTrack } from "@/lib/types";
+import { aggregateCauseMovePref, causeMovePref } from "@/lib/grounding";
+import { goalValue, movePref, type ValueModel } from "@/lib/value-model";
+import type { AllocTask } from "@/lib/allocate";
+import type { ChatMessage } from "@/lib/bedrock";
+import { isLLMConfigured } from "@/lib/extraction";
 import {
   createJointScorer,
   getRecoveryContext,
@@ -34,38 +34,29 @@ import {
   type JointScorer,
   type PitWall,
   type RecoveryContext,
-} from "./store";
+} from "@/lib/store";
 
-// The portfolio strategist (Phase 4) - one cached, time-aware recommendation
-// across ALL projects. It collapses the per-project recovery stack into a single
-// portfolio-wide answer to "reality deviated - how do I move forward?".
+// The portfolio strategist - one cached, time-aware recommendation across ALL projects,
+// collapsing the per-project recovery stack into a single answer to "reality deviated, how do
+// I move forward?".
 //
-// Architecture: "select among precomputed candidates," not free-form. The LLM is
-// handed a numbered menu of fully-formed candidate moves (each carrying its
-// payload + a forecast-scored probability) and returns only the ordered ids to
-// include plus prose. It can never invent a probability - the same hard guardrail
-// as the per-project strategist (`strategist.ts`).
+// It selects among precomputed candidates rather than free-forming: the LLM gets a numbered
+// menu of fully-formed moves (each with its payload and a forecast()-scored probability) and
+// returns ordered ids plus prose. It can never invent a probability.
 //
-// The menu has two halves:
-//   - MECHANICAL moves (defer / reschedule / triage / unblock / mark_done) are
-//     *enumerable* - every one is built deterministically off the dashboard. The
-//     LLM can't be "more creative" here, so it doesn't author them.
-//   - GENERATIVE moves (add_tasks / reshape / reroute) are *invented* - net-new
-//     work. Here the LLM proposes freely across the whole portfolio in ONE call;
-//     each proposal is validated, resolved against real tasks, and scored by
-//     `forecast()` before it becomes a selectable candidate. So the LLM is
-//     unconstrained in *what it can propose*, while every probability stays real
-//     and every move stays safely applyable.
+// The menu has two halves. MECHANICAL moves (defer / reschedule / triage / unblock /
+// mark_done) are enumerable and built deterministically off the dashboard - the LLM can't be
+// more creative there, so it doesn't author them. GENERATIVE moves (add_tasks / reshape /
+// reroute) are net-new work, proposed freely across the whole portfolio in ONE call, then
+// validated, resolved against real tasks and scored by forecast() before becoming selectable.
+// So the LLM is unconstrained in what it proposes while every probability stays real.
 //
-// This module is the ONLY caller of the generator; it runs solely on an explicit
-// or auto-triggered refresh (see `refreshPortfolioStrategyAction`), gated by the
-// deterministic staleness check below - never blindly on a plain load.
+// This is the only caller of the generator, and it runs solely on an explicit or auto-triggered
+// refresh gated by the staleness check below, never blindly on a plain load.
 
-/** How many off-track projects the generative proposal spans (bounds prompt + scoring cost). */
 const MAX_GENERATIVE_PROJECTS = 4;
 /** Cap on the deterministic-fallback move list (keeps the calm card readable). */
 const MAX_FALLBACK_MOVES = 6;
-/** A due date within this many days reads as "due soon" in the fingerprint bucket. */
 const DUE_SOON_DAYS = 3;
 
 // A reshape must beat the current odds by at least this (mirrors strategist.ts).
@@ -74,7 +65,7 @@ const RESHAPE_MIN_GAIN = 0.005;
 const REROUTE_MIN_GAIN = 0.05;
 const MOD_KINDS: ModificationKind[] = ["scope_down", "split"];
 
-// --- Joint greedy optimizer (Phase 5) ---------------------------------------
+// --- Joint greedy optimizer --------------------------------------
 /** A candidate must lift the portfolio conjunction by at least this to be folded in. */
 const JOINT_MIN_GAIN = 0.01;
 /** Hard cap on the greedy plan length (keeps the steady-plan card readable). */
@@ -110,12 +101,8 @@ function dueState(
   return daysBetween(today, d) <= DUE_SOON_DAYS ? "due-soon" : "future";
 }
 
-/**
- * A stable hash of the situation a strategy was generated for - stored for the
- * record / debugging. The *staleness decision* is made by `assessStaleness`
- * (odds-delta + age), not this hash; the fingerprint just records the exact
- * inputs the strategy was synthesized against.
- */
+/** Stable hash of the situation a strategy was generated for, stored for the record. The
+ *  staleness DECISION is assessStaleness (odds-delta + age), not this. */
 export async function computePortfolioFingerprint(): Promise<string> {
   const [tasks, projects, commitments] = await Promise.all([
     listAllTasks(),
@@ -148,22 +135,16 @@ export async function computePortfolioFingerprint(): Promise<string> {
 
 // --- C2. Staleness gate (deterministic, free) -------------------------------
 
-/** Odds must move at least this much for a change to count as "material". */
 const MATERIAL_ODDS_DELTA = 0.1;
 /** A strategy older than this (with off-track work) is considered aged-out. */
 const STRATEGY_MAX_AGE_HOURS = 8;
 
-/**
- * Decide whether a cached strategy is stale - the cheap pre-filter that gates
- * the expensive LLM call. Pure, runs on every load off the already-computed
- * forecasts (no LLM, no extra gather). A strategy is stale when:
- *  - "odds": some project's contention-aware odds moved by ≥ `MATERIAL_ODDS_DELTA`,
- *    crossed the on-track line, or a deadlined project appeared/disappeared; or
- *  - "age": it's older than `STRATEGY_MAX_AGE_HOURS` (elapsed time erodes the plan
- *    even when nothing was edited).
- * A cosmetic edit that doesn't move the odds returns `{ stale: false }`, so the
- * card neither nags nor auto-regenerates.
- */
+/** Is a cached strategy stale? The cheap pre-filter gating the expensive LLM call. Pure, runs
+ *  on every load off the already-computed forecasts. Stale when some project's odds moved by
+ *  >= MATERIAL_ODDS_DELTA, crossed the on-track line, or a deadlined project appeared or
+ *  vanished ("odds"), or it's older than STRATEGY_MAX_AGE_HOURS ("age" - elapsed time erodes
+ *  the plan even with no edits). A cosmetic edit that doesn't move the odds isn't stale, so
+ *  the card neither nags nor auto-regenerates. */
 export function assessStaleness(
   cached: PortfolioStrategy,
   forecasts: ProjectForecast[],
@@ -192,7 +173,6 @@ export function assessStaleness(
   return { stale: false, reason: null };
 }
 
-/** Per-project contention-aware odds snapshot, keyed by projectId. */
 function oddsSnapshot(forecasts: ProjectForecast[]): Record<string, number> {
   return Object.fromEntries(forecasts.map((f) => [f.projectId, f.probability]));
 }
@@ -206,24 +186,18 @@ interface Candidate {
   label: string;
 }
 
-/**
- * Seed a candidate move. `portfolioProbabilityAfter` is a placeholder (0) here - 
- * the cumulative joint odds aren't known until a move is placed in an ORDERED
- * plan. Both selection paths (synthesis re-scoring and the joint optimizer)
- * overwrite it with the real running conjunction before it ever reaches the UI.
- */
+/** Seed a candidate move. portfolioProbabilityAfter is a placeholder here - the cumulative
+ *  joint odds aren't known until a move sits in an ORDERED plan. Both selection paths overwrite
+ *  it with the real running conjunction before it reaches the UI. */
 function candidateMove(
   move: Omit<StrategyMove, "portfolioProbabilityAfter">,
 ): StrategyMove {
   return { ...move, portfolioProbabilityAfter: 0 };
 }
 
-/**
- * Every deterministic mechanical candidate from the dashboard's recovery plans +
- * pit wall. Each carries its forecast-scored `probabilityAfter` straight off the
- * struct it came from (locked decision #6) and a payload the mapped apply action
- * can consume verbatim.
- */
+/** Every deterministic mechanical candidate from the dashboard's recovery plans and pit wall.
+ *  Each carries its forecast()-scored probabilityAfter straight off the struct it came from, plus
+ *  a payload the mapped apply action consumes verbatim. */
 function buildDeterministicCandidates(
   recoveries: RecoveryPlan[],
   pitWall: PitWall,
@@ -360,7 +334,7 @@ function buildDeterministicCandidates(
   }
 
   // Cross-project pit-wall triage - the lowest-value doomed work to shed, as one
-  // batch. probabilityAfter is the best odds the batch buys (off the forecast).
+  // batch. probabilityAfter is the best odds the batch buys (off the forecast()).
   if (pitWall.triage.length > 0) {
     const best = pitWall.triage.reduce(
       (m, t) => Math.max(m, t.probabilityAfter),
@@ -414,15 +388,11 @@ function buildDeterministicCandidates(
   return out;
 }
 
-/**
- * Sacrifice-the-flex candidates: for each UNPROTECTED recurring activity, a
- * "skip it this week" move that frees its current-week hours back to the shared
- * pool. Each is forecast-scored by re-running the joint odds with that activity's
- * drain removed (via `scorer.score`, which routes through the capacity-recompute
- * path) - never an LLM-authored number. Offered only under contention, and only
- * when the skip materially lifts some deadlined project (so it never pads the plan
- * with a sacrifice that doesn't help). Protected activities are never offered.
- */
+/** Sacrifice-the-flex candidates: for each UNPROTECTED recurring activity, a "skip it this
+ *  week" move freeing its current-week hours back to the pool. Forecast-scored by re-running
+ *  joint odds with that drain removed, never an LLM number. Offered only under contention and
+ *  only when the skip materially lifts something, so it never pads the plan with a sacrifice
+ *  that doesn't help. */
 function buildActivitySkipCandidates(scorer: JointScorer): Candidate[] {
   const out: Candidate[] = [];
   if (scorer.pitWall.conflicts.length === 0) return out; // nothing to protect
@@ -655,7 +625,6 @@ interface RawGenerative {
   moves?: unknown;
 }
 
-/** Clamp a 1-5 factor; default to the neutral 3 when missing/invalid. */
 function clampFactor(n: unknown): number {
   const v = Math.round(Number(n));
   return Number.isFinite(v) ? Math.min(5, Math.max(1, v)) : 3;
@@ -678,15 +647,10 @@ function minutes(x: unknown): number {
   return Number.isFinite(m) && m > 0 ? m : 30;
 }
 
-/**
- * One LLM call that lets the model propose generative work across every off-track
- * project at once. Each proposal is validated, resolved against the project's real
- * open tasks, and scored by `forecast()` (via the preview helpers) - only ones
- * that survive become selectable candidates. Replaces the old per-project trio of
- * generators: broader (whole-portfolio context, the LLM's free choice) and cheaper
- * (one call instead of up to nine). Returns [] when the LLM is off, proposes
- * nothing, or nothing survives scoring.
- */
+/** One LLM call proposing generative work across every off-track project at once. Each
+ *  proposal is validated, resolved against the project's real open tasks and scored by
+ *  forecast(); only survivors become candidates. Replaces the old per-project trio: broader
+ *  (whole-portfolio context) and cheaper (one call instead of up to nine). */
 async function proposeGenerativeCandidates(
   recoveries: RecoveryPlan[],
   forecasts: ProjectForecast[],
@@ -717,7 +681,7 @@ async function proposeGenerativeCandidates(
   );
   if (ctxByRef.size === 0) return [];
 
-  const { callBedrockJSON } = await import("./bedrock");
+  const { callBedrockJSON } = await import("@/lib/bedrock");
   // Closed sets for both ref namespaces, so a cross-project or invented ref is
   // structurally impossible rather than silently resolved against the wrong project.
   const projectRefs = [...ctxByRef.keys()];
@@ -791,7 +755,6 @@ function buildGenerativePrompt(ctxByRef: Map<string, RecoveryContext>): string {
   return blocks.join("\n");
 }
 
-/** Validate + forecast-score one proposed generative move into a Candidate, or null. */
 function scoreGenerativeMove(
   m: Record<string, unknown>,
   ctx: RecoveryContext,
@@ -1001,12 +964,9 @@ function normalizeReroute(raw: unknown): ReroutePart[] {
 
 // --- B3a. Plan-vs-time drift ------------------------------------------------
 
-/**
- * A compact, deterministic read of how far reality has slipped from the plan - 
- * per off-track project, the budget deficit and the count of work that should be
- * done by now but isn't. Fed to the synthesis (with `prev`) so the advice has
- * continuity instead of treating every refresh as a cold start.
- */
+/** A compact read of how far reality has slipped from the plan - per off-track project, the
+ *  budget deficit and how much work should be done by now but isn't. Fed to the synthesis with
+ *  `prev` so the advice has continuity instead of treating every refresh as a cold start. */
 function planVsTimeDrift(
   recoveries: RecoveryPlan[],
   forecasts: ProjectForecast[],
@@ -1119,7 +1079,7 @@ async function synthesize(args: {
   prev: PortfolioStrategy | null;
   candidates: Candidate[];
 }): Promise<SynthesisResult> {
-  const { callBedrockJSON } = await import("./bedrock");
+  const { callBedrockJSON } = await import("@/lib/bedrock");
 
   const messages: ChatMessage[] = [
     { role: "system", content: SYNTHESIS_SYSTEM_PROMPT },
@@ -1158,7 +1118,7 @@ async function synthesize(args: {
   };
 }
 
-/** The stateful, time-aware prompt body (decision #5). */
+/** The stateful, time-aware prompt body. */
 function buildSynthesisPrompt(args: {
   today: string;
   forecasts: ProjectForecast[];
@@ -1233,26 +1193,18 @@ function onTrackCount(byProject: Map<string, number>): number {
   return c;
 }
 
-/**
- * The goals whose right answer is "wait" - surfaced only once the greedy loop has
- * concluded nothing on the table is worth doing (step 5 slice 4 follow-on, #2).
+/** The goals whose right answer is "wait", surfaced only once the greedy loop has concluded
+ *  nothing on the table is worth doing. A goal qualifies when it's still off track after
+ *  everything picked, no picked move names it (a goal something was done for isn't "held"),
+ *  and its diagnosed cause positively prefers holding - today only one_off_slip, whose whole
+ *  meaning is "the pace is fine, this recovers on its own".
  *
- * A goal qualifies when ALL of:
- *   · it is still off track after everything the optimizer picked, and
- *   · no picked move names it (a goal something was actually done for isn't "held"),
- *   · its diagnosed cause positively prefers holding - today only `one_off_slip`,
- *     whose whole meaning is "the pace is fine, this recovers on its own".
+ *  A cross-project move names no goal, so it never suppresses a hold: a portfolio triage that
+ *  failed to save this goal hasn't addressed it.
  *
- * A cross-project move (`projectId ""`) names no goal, so it never suppresses a hold:
- * a portfolio triage that failed to save this goal has not addressed it.
- *
- * Ordered most-at-risk first, and bounded by the same `JOINT_MOVE_CAP` as real moves
- * so a bundle can't balloon. Zero gain by construction: `applyMoveToAlloc`'s `hold`
- * arm returns the state unchanged, so `cumulative()` re-scores it as a no-op and the
- * displayed odds are unaffected. Committing one persists nothing (its `MOVE_SPECS`
- * entry is a no-op) - it exists to be *recorded*: a plan version whose reason is
- * "chose to wait", which is exactly the decision history S1 was built to model.
- */
+ *  Zero gain by construction - the `hold` arm returns the state unchanged, so the displayed
+ *  odds are unaffected and committing one persists nothing. It exists to be RECORDED: a plan
+ *  version whose reason is "chose to wait". */
 function holdMoves(
   current: { byProject: Map<string, number>; allOnTime: number },
   picked: StrategyMove[],
@@ -1290,18 +1242,12 @@ function holdMoves(
     }));
 }
 
-/**
- * Sequential greedy plan, scored jointly (decision #3). From the base state, each
- * round joint-scores every not-yet-picked candidate against the accumulated
- * picks, keeps the one that best improves the lexicographic objective - 
- * (#on-track ↑, then portfolio conjunction ↑) - folds it in, and repeats. Stops
- * when everyone savable is on track, no remaining candidate gains ≥ `JOINT_MIN_GAIN`
- * on the conjunction (without adding an on-track project), or the move cap is hit.
- * Redundant moves fall out for free: a move whose project is already saved buys
- * ~0 gain, so it's never picked. The chosen set is re-scored once at full
- * iterations for the displayed cumulative odds; each returned move carries its
- * cumulative `portfolioProbabilityAfter`.
- */
+/** Sequential greedy plan, scored jointly. From the base state, each round joint-scores every
+ *  unpicked candidate against the accumulated picks, keeps the one that best improves
+ *  (#on-track up, then portfolio conjunction up), folds it in, repeats. Stops when everyone
+ *  savable is on track, nothing gains >= JOINT_MIN_GAIN, or the cap is hit. Redundant moves
+ *  fall out for free - a move whose project is already saved buys ~0 gain. The chosen set is
+ *  re-scored once at full iterations for the displayed odds. */
 function optimizeJointPlan(
   scorer: JointScorer,
   candidates: Candidate[],
@@ -1311,21 +1257,14 @@ function optimizeJointPlan(
   const remaining = [...candidates];
   let current = { byProject: scorer.baseByProject, allOnTime: scorer.baseAllOnTime };
 
-  // Step 5 slice 4: each project's diagnosed cause picks which move *family* fits,
-  // applied alongside the value model's recovery-style taste in the odds-tie
-  // tiebreak below. A cross-project move (projectId "" - portfolio-wide triage,
-  // activity skip) has no single owning goal, so its cause bias is the weighted
-  // mean over every diagnosed goal (the goals it actually serves).
+  // Each project's diagnosed cause picks which move family fits, applied alongside the value
+  // model's style taste in the odds-tie tiebreak below. A cross-project move has no single
+  // owning goal, so its cause bias is the weighted mean over every diagnosed goal.
   //
-  // The weight is `goalValue × risk` (step-5 follow-on, VM v2). Both terms are
-  // needed and neither suffices:
-  //   · risk  = 1 − currentProbability - a portfolio move is *about* the goals it
-  //     is actually rescuing, so the most endangered should dominate.
-  //   · value = the Value Model's per-goal importance (explicit, else derived from
-  //     the area weights of its open work) - a doomed errand should not outvote a
-  //     salvageable goal that matters.
-  // NO-REGRET: with no project weights and no area weights every goalValue is 1, so
-  // this reduces bit-identically to the risk-only v1 weighting.
+  // The weight is goalValue × risk, and neither term suffices alone: risk (1 - probability)
+  // because a portfolio move is about the goals it's actually rescuing, and value (the Value
+  // Model's per-goal importance) because a doomed errand shouldn't outvote a salvageable goal
+  // that matters. With no weights set every goalValue is 1, so this reduces to risk-only.
   const openWorkByProject = new Map<string, AllocTask[]>();
   for (const t of scorer.resolveInput.tasks) {
     const bucket = openWorkByProject.get(t.projectId);
@@ -1375,7 +1314,7 @@ function optimizeJointPlan(
       // Lexicographic objective: (#on-track ↑, then conjunction ↑) - UNCHANGED.
       // Taste only arbitrates when the conjunction is within an epsilon: a true
       // odds tie defers to the user's recovery-style preference plus the diagnosed
-      // cause's preferred move family (step 5 slice 4) - never overriding real odds.
+      // cause's preferred move family - never overriding real odds.
       const otc = onTrackCount(result.byProject);
       const botc = onTrackCount(best.result.byProject);
       let better: boolean;
@@ -1404,16 +1343,11 @@ function optimizeJointPlan(
     current = best.result;
   }
 
-  // "Hold / do nothing" as a first-class DECISION (step 5 slice 4 follow-on,
-  // limitation #2). We arrive here having concluded that nothing left on the table
-  // is worth doing. For a goal whose diagnosed cause says the slip is a blip that
-  // recovers on its own, that conclusion is a *choice to wait* - and it deserves to
-  // be said, and recorded in the plan-version history, rather than left as the
-  // silent absence of a recommendation.
-  //
-  // The accept gate above is UNTOUCHED: a hold has zero gain and can never win a
-  // round against a real move. It is appended only after the loop has already
-  // given up, so it cannot displace anything or shorten the plan.
+  // "Hold / do nothing" as a first-class decision. We arrive here having concluded nothing left
+  // is worth doing. For a goal whose cause says the slip is a blip that recovers on its own,
+  // that conclusion is a CHOICE TO WAIT, and it deserves saying and recording rather than being
+  // left as the silent absence of a recommendation. The accept gate above is untouched: a hold
+  // has zero gain and is appended only after the loop gave up, so it can't displace anything.
   picked.push(...holdMoves(current, picked, causeByProject, scorer));
 
   // Re-score the final ordered set once at full iterations for the display.
@@ -1423,7 +1357,7 @@ function optimizeJointPlan(
     portfolioProbabilityAfter: afterEach[i] ?? m.probabilityAfter,
     // Bake the offer-time cause inputs onto the move so that if the user applies
     // this bundle we can record the revealed preference (`OfferedMove`) without
-    // rebuilding a scorer. A single-goal move gets its one cause at weight 1 - 
+       // rebuilding a scorer. A single-goal move gets its one cause at weight 1 -
     // a one-entry weighted mean is the direct lookup, so the weight is inert.
     causes: causesFor(m),
   }));
@@ -1438,13 +1372,9 @@ function templateAssessment(calm: boolean): string {
     : "Some projects are competing for the same hours and a few are slipping. The moves below are ordered by how much they recover — apply the top ones first to protect your deadlines.";
 }
 
-/**
- * The full demo-mode / synthesis-failure path: no generative proposal, no
- * synthesis. On-track is purely deterministic; the single bold tier is the
- * joint-optimized mechanical plan (decision #8) - contention-correct and free of
- * redundant moves. `grounded` is null here: the bold tier already IS the joint
- * steady plan, so a second copy would just duplicate it (decision #5).
- */
+/** The demo-mode / synthesis-failure path: no generative proposal, no synthesis. On-track is
+ *  purely deterministic and the single bold tier is the joint-optimized mechanical plan.
+ *  `grounded` is null here - the bold tier already IS the steady plan. */
 function deterministicFallback(
   scorer: JointScorer,
   candidates: Candidate[],
@@ -1471,14 +1401,10 @@ function deterministicFallback(
   };
 }
 
-/**
- * The instant load-path draft when no strategy is cached yet - synchronous and
- * LLM-free, off the already-computed dashboard. It keeps the cheap solo ranking
- * (no extra gather / no joint MC here): each move's `portfolioProbabilityAfter`
- * is seeded from its solo odds as a placeholder. The aggressive auto-refresh
- * immediately replaces this with the real joint-scored, two-tier strategy
- * (decision #5), so this never needs to run the optimizer itself.
- */
+/** The instant load-path draft when nothing is cached yet - synchronous and LLM-free, off the
+ *  already-computed dashboard. Keeps the cheap solo ranking (no extra gather, no joint MC), so
+ *  each move's portfolioProbabilityAfter is seeded from its solo odds as a placeholder. The
+ *  auto-refresh replaces this with the real joint-scored two-tier strategy immediately. */
 export function deterministicStrategyFrom(
   recoveries: RecoveryPlan[],
   pitWall: PitWall,
@@ -1516,16 +1442,11 @@ export function deterministicStrategyFrom(
 
 // --- The generator ----------------------------------------------------------
 
-/**
- * Generate the portfolio strategy. Reuses `forecastDashboard()` for the
- * deterministic core, runs ONE bounded generative-proposal call (the LLM's free
- * canvas, validated + forecast-scored), then makes ONE synthesis call that selects
- * from the combined menu. `prev` is fed in for continuity. Falls back to a fully
- * deterministic strategy when the LLM is unconfigured or a call fails.
- *
- * Two LLM calls in the happy path (propose + synthesize). This is the only place
- * the LLM fires; callers gate it behind the deterministic staleness check.
- */
+/** Generate the portfolio strategy. Reuses forecastDashboard for the deterministic core, runs
+ *  ONE bounded generative-proposal call, then ONE synthesis call that selects from the combined
+ *  menu. `prev` is fed in for continuity. Falls back to a fully deterministic strategy when the
+ *  LLM is unconfigured or a call fails. Two LLM calls in the happy path, and this is the only
+ *  place either fires. */
 export async function generatePortfolioStrategy(
   prev: PortfolioStrategy | null,
 ): Promise<PortfolioStrategy> {
@@ -1534,7 +1455,7 @@ export async function generatePortfolioStrategy(
   const today = generatedAt.slice(0, 10);
 
   // One gather + dashboard, plus the joint scorer the optimizer + bold re-scorer
-  // probe against (decision #9 - replaces the old forecastDashboard() call).
+   // probe against (decision #9 - replaces the old forecastDashboard() call).
   const scorer = await createJointScorer();
   const { forecasts, recoveries, pitWall } = scorer;
   const tasksById = new Map((await listAllTasks()).map((t) => [t.id, t]));
@@ -1545,7 +1466,7 @@ export async function generatePortfolioStrategy(
   candidates.push(...buildActivitySkipCandidates(scorer));
 
   // Deterministic fallback: no LLM, no generative proposal, no synthesis. The
-  // single bold tier IS the joint-optimized mechanical plan (decision #8).
+  // single bold tier IS the joint-optimized mechanical plan.
   if (!isLLMConfigured()) {
     return deterministicFallback(scorer, candidates, fingerprint, generatedAt);
   }
@@ -1569,26 +1490,26 @@ export async function generatePortfolioStrategy(
   } catch (err) {
     console.error("Portfolio synthesis failed:", err);
     // allCandidates, not candidates: the generative moves have already been produced,
-    // validated and forecast-scored, and throwing them away because the SELECTION step
+    // validated and forecast()-scored, and throwing them away because the SELECTION step
     // failed loses work that is still perfectly usable.
     return deterministicFallback(scorer, allCandidates, fingerprint, generatedAt);
   }
 
   // B4 - map selected ids back to moves (dropping any unknown id). The LLM still
-  // chooses (decision #7); selection is unchanged from Phase 4.
+  // chooses; selection is unchanged from Phase 4.
   const selected = result.selectedIds
     .map((id) => allCandidates[id]?.move)
     .filter((m): m is StrategyMove => m !== undefined);
 
   // Bold tier: re-score the LLM's exact ordered set jointly so each move shows the
-  // running portfolio conjunction (decision #5/#7) instead of its solo odds.
+  // running portfolio conjunction instead of its solo odds.
   const bold = scorer.cumulative(selected);
   const moves = selected.map((m, i) => ({
     ...m,
     portfolioProbabilityAfter: bold.afterEach[i] ?? m.probabilityAfter,
   }));
 
-  // Grounded "steady plan" tier (decision #1): mechanical-only moves chosen by the
+  // Grounded "steady plan" tier: mechanical-only moves chosen by the
   // joint greedy optimizer. Null when there's nothing mechanical worth doing.
   const groundedPlan = optimizeJointPlan(scorer, candidates, scorer.valueModel);
   const grounded =
