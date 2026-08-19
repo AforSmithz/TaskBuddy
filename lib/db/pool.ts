@@ -2,65 +2,38 @@ import "server-only";
 // Side effect, and it must run before any Pool is constructed: registers the
 // numeric/date/timestamp parsers that keep row values shaped the way the rest of
 // the app already believes they are. See ./types.ts for why each one exists.
-import "./types";
+import "@/lib/db/types";
 
 import { Pool, type PoolClient } from "pg";
 import { Signer } from "@aws-sdk/rds-signer";
-import { RDS_CA_BUNDLE } from "./rds-ca";
+import { RDS_CA_BUNDLE } from "@/lib/db/rds-ca";
 
-// The connection pool, and the transaction wrapper every query goes through.
+// The connection pool and the transaction wrapper every query goes through.
 //
-// ===========================================================================
-// AUTHENTICATION: AN IAM TOKEN, NOT A PASSWORD
-// ===========================================================================
-// There is no database password in this deployment. `Signer.getAuthToken()`
-// returns a 15-minute credential derived from the Lambda execution role, and
-// the `taskbuddy_app` role is granted `rds_iam`, which in Postgres makes
-// password authentication for that role impossible rather than merely unused.
+// No database password here: Signer.getAuthToken() returns a 15-minute credential derived
+// from the Lambda execution role, and taskbuddy_app is granted rds_iam, which makes password
+// auth for that role impossible rather than just unused. This reverses the Azure decision
+// (azure/sql/02_grants.sql kept a password because idleTimeoutMillis is 10s, so every new
+// connection would need a live token). That held for Entra, where a token is an HTTP round
+// trip; an RDS auth token is an HMAC over a URL computed locally, no network call. The
+// objection was to the round trip and there isn't one. Not cached on purpose - signing is
+// microseconds, and caching a 15-minute credential just adds a clock-skew failure.
 //
-// THIS REVERSES THE AZURE DECISION, AND THE REVERSAL IS THE POINT.
-// azure/sql/02_grants.sql argued that the app should keep a password rather
-// than use Entra tokens, because `idleTimeoutMillis` is 10s so connections are
-// created constantly and each new one would need a live token - "a new failure
-// mode on the hottest path in the system". That reasoning was correct for
-// Azure and does not transfer. An Entra token is an HTTP round trip to a token
-// endpoint. An RDS auth token is an HMAC over a URL, computed locally from
-// credentials the runtime already holds, with no network call at all. The
-// objection was to the round trip, and there is no round trip.
+// TLS: rejectUnauthorized against the pinned regional RDS root. The security group is open on
+// 5432 (no static egress IP without a NAT gateway), so certificate VERIFICATION, not just
+// encryption, is what stands between us and an impersonated server. rds.force_ssl=1 is set
+// cluster-side as the other half.
 //
-// The SDK caches nothing, deliberately: signing is microseconds, and caching a
-// 15-minute credential would only introduce a clock-skew failure.
+// max: 6 because one dashboard render fires ~21 concurrent statements; at max 2 those
+// serialised into ~11 round-trip batches, six takes it to ~4. Note it's PER EXECUTION
+// ENVIRONMENT and Lambda scales those, so what actually reaches Aurora is max × concurrent
+// invocations. Aurora allows several hundred, so connections aren't the binding constraint
+// any more, Lambda concurrency is.
 //
-// ===========================================================================
-// TLS
-// ===========================================================================
-// `rejectUnauthorized: true` against the pinned regional RDS root. The security
-// group is open on 5432 (Lambda has no static egress IP without a NAT gateway),
-// so certificate VERIFICATION - not merely encryption - is what stands between
-// the app and an impersonated server. `rds.force_ssl=1` is set cluster-side as
-// the other half; see aws/infra/lib/data-stack.ts.
-//
-// ===========================================================================
-// SIZING, AND WHY idleTimeoutMillis IS NOW A COST CONTROL
-// ===========================================================================
-// `max: 6` is carried over unchanged, and the reasoning still holds: a single
-// dashboard render fires roughly 21 concurrent statements (`store.ts`
-// gatherForecast, a 13-way Promise.all inside forecastDashboard's 8-way). At
-// `max: 2` those serialised into ~11 round-trip batches; six takes it to ~4.
-//
-// What changed is the ceiling it is measured against. Azure's Burstable B1ms
-// gave ~35 usable connections. Aurora Serverless v2 at the 0.5 ACU floor allows
-// several hundred, so the connection ceiling is no longer the binding
-// constraint - Lambda concurrency is. `max` is PER EXECUTION ENVIRONMENT, and
-// Lambda scales environments, so the number that reaches Aurora is
-// max x concurrent invocations.
-//
-// `idleTimeoutMillis: 10_000` has acquired a second job. On Azure it was
-// hygiene. Here it is what lets the cluster reach zero ACU: Aurora will not
-// auto-pause while any connection is open, so a pool that held connections
-// between page views would keep capacity awake around the clock and turn a
-// ~$10/mo cluster into a ~$50/mo one. Do not raise it. The
-// `taskbuddy-db-not-pausing` alarm watches this exact assumption.
+// idleTimeoutMillis 10s is what lets the cluster reach zero ACU - Aurora won't auto-pause
+// while any connection is open, so holding connections between page views would keep capacity
+// awake around the clock and turn a ~$10/mo cluster into ~$50/mo. Don't raise it. The
+// taskbuddy-db-not-pausing alarm watches this exact assumption.
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -69,14 +42,9 @@ const DEFAULT_PORT = 5432;
 
 let pool: Pool | null = null;
 
-/**
- * True when a real database is configured. Everything else falls back to the
- * in-memory demo store.
- *
- * Two shapes count. `PGHOST` is the deployed one - IAM auth, no secret. A full
- * `DATABASE_URL` is the local-development escape hatch, for a Postgres in
- * Docker that has never heard of IAM.
- */
+/** True when a real database is configured; everything else falls back to the in-memory demo
+ *  store. PGHOST is the deployed shape (IAM auth, no secret); a full DATABASE_URL is the
+ *  local-dev escape hatch for a Postgres in Docker that's never heard of IAM. */
 export function isDbConfigured(): boolean {
   return Boolean(process.env.PGHOST || process.env.DATABASE_URL);
 }
@@ -89,13 +57,12 @@ function usesIamAuth(): boolean {
 function buildPool(): Pool {
   const strict = process.env.PGSSL_STRICT !== "0";
 
-  // --- Local development: a plain connection string, password auth. --------
+  // --- Local development: plain connection string, password auth -----------
   //
-  // Parsed by hand rather than handed to pg as `connectionString`, exactly as
-  // before: pg does `Object.assign({}, config, parse(connectionString))`, so
-  // anything the URL implies WINS over the explicit config - including
-  // `sslmode`. A stray `?sslmode=require` copied from a psql invocation would
-  // quietly override the TLS settings below.
+  // Parsed by hand rather than passed as `connectionString`: pg does
+  // Object.assign({}, config, parse(connectionString)), so anything the URL implies WINS over
+  // the explicit config - including sslmode. A stray ?sslmode=require copied off a psql
+  // invocation would quietly override the TLS settings below.
   const raw = process.env.DATABASE_URL;
   if (raw) {
     const url = new URL(raw);
@@ -115,7 +82,7 @@ function buildPool(): Pool {
     );
   }
 
-  // --- Deployed: IAM authentication. --------------------------------------
+   // --- Deployed: IAM authentication. --------------------------------------
   const host = process.env.PGHOST;
   if (!host) {
     throw new Error(
@@ -128,10 +95,8 @@ function buildPool(): Pool {
   const region =
     process.env.AWS_REGION_NAME ?? process.env.AWS_REGION ?? "ap-southeast-1";
 
-  // MODULE SCOPE. The Signer holds the credential provider chain; rebuilding it
-  // per connection would re-resolve the role credentials each time, which
-  // genuinely is a network call and would reintroduce the very problem the
-  // Azure note warned about.
+    // Module scope. The Signer holds the credential provider chain; rebuilding it per connection
+    // would re-resolve the role credentials each time, which genuinely is a network call.
   const signer = new Signer({ hostname: host, port, username: user, region });
 
   return instrument(
@@ -140,10 +105,9 @@ function buildPool(): Pool {
       port,
       user,
       database: process.env.PGDATABASE ?? "taskbuddy",
-      // A FUNCTION, not a string. node-postgres calls this per connection, so
-      // each connection gets a fresh token rather than every connection sharing
-      // one that expires fifteen minutes into the instance's life. Returning a
-      // string here is the single most likely way this file breaks: it would
+      // A FUNCTION, not a string - pg calls this per connection, so each one gets a fresh
+      // token instead of every connection sharing one that expires fifteen minutes into the
+      // instance's life. Returning a string is the most likely way this file breaks: it would
       // work perfectly for fifteen minutes after every deploy.
       password: () => signer.getAuthToken(),
       ssl: {
@@ -160,28 +124,20 @@ const POOL_TUNING = {
   max: 6,
   // Also the auto-pause enabler. See the header.
   idleTimeoutMillis: 10_000,
-  // NOT the same knob as the one above, and the difference matters.
+  // Not the same knob as the one above. idleTimeoutMillis drops connections fast so the
+  // cluster can pause; this is how long we'll WAIT for one - and once the cluster has paused,
+  // the next connection has to wake it, which takes Aurora around 15 seconds.
   //
-  // `idleTimeoutMillis` is the cost control: it drops connections fast so the
-  // cluster can pause. `connectionTimeoutMillis` is how long we are willing to
-  // WAIT for a connection - and once the cluster has paused, the next connection
-  // has to wake it, which Aurora takes around 15 seconds to do.
+  // At the previous 10s that wait always lost. Seen live 2026-08-19: the first sign-in after
+  // an idle period failed twice with "user migration failed: Error: timeout expired" and only
+  // worked on the third try, once the cluster was awake. Every cold path had it; the Cognito
+  // migration trigger is just where it showed, because a failed login is louder than a slow
+  // render.
   //
-  // At the previous 10s that wait always lost. Observed live on 2026-08-19: the
-  // first sign-in after an idle period failed twice with
-  //
-  //   user migration failed: Error: timeout expired
-  //       at Timeout._onTimeout (/node_modules/pg/lib/client.js:170:28)
-  //
-  // and only succeeded on the third attempt, once the cluster was already awake.
-  // Every cold path had the same bug; the Cognito migration trigger is just
-  // where it was visible, because a failed login is louder than a slow render.
-  //
-  // 30s covers the resume with margin and costs nothing: it is a ceiling on
-  // waiting, not a duration anything is held for, so it cannot keep the cluster
-  // awake. It stays well inside the 60s function timeout and the 60s CloudFront
-  // origin read timeout, so a genuinely unreachable database still fails as a
-  // connection error rather than as a gateway timeout with no cause attached.
+  // 30s covers the resume and costs nothing - it's a ceiling on waiting, not a duration
+  // anything is held for, so it can't keep the cluster awake. Stays inside the 60s function
+  // and CloudFront origin timeouts, so an unreachable database still fails as a connection
+  // error rather than an unattributed gateway timeout.
   connectionTimeoutMillis: 30_000,
   // Belt and braces against a leaked transaction: the cluster-side
   // idle_in_transaction_session_timeout is 30s, this is the client half.
@@ -190,13 +146,10 @@ const POOL_TUNING = {
 
 function instrument(p: Pool): Pool {
   p.on("error", (err) => {
-    // An idle client erroring out is not tied to any request, so it would
-    // otherwise become an unhandled rejection and take the instance down.
-    //
-    // Expect to see this occasionally and harmlessly on Lambda: an execution
-    // environment frozen between invocations cannot run the idle timer, so a
-    // connection can be reaped server-side while the pool still believes it
-    // holds it. The pool discards and reconnects.
+  // An idle client erroring isn't tied to any request, so it would otherwise be an
+  // unhandled rejection and take the instance down. Expect this occasionally and harmlessly
+  // on Lambda: a frozen execution environment can't run the idle timer, so a connection can
+  // be reaped server-side while the pool still thinks it holds it.
     console.error("pg pool: idle client error", err.message);
   });
   return p;
@@ -216,24 +169,18 @@ export async function closePool(): Promise<void> {
   await p.end().catch(() => {});
 }
 
-/**
- * Run `fn` inside a transaction with `app.user_id` set to `uid`, which is what
- * every RLS policy in `01_schema.sql` reads through `app.uid()`.
+/** Run `fn` in a transaction with app.user_id set to `uid`, which is what every RLS policy
+ *  reads through app.uid().
  *
- * PER STATEMENT, NOT PER REQUEST. This is not a tuning choice:
+ *  Per statement, not per request. set_config(..., true) is transaction-local, so the GUC has
+ *  to live in the same transaction as the statement depending on it - session-wide would leak
+ *  one user's identity onto the next request that picked up the same pooled connection. And
+ *  pinning a connection for a whole request would serialise the ~21 concurrent statements a
+ *  dashboard render fires.
  *
- *  - `set_config(..., true)` is transaction-local, so the GUC has to live inside
- *    the same transaction as the statement that depends on it. Setting it
- *    session-wide would leak one user's identity onto the next request that
- *    picked up the same pooled connection.
- *  - Pinning one connection for a whole request would serialise the ~21
- *    concurrent statements a dashboard render fires.
- *
- * The `finally` release is load-bearing. A transaction left open pins a
- * connection until the server's 30s idle timeout reaps it - and on Aurora it
- * also stops the cluster ever pausing, so the symptom is a bill rather than an
- * outage.
- */
+ *  The finally release is load-bearing: an open transaction pins a connection until the 30s
+ *  server idle timeout reaps it, and on Aurora it also stops the cluster ever pausing - so the
+ *  symptom is a bill, not an outage. */
 export async function withUser<T>(
   uid: string,
   fn: (client: PoolClient) => Promise<T>,
@@ -247,17 +194,13 @@ export async function withUser<T>(
 
   const client = await getPool().connect();
   try {
-    // BEGIN and the GUC in ONE round trip rather than two.
-    //
-    // Passing no `values` makes node-postgres use the simple query protocol,
-    // which accepts several semicolon-separated statements per message. The
-    // extended protocol - anything with parameters - does not, which is why
-    // this cannot be written with a $1 placeholder.
-    //
-    // INTERPOLATING `uid` IS SAFE HERE, AND ONLY HERE, because it has just been
-    // matched against UUID_RE above: the only characters that survive that test
-    // are hex digits and hyphens, so there is no quote to escape and nothing to
-    // inject. Keep the two adjacent.
+  // BEGIN and the GUC in one round trip. Passing no `values` makes pg use the simple query
+  // protocol, which accepts several semicolon-separated statements per message; the extended
+  // protocol (anything with parameters) doesn't, which is why this can't use a $1 placeholder.
+  //
+  // Interpolating `uid` is safe here, and only here, because it was just matched against
+  // UUID_RE - the only characters that survive are hex digits and hyphens, so there's no
+  // quote to escape. Keep the two adjacent.
     await client.query(
       `BEGIN; select set_config('app.user_id', '${uid}', true)`,
     );
@@ -276,12 +219,9 @@ export async function withUser<T>(
   }
 }
 
-/**
- * Run `fn` on a pooled connection with **no** `app.user_id` set. Only the
- * authentication path may use this, and only via the SECURITY DEFINER functions
- * in `03_auth.sql` - with the GUC unset, `app.uid()` is NULL and every ordinary
- * policy denies, which is exactly the intent.
- */
+/** Run `fn` on a pooled connection with NO app.user_id set. Only the auth path may use this,
+ *  and only via the SECURITY DEFINER functions in 03_auth.sql - with the GUC unset app.uid()
+ *  is NULL and every ordinary policy denies, which is the intent. */
 export async function withoutUser<T>(
   fn: (client: PoolClient) => Promise<T>,
 ): Promise<T> {

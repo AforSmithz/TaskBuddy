@@ -2,29 +2,20 @@
 
 // Type-only (erased at runtime → no import cycle): the serialized re-solve inputs
 // the review screen ships to the client live beside the consumer in `portfolio-state`.
-import type { ResolveInput } from "./portfolio-state";
+import type { ResolveInput } from "@/lib/portfolio-state";
 // Type-only (same erased-cycle reason): the arrangement soft-weight shape, defined
 // beside its calibrator in `arrange`; the tuning view contract reports it.
-import type { ArrangeWeights } from "./arrange";
+import type { ArrangeWeights } from "@/lib/arrange";
 // Type-only (same erased-cycle reason): the recovery lean lives beside the Value
 // Model that owns it; the offered-vs-kept row stores which one was in force.
-import type { RecoveryStyle } from "./value-model";
+import type { RecoveryStyle } from "@/lib/value-model";
 
 export type Confidence = "High" | "Medium" | "Low";
 
-/**
- * How sure we are that a completion is real. A task marked done by hand is
- * `self_assessed`; the strategist auto-completing one is `inferred`; an explicit
- * check that it meets the definition-of-done is `verified`. Used to tag both task
- * completion and the meeting of a goal's definition-of-done criteria.
- */
+/** Marked done by hand = self_assessed; strategist auto-complete = inferred; checked
+ *  against the definition of done = verified. Tags both tasks and DoD criteria. */
 export type CompletionConfidence = "verified" | "self_assessed" | "inferred";
 
-/**
- * Strength ordering (higher = surer). Used to take the *weakest* confidence
- * across a goal's met criteria, and to decide whether a goal is "verified
- * complete" (every met criterion is `verified`).
- */
 export const COMPLETION_CONFIDENCE_RANK: Record<CompletionConfidence, number> = {
   verified: 3,
   self_assessed: 2,
@@ -37,7 +28,6 @@ export const COMPLETION_CONFIDENCE_LABELS: Record<CompletionConfidence, string> 
   inferred: "Inferred",
 };
 
-/** Result of a login/signup Server Action, surfaced via `useActionState`. */
 export interface AuthState {
   error: string | null;
   /** Non-error message, e.g. "check your email to confirm". */
@@ -72,19 +62,13 @@ export const STATUS_LABELS: Record<TaskStatus, string> = {
 
 export type PriorityLabel = "Critical" | "High" | "Medium" | "Low" | "Backlog";
 
-/** Default life-areas always shown as Today-page tabs. */
 export const SEED_AREAS = ["Work", "Personal", "Hobby"];
 
-/** How an entry was created: a meeting transcript or a personal goal/note. */
 export type EntryKind = "meeting" | "plan";
 
-/**
- * The flavour of a goal. A `project` carries a task DAG + a deadline (work that
- * ships by a date); a `learning` goal carries a skill graph + checkpoints +
- * definition-of-done (a capability you build up over time). The same engine runs
- * under both - `kind` is what lets the UI and (later) the decomposer treat them
- * differently. The skill-graph structure itself lands with the decomposer.
- */
+/** A `project` is a task DAG + deadline; a `learning` goal is a skill graph +
+ *  checkpoints + definition-of-done. Same engine underneath, `kind` just lets the UI
+ *  and the decomposer treat them differently. */
 export type GoalKind = "project" | "learning";
 
 export const GOAL_KIND_LABELS: Record<GoalKind, string> = {
@@ -92,77 +76,52 @@ export const GOAL_KIND_LABELS: Record<GoalKind, string> = {
   learning: "Learning",
 };
 
-/** Lifecycle of an entry: a draft awaiting review, or live. */
 export type EntryStatus = "draft" | "active";
 
-/**
- * The filing choices a user confirms in the review step before a draft goes
- * live. On the entry form any of these may be left on "Auto"; the review step
- * is where they are explicitly confirmed (or corrected).
- */
+/** Filing choices confirmed in the review step. On the entry form these can all be
+ *  "Auto"; review is where they get pinned down. */
 export interface DraftClassification {
-  /** Life-area applied to every task in the entry. */
   area: string;
-  /** Existing project to attach the entry to, or null for none. */
   projectId: string | null;
-  /** Name of a brand-new project to create; empty string when not creating one. */
   newProjectName: string;
-  /** Kind for a brand-new goal (only read when `newProjectName` is set). */
   newProjectKind: GoalKind;
-  /** Earlier entry this one follows up on, or null. */
   parentEntryId: string | null;
 }
 
 // --- Database row shapes ----------------------------------------------------
 
-/**
- * A goal - the spine of the app. Owns its tasks directly (`Task.goal_id`) and
- * carries a definition-of-done (`GoalCriterion[]`) plus a deadline. Subsumes the
- * old "project" (a project goal = task DAG + deadline; a learning goal will add a
- * skill graph in a later step). Entries are a provenance/source link, not the
- * structural parent.
- */
+/** A goal - the spine of the app. Owns its tasks directly via Task.goal_id. Entries are
+ *  a provenance link, not the structural parent. */
 export interface Goal {
   id: string;
-  /** Owner of the goal. Undefined in offline demo mode. */
   user_id?: string | null;
   name: string;
   description: string | null;
-  /** Project (task DAG + deadline) vs learning (skill graph + checkpoints). */
   kind: GoalKind;
   /** The "finish line" the completion forecast is computed against. */
   deadline: string | null;
   created_at: string;
 }
 
-/**
- * One line of a goal's definition-of-done. The goal counts as complete when its
- * criteria are non-empty AND all `met` (derived, never stored). `met_confidence`
- * records how sure we were when it was checked off.
- */
+/** One line of a goal's definition of done. The goal is complete when criteria are
+ *  non-empty AND all met (derived, never stored). */
 export interface GoalCriterion {
   id: string;
   goal_id: string;
   text: string;
   met: boolean;
   met_confidence: CompletionConfidence | null;
-  /**
-   * How a scope-cutting recovery move lowered this criterion's ambition (e.g.
-   * "now: managed provider, no SSO"), or null while it stands intact. The
-   * original `text` is kept verbatim; this records the compromise so a goal can't
-   * be quietly redefined down (§5 grounding gate check 2 - "no silent erosion").
-   */
+  /** How a scope cut lowered this criterion's ambition ("now: managed provider, no
+   *  SSO"), or null while intact. `text` stays verbatim so a goal can't be quietly
+   *  redefined down. */
   degraded_note: string | null;
   sort_index: number;
   created_at: string;
 }
 
-/**
- * A goal's derived completion read (computed in `lib/goal.ts`), for the UI and
- * the divergence detector. `complete` = criteria non-empty AND all met;
- * `verified` = complete AND every met criterion is `verified`; `confidence` is
- * the weakest confidence across met criteria (null when nothing is met).
- */
+/** Derived completion read (see lib/goal.ts). `complete` = criteria non-empty and all
+ *  met; `verified` = complete and every met criterion verified; `confidence` is the
+ *  weakest across met criteria. */
 export interface GoalCompletion {
   complete: boolean;
   verified: boolean;
@@ -171,14 +130,10 @@ export interface GoalCompletion {
   total: number;
 }
 
-/**
- * One node in a learning goal's skill graph: a capability to attain. The
- * `prerequisites` are ids of nodes that must be attained first (a DAG). A
- * `is_checkpoint` node is a verifiable milestone - checkpoints drive *skill*
- * progress, while every node's effort drives *effort* progress (the two diverge
- * when you've put in hours but not yet hit a milestone). Attainment is
- * confidence-tagged exactly like task completion.
- */
+/** One capability in a learning goal's skill graph. `prerequisites` are node ids that
+ *  must come first (a DAG). Checkpoints drive SKILL progress while every node's effort
+ *  drives EFFORT progress - the two diverge when you've put in hours but not yet hit a
+ *  milestone. */
 export interface SkillNode {
   id: string;
   goal_id: string;
@@ -193,7 +148,7 @@ export interface SkillNode {
   attained_at: string | null;
   /** Parked out of the current deadline push (the `defer_skill` recovery move).
    *  Not attained, still on the goal, reversible - the skill analogue of
-   *  `Task.deferred`. Stops consuming forecast budget while set. */
+   *  `Task.deferred`. Stops consuming forecast() budget while set. */
   deferred: boolean;
   deferred_at: string | null;
   sort_index: number;
@@ -204,15 +159,11 @@ export interface SkillNode {
  *  spillover move; `dismissed` is remembered so the linker stops re-proposing it. */
 export type SkillTaskLinkStatus = "suggested" | "confirmed" | "dismissed";
 
-/**
- * An explicit "these two are the same work" edge between a skill node (a
- * capability) and a task (an action). The pair that motivates it - "Set up the
- * auth provider" and "Set up authentication with a provider" - shares almost no
- * words, so title similarity structurally cannot find it (measured: 0 of 81 real
- * pairs clear the matcher's bar). The edge is therefore LLM-proposed and
- * user-confirmed, and spillover reads it as a deterministic lookup rather than a
- * guess - which is what makes it safe enough to close a task, not just credit a skill.
- */
+/** An explicit "these two are the same work" edge between a skill node and a task.
+ *  Title similarity can't find these - "Set up the auth provider" vs "Set up
+ *  authentication with a provider" share almost no words, and 0 of 81 real pairs
+ *  cleared the matcher's bar. So it's LLM-proposed and user-confirmed, and spillover
+ *  reads it as a lookup rather than a guess. */
 export interface SkillTaskLink {
   id: string;
   skill_node_id: string;
@@ -231,40 +182,29 @@ export interface ExtractedLink {
   rationale: string;
 }
 
-/**
- * The linker's raw JSON response, before key resolution + sanitization.
+/** The linker's raw response, before key resolution + sanitization.
  *
- * The prompt asks for the **task-keyed map**: unique JSON keys make "one skill per task"
- * structurally unrepresentable rather than merely discouraged. Asked for a flat array,
- * the model fans out - observed live attaching all 8 skills of a graph to one weekly
- * lesson. The legacy array shape is still accepted (a model that ignores the schema
- * shouldn't kill the feature); `normalizeLinks` collapses it with a principled tiebreak.
- */
+ *  The prompt asks for a TASK-KEYED MAP: unique JSON keys make "one skill per task"
+ *  structurally impossible. Asked for a flat array the model fans out - it attached all
+ *  8 skills of a graph to one weekly lesson. The array shape is still accepted so a
+ *  schema-ignoring model doesn't kill the feature; normalizeLinks collapses it. */
 export type LinkSuggestion =
   | { links: Record<string, ExtractedLink | null> }
   | { links: ExtractedLink[] };
 
-/**
- * The second-pass verdict on ONE proposed pair, judged in isolation.
- *
- * Shown a menu of skills and asked to assign them, the model distributes *all* of them - 
- * observed twice: 8 skills onto 1 task, then 3 skills onto 3 tasks, one each, inventing a
- * rationale wherever each landed. The bias is toward using up the menu, not toward truth.
- * Judging a single pair with no menu in context removes the pressure that causes it.
- */
+/** Second-pass verdict on ONE pair, judged in isolation. Shown a menu of skills the
+ *  model distributes ALL of them - observed twice, inventing a rationale wherever each
+ *  landed. The bias is toward using up the menu, not toward truth, so judging one pair
+ *  with no menu in context removes the pressure. */
 export interface LinkVerdict {
   demonstrates: boolean;
   why?: string;
 }
 
-/**
- * A learning goal's derived progress (computed in `lib/skill.ts`). The crux of
- * §5.3b: *effort* progress (minutes attained / total) and *skill* progress
- * (checkpoints met / total, falling back to nodes when a plan has no
- * checkpoints) are tracked separately, because grinding hours isn't the same as
- * demonstrably reaching a milestone. `unlocked` are the not-yet-attained nodes
- * whose prerequisites are all met - the actionable frontier.
- */
+/** Derived progress for a learning goal (see lib/skill.ts). Effort progress (minutes
+ *  attained / total) and skill progress (checkpoints met / total, falling back to nodes)
+ *  are separate, because grinding hours isn't reaching a milestone. `unlocked` is the
+ *  actionable frontier. */
 export interface SkillProgress {
   total: number;
   attained: number;
@@ -282,7 +222,6 @@ export interface SkillProgress {
 
 export interface Entry {
   id: string;
-  /** Owner of the entry. Undefined in offline demo mode. */
   user_id?: string | null;
   title: string;
   raw_input: string;
@@ -320,19 +259,14 @@ export interface OpenQuestion {
   created_at: string;
 }
 
-/**
- * Where a task came from, when that provenance changes how it's treated.
- * `"debt"` marks a follow-up materialized by a scope-cutting recovery move - the
- * trimmed work, owed after the deadline rather than silently erased (§5 gate
- * check 4). Null for an ordinary task. Stored as free text so future origins
- * extend without a migration.
- */
+/** Where a task came from, when that changes how it's treated. "debt" is a follow-up
+ *  materialized by a scope cut - work owed after the deadline rather than erased. Free
+ *  text so new origins don't need a migration. */
 export type TaskOrigin = "debt";
 
 export interface Task {
   id: string;
   entry_id: string;
-  /** The owning goal - the canonical spine edge. Null only for unfiled drafts. */
   goal_id: string | null;
   title: string;
   description: string | null;
@@ -357,18 +291,12 @@ export interface Task {
   blocked_by: string | null;
   /** Pushed past the current deadline by a recovery move; excluded from the forecast. */
   deferred: boolean;
-  /** How sure we are this completion is real (set when status → done; null while open). */
   completion_confidence: CompletionConfidence | null;
-  /** When the task was marked done (null while open). */
   completed_at: string | null;
   /** Provenance when it changes treatment - `"debt"` for a scope-cut follow-up. */
   origin: TaskOrigin | null;
-  /**
-   * How a blocker was resolved, when reported through a check-in (§5.6 slice 6b,
-   * cascade-with-provenance) - free text like "Used a template". Display/audit
-   * provenance only, never a number or an id (§0-safe); null for an ordinary task
-   * or a plain resolution with no stated method.
-   */
+  /** How a blocker was resolved when reported through a check-in - free text like "Used
+   *  a template". Display only, never a number or an id. */
   resolved_by: string | null;
   sort_index: number;
   created_at: string;
@@ -393,7 +321,6 @@ export interface EntryDetail extends Entry {
 
 // --- Time budget (the deployable-hours model) -------------------------------
 
-/** One weekday's baseline deployable hours (0=Sun .. 6=Sat). */
 export interface Availability {
   id?: string;
   user_id?: string | null;
@@ -401,7 +328,6 @@ export interface Availability {
   hours: number;
 }
 
-/** A specific date's override of the weekly template. */
 export interface AvailabilityOverride {
   id?: string;
   user_id?: string | null;
@@ -409,7 +335,6 @@ export interface AvailabilityOverride {
   hours: number;
 }
 
-/** A logged event that consumes hours on a date ("friends 6-9pm"). */
 export interface Commitment {
   id: string;
   user_id?: string | null;
@@ -421,29 +346,17 @@ export interface Commitment {
 
 // --- Recurring activities (goals & routines) --------------------------------
 
-/**
- * A recurring activity's cadence period. "day" => routine/habit (daily, streak-
- * based); "week" => goal (a weekly session target).
- */
 export type ActivityCadencePeriod = "day" | "week";
 
-/**
- * The unified primitive behind both routines/habits (daily, streak-based) and
- * goals (weekly target, cadence-based). It contributes a recurring time-drain on
- * the shared budget and emits a "do it" instance into the Now/Next queue when
- * due. Its success/miss state is DERIVED from the completion log (see
- * `lib/recurring.ts`), never stored.
- */
+/** The primitive behind both routines/habits and weekly goals. Drains the shared budget
+ *  and emits a "do it" instance when due. Success/miss is DERIVED from the completion
+ *  log (lib/recurring.ts), never stored. */
 export interface RecurringActivity {
   id: string;
-  /** Owner. Undefined in offline demo mode. */
   user_id?: string | null;
   title: string;
-  /** Life-area, reusing the Today-page tabs (Work/Personal/Hobby/custom). */
   area: string;
-  /** "day" => daily routine/habit; "week" => weekly goal. */
   period: ActivityCadencePeriod;
-  /** Sessions targeted per period (daily habit = 1; goal e.g. 3 per week). */
   target_count: number;
   /** Restrict to certain weekdays (0=Sun..6=Sat); null = any eligible day. */
   weekdays: number[] | null;
@@ -463,12 +376,9 @@ export interface RecurringActivity {
   created_at: string;
 }
 
-/**
- * One logged session (or skip) of a recurring activity on a date. A skip
- * (`skipped: true`) resolves that period's obligation - it stops draining the
- * budget and stops nagging - but does NOT count toward a streak. All
- * streak/progress state is derived from these rows; nothing is precomputed.
- */
+/** One logged session (or skip) of a recurring activity. A skip resolves the period's
+ *  obligation - stops draining budget, stops nagging - but doesn't count toward a
+ *  streak. All streak state derives from these rows. */
 export interface ActivityCompletion {
   id: string;
   user_id?: string | null;
@@ -479,24 +389,15 @@ export interface ActivityCompletion {
   created_at: string;
 }
 
-/**
- * Local time-of-day bucket a work session happened in (OVERHAUL S2). Fixed
- * boundaries: early 05 - 09 · morning 09 - 12 · afternoon 12 - 17 · evening 17 - 22 ·
- * night 22 - 05. Captured from the user's LOCAL clock at write time (`windowOf` in
- * `lib/velocity.ts`); never re-derived from a stored UTC instant.
- */
+/** Local time-of-day bucket: early 05-09, morning 09-12, afternoon 12-17, evening
+ *  17-22, night 22-05. Captured from the user's LOCAL clock at write time, never
+ *  re-derived from a stored UTC instant. */
 export type TimeWindow = "early" | "morning" | "afternoon" | "evening" | "night";
 
-/**
- * One real work session (OVERHAUL S2 slice B) - the WHEN-signal today's data
- * lacks: `tasks.completed_at` is a single UTC "marked done" instant and
- * `actual_minutes` is a cumulative total, so neither says when (locally) you
- * worked. A row records the local time-of-day window + weekday + the day it counts
- * for, captured at write time. A session is task effort XOR a routine session
- * (`task_id`/`activity_id`). Slice C reads these (keyed by window/weekday) for
- * energy windows + adherence; on its own slice B is pure accrual - no behaviour
- * change.
- */
+/** One work session - the WHEN signal the rest of the data lacks. `completed_at` is a
+ *  single UTC "marked done" instant and `actual_minutes` is a cumulative total, so
+ *  neither says when you actually worked. Records the local window + weekday + the day
+ *  it counts for. Task effort XOR routine session. */
 export interface WorkSession {
   id: string;
   user_id?: string | null;
@@ -504,7 +405,6 @@ export interface WorkSession {
   activity_id: string | null;
   /** ISO YYYY-MM-DD - the local day the work counts for. */
   logged_for: string;
-  /** Local time-of-day bucket, captured at write time. */
   time_window: TimeWindow;
   /** 0=Sun..6=Sat, local. */
   weekday: number;
@@ -514,31 +414,23 @@ export interface WorkSession {
   created_at: string;
 }
 
-/**
- * The client-captured local stamp a completion/effort-log passes to its server
- * action so the work session records the user's LOCAL window/weekday - the action
- * runs server-side and can't read the client clock, so the client must supply it
- * (the timezone-gotcha resolution). Built by `localSessionStamp()` in
- * `lib/work-session.ts`.
- */
+/** The client-captured local stamp a completion passes to its server action. The action
+ *  runs server-side and can't read the browser clock, so the client has to supply it.
+ *  Built by localSessionStamp() in lib/work-session.ts. */
 export interface WorkSessionLocal {
   time_window: TimeWindow;
   weekday: number;
   logged_for: string;
 }
 
-/** A recurring activity's derived success state (computed in `lib/recurring.ts`). */
 export type RecurringStatus = "met" | "due" | "missed" | "cold";
 
-/** The derived read of a recurring activity, for the UI and the strategist. */
 export interface RecurringState {
   activity: RecurringActivity;
   status: RecurringStatus;
   /** Consecutive eligible periods met, walking back from today (habit streak). */
   streak: number;
-  /** Sessions completed vs targeted in the current period. */
   progress: { done: number; target: number };
-  /** A session (not a skip) was logged for today. */
   doneToday: boolean;
   /** An instance is owed today (eligible day, period not yet met, not done). */
   dueToday: boolean;
@@ -546,71 +438,46 @@ export interface RecurringState {
 
 // --- Forecast (the completion-probability engine) ---------------------------
 
-/**
- * The completion probability at or above which a project counts as "on track".
- * A single shared definition so the forecast meter, the on-track pill, and the
- * divergence detector all draw the line in the same place (the recovery plan
- * also aims to restore a project to this number).
- */
+/** The probability at or above which a project is "on track". One shared definition so
+ *  the meter, the pill and the divergence detector draw the line in the same place. */
 export const ON_TRACK_PROBABILITY = 0.8;
 
-/**
- * Whether a probability counts as on track - compared on the same rounded
- * percentage the user actually sees, so a value that displays as "80%" reads as
- * on track everywhere, with no off-by-a-rounding-step contradiction at the edge.
- */
+/** Compared on the same ROUNDED percentage the user sees, so something displaying as
+ *  "80%" reads as on track everywhere with no off-by-a-rounding-step edge case. */
 export function isOnTrack(probability: number): boolean {
   return Math.round(probability * 100) >= Math.round(ON_TRACK_PROBABILITY * 100);
 }
 
-/** The headline output of the forecast for a single project. */
 export interface ForecastResult {
   /** P(finish all open work before the deadline), 0 - 1. */
   probability: number;
   /** Point-estimate remaining work, minutes. */
   expectedMinutes: number;
-  /** Deployable minutes between now and the deadline. */
   deployableMinutes: number;
   /** deployable − expected; negative means over budget. */
   slackMinutes: number;
   openTaskCount: number;
-  /**
-   * 80% central interval of the *remaining work* (minutes), from the same Monte
-   * Carlo that prices the odds: the work lands between `p10Minutes` and
-   * `p90Minutes` in ~80% of sampled futures, with `p50Minutes` the median
-   * outcome. Turns the single `expectedMinutes` point estimate into an honest
-   * range - and `p50`/`p90` anchor the critical-chain buffer (`lib/buffer.ts`):
-   * the gap between the safe (p90) and median (p50) outcome is the safety margin
-   * the variance demands. All 0 when there's no open work.
-   */
+  /** 80% central interval of remaining work, from the same Monte Carlo that prices the
+   *  odds. p50/p90 anchor the critical-chain buffer (lib/buffer.ts): the gap between the
+   *  safe and median outcome is the margin the variance demands. All 0 with no open work. */
   p10Minutes: number;
   p50Minutes: number;
   p90Minutes: number;
 }
 
-/**
- * The user's learned estimation bias, fit from completed tasks. Models the true
- * duration of a task as `estimate × factor`, where `log(factor)` is normal with
- * mean `meanLog` and std dev `sigma`. `meanLog > 0` means you systematically run
- * over your estimates; `< 0` means you finish under.
- */
+/** Learned estimation bias. True duration is modelled as `estimate × factor`, where
+ *  log(factor) is normal with mean `meanLog` and sd `sigma`. meanLog > 0 means you run
+ *  over your estimates. */
 export interface EstimationModel {
-  /** Mean of `log(actual / estimated)` over completed tasks - the systematic bias. */
   meanLog: number;
   /** Std dev of `log(actual / estimated)` - how spread out your estimation error is. */
   sigma: number;
-  /** Completed tasks (with both estimated + actual time) the model was fit on. */
   sampleSize: number;
 }
 
-/**
- * The forecast-facing slice of an estimation model - just the log-space bias +
- * spread the Monte Carlo samples with (a full `EstimationModel` is structurally
- * assignable to it). The per-task velocity model (OVERHAUL S2) rides on this
- * shape so a single task can carry its own segment-shrunk bias into the sampler
- * instead of the one global scalar. See `lib/velocity.ts` and
- * `design/s2-context-tags-and-shrinkage.md`.
- */
+/** The forecast-facing slice of an estimation model - just the log-space bias + spread
+ *  the Monte Carlo samples with. The per-task velocity model rides this shape so a task
+ *  can carry its own segment-shrunk bias instead of the one global scalar. */
 export interface SegmentModel {
   meanLog: number;
   sigma: number;
@@ -619,7 +486,6 @@ export interface SegmentModel {
 /** Below this many samples we don't trust a fitted model - fall back to defaults. */
 export const MIN_ESTIMATION_SAMPLES = 5;
 
-/** A recommended plan change and the probability it would restore. */
 export interface RecoveryMove {
   taskId: string;
   title: string;
@@ -631,48 +497,36 @@ export interface RecoveryMove {
 export interface SkillRecoveryMove {
   nodeId: string;
   title: string;
-  /** Probability if this skill node were parked out of the current push. */
   probabilityAfter: number;
 }
-/** A learning goal's per-path recovery move: re-phase a frontier milestone chain
- *  out of the current push. Unlike {@link SkillRecoveryMove} (one optional leaf),
- *  this parks a checkpoint together with the prerequisites that exist ONLY to serve
- *  it - a strand-free set - so the goal can commit to a reduced set of milestones
- *  by the deadline and slide the rest. `nodeIds` includes `checkpointId`. */
+/** Re-phase a frontier milestone chain out of the current push. Unlike SkillRecoveryMove
+ *  (one optional leaf) this parks a checkpoint together with the prereqs that exist ONLY
+ *  to serve it, so the goal can commit to fewer milestones and slide the rest. */
 export interface SkillPathRescheduleMove {
   /** The descoped checkpoint (the milestone that slides out of the push). */
   checkpointId: string;
   checkpointTitle: string;
   /** The full strand-free park-set (checkpoint + its exclusive open prereqs). */
   nodeIds: string[];
-  /** Titles parallel to `nodeIds`. */
   titles: string[];
-  /** Probability if this whole chain were parked out of the current push. */
   probabilityAfter: number;
 }
 
-/** A forecast attached to its project - what the UI renders. */
 export interface ProjectForecast extends ForecastResult {
   projectId: string;
   projectName: string;
   deadline: string | null;
 }
 
-/**
- * An advisory "pit call": a project whose probability dropped after new data,
- * with the moves that would recover it.
- */
 export interface PitCall {
   projectId: string;
   projectName: string;
   probabilityBefore: number;
   probabilityAfter: number;
   moves: RecoveryMove[];
-  /** Earliest deadline that would restore the target probability, if any. */
   reschedule: RescheduleMove | null;
 }
 
-/** Why a project was flagged off-track - one human-readable divergence signal. */
 export interface DivergenceReason {
   kind:
     | "over_budget" // negative slack: the open work doesn't fit the time budget
@@ -688,14 +542,10 @@ export interface DivergenceReason {
   detail: string;
 }
 
-/**
- * The diagnosed *cause* behind a divergence - one level deeper than the
- * symptom-level {@link DivergenceReason}. The cause picks the response *class*
- * (which family of moves to prefer) so the strategist doesn't reflexively cut
- * scope for a one-off slip. Computed deterministically from estimation residuals
- * and a temporal baseline (see `lib/grounding.ts`); the LLM may narrate it but
- * never decides it (§0).
- */
+/** The diagnosed CAUSE behind a divergence, one level below the symptom-level
+ *  DivergenceReason. Picks the response class so the strategist doesn't reflexively cut
+ *  scope over a one-off slip. Computed from residuals + a temporal baseline; the LLM
+ *  may narrate it but never decides it. */
 export type DivergenceCause =
   | "one_off_slip" // a single task blew up; the underlying pace is fine
   | "chronic_velocity" // estimates are systematically low - a pattern, not an event
@@ -703,94 +553,63 @@ export type DivergenceCause =
   | "constraint_change" // the world moved since the plan was made
   | "scope_structural"; // simply too much committed work for the time
 
-/** A diagnosed cause plus the one-line, deterministic "why" shown to the user. */
 export interface CauseDiagnosis {
   cause: DivergenceCause;
   /** Human-readable explanation - computed from signals, never authored by the LLM. */
   detail: string;
 }
 
-/**
- * The honest "cost to the goal, not just the deadline" shown beside a recovery
- * move's odds gain (§5 grounding gate check 3). A deadline-buying cut can lift
- * the odds while doing nothing for the goal's reason for being - its definition
- * of done (project) or its skill milestones (learning). Computed deterministically
- * from `goalCompletion` / `skillProgress` (never authored), so vibe-cutting can't
- * hide behind a green number.
- */
+/** The cost to the GOAL, not just the deadline, shown beside a move's odds gain. A
+ *  deadline-buying cut can lift the odds while doing nothing for the goal's reason for
+ *  being. Computed from goalCompletion/skillProgress so vibe-cutting can't hide behind a
+ *  green number. */
 export interface GoalCutCost {
   kind: GoalKind;
-  /** Definition-of-done criteria still unmet (project goals). */
   criteriaUnmet: number;
-  /** Total definition-of-done criteria recorded (project goals; 0 when none). */
   criteriaTotal: number;
-  /** Skill milestones cleared (learning goals). */
   checkpointsMet: number;
-  /** Total skill milestones (learning goals; 0 when none). */
   checkpointsTotal: number;
-  /** 0 - 1 demonstrable-skill progress (learning goals). */
   skillPct: number;
-  /** One-line honest summary for the UI. */
   detail: string;
 }
 
-/** A move that re-dates the project to the earliest deadline that clears the target. */
 export interface RescheduleMove {
   /** ISO date of the earliest achievable deadline. */
   deadline: string;
-  /** Probability the project would have at that deadline. */
   probabilityAfter: number;
 }
 
-/**
- * A proactive recovery plan: the deterministic moves that would put an
- * off-track project back on track. Surfaced for the user to approve - never
- * auto-applied.
- */
+/** Deterministic moves that would put an off-track project back on track. Always
+ *  surfaced for approval, never auto-applied. */
 export interface RecoveryPlan {
   projectId: string;
   projectName: string;
-  /** Current completion probability (before any move). */
   currentProbability: number;
-  /** Why we flagged the project. */
   reasons: DivergenceReason[];
-  /**
-   * The diagnosed cause behind the divergence - the "why" one level below the
-   * symptoms. Null when the project is flagged for attention but not genuinely
-   * off track (a blocked/overdue warning with no divergence to explain).
-   */
+  /** The diagnosed cause. Null when the project is flagged for attention but not
+   *  genuinely off track (a blocked/overdue warning has no divergence to explain). */
   cause: CauseDiagnosis | null;
-  /**
-   * The cost to the goal beyond the deadline - its unmet definition of done
-   * (project) or skill milestones (learning) that a deadline-buying move does
-   * nothing for. Null when the goal records no DoD/skills to measure against, or
-   * when it isn't genuinely off track. §5 grounding gate check 3.
-   */
+  /** What a deadline-buying move costs the goal itself - unmet DoD or skill milestones.
+   *  Null when there's nothing to measure against. */
   goalCost: GoalCutCost | null;
-  /** Defer these (lowest-priority-first) to recover; best improvement first. */
   defer: RecoveryMove[];
   /** Park these non-checkpoint skill nodes (learning goals) to recover; best
    *  improvement first. Empty for project goals and for goals with no sheddable
    *  skill effort. */
   deferSkill: SkillRecoveryMove[];
-  /** Re-phase these frontier milestone chains (learning goals) out of the current
-   *  push to recover; best improvement first. Each parks a checkpoint plus its
-   *  exclusive prereqs. Empty for project goals and when no milestone can slide
-   *  without stranding a kept one. */
+  /** Milestone chains to re-phase out of the current push, best improvement first. Empty
+   *  for project goals, and when nothing can slide without stranding a kept milestone. */
   rescheduleSkill: SkillPathRescheduleMove[];
   /** Earliest deadline clearing the target probability, or null if out of reach. */
   reschedule: RescheduleMove | null;
   /** Dependency-aware order to tackle the remaining open work (advisory). */
   sequence: { taskId: string; title: string }[];
-  /** Open tasks past their due date - surfaced to reschedule or complete inline. */
   overdue: { taskId: string; title: string; dueDate: string | null }[];
-  /** Open tasks stuck in `blocked` - surfaced to unblock inline. */
   blocked: { taskId: string; title: string; blockedBy: string | null }[];
 }
 
 // --- LLM extraction shape (what the model is asked to return) ---------------
 
-/** The five 1-5 factor ratings the LLM assigns per task. */
 export interface FactorScores {
   urgency: number;
   impact: number;
@@ -812,7 +631,6 @@ export interface ExtractedTask extends FactorScores {
   source_quote: string | null;
   is_ai_suggested: boolean;
   blocked_by: string | null;
-  /** keys of tasks this one depends on. */
   depends_on: string[];
   priority_reason: string;
 }
@@ -820,7 +638,6 @@ export interface ExtractedTask extends FactorScores {
 export interface ExtractionResult {
   title: string;
   summary: string;
-  /** Best-fitting life-area for the whole entry (Work/Personal/Hobby/custom). */
   suggested_area: string | null;
   /** Concise project name that groups this entry's tasks, or null if none fits. */
   suggested_project: string | null;
@@ -846,12 +663,8 @@ export interface ExtractionResult {
 
 // --- LLM decomposer (learning-goal skill graph) -----------------------------
 
-/**
- * One skill the decomposer proposes for a learning goal. `key` is a stable slug
- * the model uses so `prerequisites` can reference other skills (mapped to UUIDs
- * on persist, exactly like extracted-task `depends_on`). The LLM proposes the
- * structure; it never decides progress.
- */
+/** One skill the decomposer proposes. `key` is a stable slug so `prerequisites` can
+ *  reference other skills, mapped to UUIDs on persist like extracted-task depends_on. */
 export interface ExtractedSkill {
   key: string;
   title: string;
@@ -863,22 +676,17 @@ export interface ExtractedSkill {
   estimated_minutes: number;
 }
 
-/** What the decomposer LLM is asked to return for a learning goal. */
 export interface SkillDecomposition {
   skills: ExtractedSkill[];
 }
 
 // --- LLM strategist (corrective task generation) ----------------------------
 
-/** What kind of hole a corrective task fills. */
 export type GapKind = "rework" | "unblock" | "de_risk";
 
-/**
- * A net-new corrective task the strategist proposes to fill a real gap in an
- * off-track project - rework after a failed review, an unblock action, or work
- * to de-risk a task that's blowing its estimate. Carries the same 1-5 factor
- * ratings as an extracted task so it scores through `computePriority`.
- */
+/** A net-new corrective task for an off-track project - rework after a failed review, an
+ *  unblock, or de-risking a task that's blowing its estimate. Same 1-5 factor ratings as
+ *  an extracted task so it scores through computePriority. */
 export interface SuggestedTask extends FactorScores {
   title: string;
   description: string;
@@ -891,38 +699,24 @@ export interface SuggestedTask extends FactorScores {
   gap_kind: GapKind;
 }
 
-/**
- * The strategist's advisory output for one off-track project: net-new tasks to
- * fill genuine gaps, plus the probability the project would have if they were
- * added. The probability is always computed by `forecast()` - the LLM proposes
- * the tasks, never the likelihood.
- */
+/** Strategist output for one off-track project: net-new tasks plus the probability the
+ *  project would have with them. The probability always comes from forecast(). */
 export interface RecoverySuggestion {
   projectId: string;
   tasks: SuggestedTask[];
-  /** Completion probability after adding the suggested tasks - from `forecast()`. */
   previewProbability: number;
-  /** One-line explanation of the gap these tasks fill. */
   rationale: string;
 }
 
 // --- LLM strategist (existing-task modification) ----------------------------
 
-/**
- * How the strategist reshapes an existing task to fit the budget:
- * - "scope_down": replace it with a lighter version (a smaller estimate, trimmed
- *   scope) - recovers the forecast by lowering the expected work.
- * - "split": break a stuck monolith into smaller real steps - recovers the
- *   forecast because the sum of several well-understood estimates carries less
- *   compounding risk than one big opaque guess (even at equal total minutes).
- */
+/** "scope_down" replaces a task with a lighter version. "split" breaks a stuck monolith
+ *  into real steps - which helps even at equal total minutes, because several understood
+ *  estimates carry less compounding risk than one big opaque guess. */
 export type ModificationKind = "scope_down" | "split";
 
-/**
- * One piece of the reshaped work - the lighter version of a scoped-down task, or
- * one step of a split. Carries its own estimate + 1-5 factor ratings so it scores
- * through `computePriority` exactly like an extracted task.
- */
+/** One piece of reshaped work. Carries its own estimate + factor ratings so it scores
+ *  through computePriority like an extracted task. */
 export interface ModificationPart extends FactorScores {
   title: string;
   description: string;
@@ -930,46 +724,30 @@ export interface ModificationPart extends FactorScores {
   priority_reason: string;
 }
 
-/**
- * A proposal to reshape one existing task. `replacements` holds the work that
- * takes its place: exactly one part for "scope_down", two or more for "split".
- */
+/** `replacements` is the work that takes the task's place: exactly one for scope_down,
+ *  two or more for split. */
 export interface TaskModification {
   kind: ModificationKind;
-  /** The existing open task being reshaped. */
   taskId: string;
-  /** Its current title, for display. */
   taskTitle: string;
-  /** Its current estimate (minutes), for the before/after comparison. */
   originalEstimate: number;
-  /** One-line explanation of why this reshape helps. */
   rationale: string;
   replacements: ModificationPart[];
 }
 
-/**
- * The strategist's advisory output for one off-track project: existing tasks
- * reshaped to fit the budget, plus the probability the project would have if the
- * reshapes were applied. As with Generate, the probability is always computed by
- * `forecast()` - the LLM proposes the reshape, never the likelihood.
- */
+/** Strategist output: existing tasks reshaped to fit the budget, plus the resulting
+ *  probability. As with Generate, the number comes from forecast(). */
 export interface ModificationSuggestion {
   projectId: string;
   modifications: TaskModification[];
-  /** Completion probability after applying the modifications - from `forecast()`. */
   previewProbability: number;
-  /** One-line explanation of the reshaping strategy. */
   rationale: string;
 }
 
 // --- LLM strategist (whole-plan re-route) -----------------------------------
 
-/**
- * One task in an alternative plan. Same shape as a `SuggestedTask` minus the
- * gap/area bookkeeping - the whole plan shares one area, applied on accept.
- * Carries its own estimate + 1-5 factor ratings so it scores through
- * `computePriority` exactly like an extracted task.
- */
+/** One task in an alternative plan. Like SuggestedTask minus the gap/area bookkeeping
+ *  the whole plan shares one area, applied on accept. */
 export interface ReroutePart extends FactorScores {
   title: string;
   description: string;
@@ -979,107 +757,65 @@ export interface ReroutePart extends FactorScores {
   priority_reason: string;
 }
 
-/**
- * A definition-of-done criterion a reroute explicitly compromises, with the
- * one-line note recording how (§5 grounding gate check 2). The LLM may author the
- * note (narration), but `criterionId` is validated against the goal's real
- * criteria - which criteria exist and the odds are never the model's call (§0).
- * Recorded as the criterion's `degraded_note` on accept, so switching to a
- * lighter approach can't quietly redefine the goal down.
- */
+/** A DoD criterion a reroute explicitly compromises, plus the note recording how. The
+ *  LLM may author the note, but `criterionId` is validated against the goal's real
+ *  criteria. Stored as the criterion's degraded_note on accept. */
 export interface DegradedCriterion {
   /** The real criterion being lowered (validated against the goal's DoD). */
   criterionId: string;
-  /** The criterion's current text, for the before/after display. */
   text: string;
-  /** How the reroute lowers this bar (e.g. "managed provider, no SSO"). */
   note: string;
 }
 
-/**
- * The strategist's boldest move: a complete alternative plan that hits the same
- * deliverable by a fundamentally different approach (buy vs build, a managed
- * service vs custom, a template vs from-scratch). It replaces the entire current
- * open plan - surfaced as an all-or-nothing draft, not a per-task pick. As with
- * the other moves, the probability is always computed by `forecast()`; the LLM
- * proposes the approach, never the likelihood.
- */
+/** The boldest move: a complete alternative plan hitting the same deliverable a
+ *  different way (buy vs build, managed service vs custom). Replaces the whole open
+ *  plan as an all-or-nothing draft, not a per-task pick. */
 export interface RerouteSuggestion {
   projectId: string;
-  /** Short name of the alternative approach (e.g. "Use a managed auth provider"). */
   approach: string;
-  /** One sentence: how the new route differs and why it fits the budget. */
   rationale: string;
-  /** The replacement tasks - the new approach. */
   tasks: ReroutePart[];
   /** Current open tasks this plan swaps out (deferred on accept), for the before/after. */
   replaces: { taskId: string; title: string; estimated_minutes: number }[];
-  /**
-   * Definition-of-done criteria this lighter route lowers, with how (§5 gate
-   * check 2) - empty when the route preserves the full bar. Recorded as each
-   * criterion's `degraded_note` on accept, and shown in the before/after so the
-   * odds gain can't hide a quiet redefinition of done.
-   */
+  /** DoD criteria this lighter route lowers, and how. Empty when it preserves the full
+   *  bar. Shown in the before/after so the odds gain can't hide a quiet redefinition. */
   degradedCriteria: DegradedCriterion[];
-  /** Completion probability after switching to this plan - from `forecast()`. */
   previewProbability: number;
 }
 
 // --- Pit-wall strategist (global, cross-project allocation) -----------------
 
-/**
- * One task's place in the single global order across all projects. The order is
- * a *derived* view layered on top of the stored `priority_score` (never
- * overwrites it): dependency topo-sort, then EDF by project deadline with WSJF
- * as the tiebreak (and WSJF-first under overload). `pulledAhead` marks a task
- * that leapfrogged higher-`priority_score` work from another project because its
- * own project's deadline is closer.
- */
+/** One task's place in the single global order. Derived on top of the stored
+ *  priority_score, never overwriting it: dependency topo-sort, then EDF by project
+ *  deadline with WSJF as tiebreak (WSJF-first under overload). `pulledAhead` marks a
+ *  task that leapfrogged higher-scored work because its own deadline is closer. */
 export interface EffectiveOrderEntry {
   taskId: string;
   title: string;
   projectId: string;
   projectName: string;
   estimatedMinutes: number;
-  /** 0-based position in the global order. */
   rank: number;
-  /** True when deadline pressure pulled this ahead of more intrinsically important work. */
   pulledAhead: boolean;
   /** Human-readable reason for the placement (e.g. "pulled ahead - Goal X due in 2 days"). */
   reason: string;
-  /**
-   * Per-task velocity model (OVERHAUL S2): this task's segment-shrunk `(meanLog,
-   * sigma)`, carried from its `AllocTask` so the joint sampler biases each task by
-   * its own domain velocity. Absent ⇒ the global scalar in the forecast options.
-   */
+  /** This task's segment-shrunk (meanLog, sigma), so the joint sampler biases each task
+   *  by its own domain velocity. Absent => the global scalar. */
   model?: SegmentModel;
-  /**
-   * Cognitive-load weight in `[0,1]` (OVERHAUL S3b Phase 3): the comfort-capped flow
-   * meters each day's **hard minutes** (`difficulty × sampled duration`) against the
-   * daily comfort cap. Absent ⇒ unmetered (0). See `allocate.ts effortToDifficulty`.
-   */
+  /** Cognitive load in [0,1]. The comfort-capped flow meters each day's hard minutes
+   *  (difficulty × sampled duration) against the daily cap. Absent => unmetered. */
   difficulty?: number;
-  /**
-   * Impact factor 1-5 (OVERHAUL S3b Phase 4): modulates ONLY the energy-placement term
-   * in `arrange.ts` (high-value hard work gets first claim on fast windows), never the
-   * comfort cap (that's cognitive load = `difficulty` alone). Carried from `AllocTask`.
-   * Absent ⇒ neutral. Does not affect ordering or odds without a learned window profile.
-   */
+  /** Impact 1-5. Modulates ONLY the energy-placement term in arrange.ts, so high-value
+   *  hard work gets first claim on fast windows. Never the comfort cap - that's
+   *  cognitive load alone. Inert without a learned window profile. */
   impact?: number;
-  /**
-   * Life-area (OVERHAUL S3b Phase-4 refinement - domain-axis grouping): the within-day
-   * `arrange.ts` sequencer keeps same-area work adjacent (a coarser grouping axis than
-   * `projectId`). Carried from `AllocTask`. Odds-neutral (a within-day permutation).
-   * Absent ⇒ no area signal, so the domain term is inert (degrades to switch-only grouping).
-   */
+  /** Life-area. The within-day sequencer keeps same-area work adjacent, a coarser axis
+   *  than projectId. Odds-neutral (it's a within-day permutation). */
   area?: string;
 }
 
-/**
- * A pit-wall conflict surfaced by the global allocation: a project that can't
- * finish in time, or two projects whose deadlines collide over the shared hours.
- * Defined here; the detector that produces these lands in a later step (G3).
- */
+/** A pit-wall conflict: a project that can't finish in time, or two whose deadlines
+ *  collide over the shared hours. */
 export interface Conflict {
   kind: "infeasible" | "deadline_collision";
   projectId: string;
@@ -1087,36 +823,24 @@ export interface Conflict {
   detail: string;
 }
 
-/**
- * A recommended triage move: shed (defer) a low-value task to recover the
- * savable high-value work under overload. `wsjf` is the value density it was
- * chosen by; `probabilityAfter` is the recovered odds - always from the
- * forecast, never the LLM. Consumed in a later step (G3).
- */
+/** Shed a low-value task to recover savable high-value work under overload. `wsjf` is
+ *  the density it was chosen by; `probabilityAfter` comes from the forecast(). */
 export interface TriageMove {
   taskId: string;
   title: string;
   projectId: string;
-  /** The task's estimate (minutes) - for the before/after task display. */
   estimatedMinutes: number;
   wsjf: number;
   probabilityAfter: number;
 }
 
-/**
- * One mutually-exclusive way to resolve a genuine comparable-value tie (the
- * single escalated decision auto-triage refuses to make for you): protect one
- * colliding project by shedding the open work of the others it's fighting for
- * the shared hours with. `probabilityAfter` is the protected project's recovered
- * joint odds once that sacrifice is made - always from the forecast, never the
- * LLM. Surfaced only when `PitWall.needsDecision`.
- */
+/** One way to resolve a comparable-value tie - the single escalated decision auto-triage
+ *  refuses to make: protect one colliding project by shedding the others' open work.
+ *  Surfaced only when PitWall.needsDecision. */
 export interface PitWallOption {
   protectId: string;
   protectName: string;
-  /** The colliding projects whose open work is deferred to protect the above. */
   sacrificeNames: string[];
-  /** Their open tasks - the batch a one-click "Protect this" defers. */
   sacrificeTaskIds: string[];
   /** Protected project's joint odds once the sacrifice set is shed. */
   probabilityAfter: number;
@@ -1124,11 +848,8 @@ export interface PitWallOption {
 
 // --- Portfolio strategist (one cached, time-aware recommendation) -----------
 
-/**
- * Every move the portfolio strategy can recommend. Maps 1:1 to an existing apply
- * action (see `lib/portfolio-strategist.ts`). `hold` is the no-op "stay the
- * course" outcome - surfaced when the synthesis decides no change is needed.
- */
+/** Every move the portfolio strategy can recommend, 1:1 with an apply action. `hold` is
+ *  the no-op "stay the course" outcome. */
 export type StrategyMoveKind =
   | "defer"
   | "reschedule_deadline"
@@ -1144,26 +865,21 @@ export type StrategyMoveKind =
   // of `defer`). Sheds its effort from the current push so the checkpoints + date
   // fit; reversible. NEVER sheds a checkpoint (that would abandon a milestone).
   | "defer_skill"
-  // Re-phase a whole milestone CHAIN out of the current push (the learning-goal
-  // analogue of a scoped `reschedule`). Parks a frontier checkpoint together with
-  // the prerequisites that exist only to serve it, as one reversible unit - the
-  // middle lever between `defer_skill` (one optional leaf, never a milestone) and
-  // `reschedule_deadline` (push the whole goal date). Unlike `defer_skill` it may
-  // touch a checkpoint; the dropped milestone is surfaced honestly via `goalCost`.
+  // Re-phase a whole milestone CHAIN - the learning-goal analogue of a scoped reschedule.
+  // The middle lever between defer_skill (one optional leaf) and reschedule_deadline
+  // (push the whole goal date). Unlike defer_skill it may touch a checkpoint, which is
+  // surfaced via goalCost.
   | "reschedule_skill"
-  // §5.6 slice 6b - resolve a structural blocker: mark it done + cascade one-hop
-  // edge removal over `task_dependencies` (frees its direct dependents) + stamp
-  // free-text provenance. Distinct from `unblock` (which clears the SOFT
-  // `blocked_by` flag on one dependent); never overloads it.
+  // Resolve a structural blocker: mark done + cascade one-hop edge removal + stamp
+  // provenance. Distinct from `unblock`, which clears the SOFT blocked_by flag on one
+  // dependent.
   | "resolve_blocker"
   | "skip_activity"
   | "hold";
 
-/**
- * The literal arguments an apply action needs, discriminated by `kind`. The
- * payload carries the *full* struct (not a reference) so a cached strategy can be
- * applied without re-deriving it - a stale id simply no-ops in the apply action.
- */
+/** Arguments an apply action needs, discriminated by `kind`. Carries the FULL struct
+ *  rather than a reference so a cached strategy applies without re-deriving it - a
+ *  stale id just no-ops. */
 export type StrategyMovePayload =
   | { kind: "defer"; taskId: string; title: string }
   | { kind: "reschedule_deadline"; deadline: string }
@@ -1173,7 +889,7 @@ export type StrategyMovePayload =
       kind: "mark_done";
       taskId: string;
       title: string;
-      /** Provenance of the completion (§5.6 invariant: a pure function of WHERE the
+      /** Provenance of the completion ( invariant: a pure function of WHERE the
        *  move came from). A check-in "I finished X" → `self_assessed`; omitted by the
        *  strategist's own inference → defaults to `inferred` in persist. */
       confidence?: CompletionConfidence;
@@ -1185,7 +901,7 @@ export type StrategyMovePayload =
       resolvedBy?: string;
     }
   | {
-      // §5.6 - the user attained a skill node (drops its synthetic forecast task).
+       // the user attained a skill node (drops its synthetic forecast() task).
       kind: "attain_skill";
       goalId: string;
       nodeId: string;
@@ -1197,10 +913,8 @@ export type StrategyMovePayload =
       viaSpilloverFrom?: string;
     }
   | {
-      // §5.6 slice 6b - the user resolved a blocker (a task others depend on). Persist
-      // marks it done, deletes every `task_dependencies` edge INTO it (`depends_on_task_id
-      // === blockerTaskId`), and stamps `resolved_by`. `freedTaskIds` is advisory display
-      // only - persist re-derives the edges from the LIVE DAG, so a stale id no-ops.
+  // Persist marks the blocker done, deletes every edge INTO it, and stamps resolved_by.
+  // freedTaskIds is advisory display only - persist re-derives from the live DAG.
       kind: "resolve_blocker";
       blockerTaskId: string;
       title: string;
@@ -1212,30 +926,22 @@ export type StrategyMovePayload =
       freedTaskIds: string[];
     }
   | {
-      // Park a non-checkpoint skill node out of the current deadline push. Persist
-      // sets `skill_nodes.deferred`; the forecast twin drops its `skill:`+nodeId
-      // synthetic task, freeing the budget it occupied - same drop mechanic as
-      // `attain_skill`, but semantically "parked", not "done".
+  // Park a non-checkpoint skill node. Persist sets skill_nodes.deferred; the forecast()
+  // twin drops its synthetic task, freeing the budget - same drop as attain_skill but
+  // semantically parked, not done.
       kind: "defer_skill";
       goalId: string;
       nodeId: string;
       title: string;
     }
   | {
-      // Re-phase a milestone chain: park a frontier checkpoint (`nodeId`) AND every
-      // node in its strand-free park-set (`parkNodeIds`, which includes `nodeId`) out
-      // of the current push. Persist sets `skill_nodes.deferred` on the whole set; the
-      // forecast twin drops each one's `skill:`+id synthetic task. Self-contained (the
-      // full set rides on the payload) so a cached strategy applies without re-deriving
-      // the closure - a stale id simply no-ops.
+  // Park a frontier checkpoint plus its whole strand-free park-set. The full set rides
+  // on the payload so a cached strategy applies without re-deriving the closure.
       kind: "reschedule_skill";
       goalId: string;
-      /** The descoped checkpoint (the milestone that slides). */
       nodeId: string;
       title: string;
-      /** The full park-set node ids (includes `nodeId` and its exclusive prereqs). */
       parkNodeIds: string[];
-      /** Titles parallel to `parkNodeIds`, for the card's shed list. */
       parkTitles: string[];
     }
   | { kind: "triage"; taskIds: string[]; titles: string[] }
@@ -1255,11 +961,8 @@ export type StrategyMovePayload =
     }
   | { kind: "hold" };
 
-/**
- * One recommended move in the portfolio strategy. `rationale` is human prose (the
- * synthesis LLM's, or a deterministic template); `probabilityAfter` is ALWAYS
- * harvested from a `forecast()`-scored struct, never authored by the LLM.
- */
+/** One recommended move. `rationale` is prose (LLM or template); `probabilityAfter` is
+ *  ALWAYS harvested from a forecast()-scored struct, never authored. */
 export interface StrategyMove {
   kind: StrategyMoveKind;
   /** Owning project, or "" for cross-project triage. */
@@ -1268,103 +971,61 @@ export interface StrategyMove {
   rationale: string;
   /** The odds this move restores ON ITS OWN - solo per-project, from `forecast()`/`jointOdds`. */
   probabilityAfter: number;
-  /**
-   * The CUMULATIVE contention-aware portfolio odds (P(all deadlined projects
-   * land) - `globalForecastJoint.allOnTime`) after applying this move *and every
-   * move ordered before it*. Climbs to `PortfolioStrategy.combinedProbability` at
-   * the last move. Baked in at generation time; the frontend renders it verbatim.
-   */
+  /** Cumulative portfolio odds after this move AND every move before it. Climbs to
+   *  combinedProbability at the last one. Baked in at generation; rendered verbatim. */
   portfolioProbabilityAfter: number;
-  /**
-   * Titles of EXISTING open tasks this move defers (reversibly) out of the plan - 
-   * the work that gets set aside so the lighter/alternative plan can fit. Set for
-   * the moves that shed real work (reroute replaces the whole plan; reshape-split
-   * defers the monolith; triage sheds a batch); omitted for moves that don't
-   * (reschedule, unblock, a plain single defer whose own rationale already says it).
-   * Full task snapshots (hydrated at generation time) so the card renders them as
-   * the same detailed task rows used on the project page - priority, due, scores.
-   */
+  /** Titles of existing open tasks this move defers out of the plan. Set for moves that
+   *  shed real work (reroute, split's monolith, triage); omitted for those that don't.
+   *  Full snapshots so the card renders the same detailed rows as the project page. */
   defers?: Task[];
-  /**
-   * The diagnosed cause(s) this move served, baked in by `optimizeJointPlan` at
-   * generation time - calibration bookkeeping, never displayed. Carried on the move
-   * so that when the user applies a bundle we can record the offer-time φ inputs
-   * (see {@link OfferedMove}) without re-running a whole Monte-Carlo scorer just to
-   * log. Absent on moves the optimizer didn't author (the deterministic fallback,
-   * check-in proposals) ⇒ a zero cause term, exactly as an unknown cause reads.
-   */
+  /** The cause(s) this move served, baked in at generation. Calibration bookkeeping,
+   *  never displayed - it lets an applied bundle record the offer-time φ inputs without
+   *  re-running the scorer just to log. Absent => a zero cause term. */
   causes?: CauseWeight[];
-  /** The literal args the mapped apply action needs, discriminated by kind. */
   payload: StrategyMovePayload;
 }
 
-/**
- * The single portfolio-wide recommendation rendered on Today: a narrative
- * assessment plus an ordered (best-first) set of applyable moves. Cached and
- * regenerated only when the situation changes or the user asks (see §C).
- */
+/** The portfolio-wide recommendation on Today: a narrative assessment plus an ordered
+ *  set of applyable moves. Cached, regenerated when the situation changes. */
 export interface PortfolioStrategy {
-  /** Narrative across the whole portfolio. */
   assessment: string;
   /** True ⇒ hold course; `moves` may be empty. */
   onTrack: boolean;
-  /** Ordered best-first; each mapped to an apply action. */
   moves: StrategyMove[];
   /** ISO timestamp - anchor for plan-vs-time drift continuity AND the age-based staleness gate. */
   generatedAt: string;
   /** Situation hash this strategy was generated for (see `computeSituationFingerprint`). */
   fingerprint: string;
-  /**
-   * Per-project completion odds (contention-aware) at generation time, keyed by
-   * projectId. The staleness gate diffs the *current* odds against this snapshot
-   * so only a change that materially moves the odds (not a cosmetic edit) marks
-   * the strategy stale - the cheap deterministic pre-filter before any LLM call.
-   */
+  /** Per-project odds at generation time. The staleness gate diffs current odds against
+   *  this, so only a change that materially moves them marks the strategy stale - the
+   *  cheap pre-filter before any LLM call. */
   odds: Record<string, number>;
   /** False = deterministic fallback (no key / call failed). */
   usedLLM: boolean;
-  /**
-   * The bold tier's combined portfolio odds - P(all deadlined projects land)
-   * after applying every move in `moves`. Equals the last move's
-   * `portfolioProbabilityAfter` (the base joint odds when `moves` is empty).
-   * Surfaced at "Apply all".
-   */
+  /** Combined odds after applying every move. Equals the last move's
+   *  portfolioProbabilityAfter. Surfaced at "Apply all". */
   combinedProbability: number;
-  /**
-   * The grounded "steady plan" tier: mechanical-only moves (defer / reschedule /
-   * unblock / mark_done / triage) chosen by the joint greedy optimizer, beside
-   * the bold LLM recommendation. Each move carries its own cumulative
-   * `portfolioProbabilityAfter`. Null when there's nothing mechanical to do or in
-   * the no-LLM fallback (where the single bold tier already IS the joint plan).
-   */
+  /** The grounded "steady plan" tier: mechanical-only moves picked by the joint greedy
+   *  optimizer, beside the bold LLM recommendation. Null when there's nothing mechanical
+   *  to do, or in the no-LLM fallback where the bold tier already IS the joint plan. */
   grounded: {
     moves: StrategyMove[];
     combinedProbability: number;
   } | null;
-  /**
-   * The serialized generation-time gather slice that lets the review screen
-   * re-solve an arbitrary move subset client-side (OVERHAUL S1 / vision §8.2) - 
-   * toggling a move off recomputes the headline + per-move odds with no round-trip,
-   * matching the baked numbers for the same subset. Optional: the synchronous
-   * instant draft and pre-S1 cached strategies carry none (the card then renders
-   * the baked values without live re-solve, upgrading on the next generation).
-   */
+  /** The serialized gather slice that lets the review screen re-solve an arbitrary move
+   *  subset client-side, so toggling a move recomputes the odds with no round-trip.
+   *  Optional: the instant draft and older cached strategies carry none. */
   resolveInput?: ResolveInput;
 }
 
-/**
- * Enough to revert one applied strategy bundle (OVERHAUL S1 step 3 / vision §1.3).
- * Snapshotted *per bundle* (not per move) - it matches the bundle-level undo and
- * doubles as the version record. `tasks`/`goals` hold the PRIOR values (id + only
- * the fields the bundle changed) so a restore writes exactly those back; the
- * inserted-id arrays name the synthetic rows the bundle created, deleted on undo.
- */
+/** Enough to revert one applied bundle. Snapshotted per BUNDLE, not per move, matching
+ *  the bundle-level undo. `tasks`/`goals` hold PRIOR values (id + only the changed
+ *  fields); the inserted-id arrays name synthetic rows to delete on undo. */
 export interface RowSnapshot {
   /** Prior values of tasks the bundle mutated - id + only the changed fields. */
   tasks: (Partial<Task> & { id: string })[];
-  /** Prior values of goals the bundle mutated - id + the prior deadline. */
   goals: (Partial<Goal> & { id: string })[];
-  /** Prior attainment of skill nodes an `attain_skill` move flipped (§5.6) - id +
+  /** Prior attainment of skill nodes an `attain_skill` move flipped - id +
    *  attained/confidence/at - so undo reverts a skill back to unattained. */
   skillNodes: (Partial<SkillNode> & { id: string })[];
   /** Synthetic task rows the bundle inserted (add_tasks / reshape-split / scope-down
@@ -1373,31 +1034,20 @@ export interface RowSnapshot {
   /** Synthetic recovery entries the inserted tasks were filed under - deleted on undo
    *  so an undone bundle leaves no dangling empty entry. */
   insertedEntryIds: string[];
-  /** Skip rows (ActivityCompletion) a `skip_activity` move inserted - deleted on undo. */
   activityCompletionIds: string[];
-  /** Dependency edges a `resolve_blocker` cascade DELETED (§5.6 slice 6b) - the FULL
-   *  rows (id/entry_id/reason), so undo re-INSERTS the originals and the DAG is byte-
-   *  identical. `plan_versions.restore` is jsonb ⇒ no migration; rows persisted before
-   *  6b read `deletedDependencies ?? []`. */
+  /** Edges a resolve_blocker cascade deleted - full rows, so undo re-inserts the
+   *  originals byte-identically. Rows written before this read `?? []`. */
   deletedDependencies: TaskDependency[];
 }
 
-/**
- * One recorded adaptation: a strategy bundle the user applied, with the odds they
- * accepted and a `restore` snapshot that reverts it whole (OVERHAUL S1 step 3 /
- * vision §1.3). Every "Apply" - a single move or a whole tier - writes one of
- * these; the history view lists them (reason · before → after · time) and undo
- * replays `restore`. Capped at the most recent 50 per user (oldest pruned).
- */
+/** One applied bundle with the odds the user accepted and a restore snapshot. Every
+ *  "Apply" writes one; the history view lists them and undo replays `restore`. Capped
+ *  at 50 per user. */
 export interface PlanVersion {
   id: string;
-  /** ISO timestamp the bundle was applied. */
   createdAt: string;
-  /** Human reason: the synthesis assessment, or "Applied N moves". */
   reason: string;
-  /** The committed bundle (the moves as applied, in apply order). */
   moves: StrategyMove[];
-  /** Portfolio odds before the bundle (base joint odds). */
   oddsBefore: number;
   /** The previewed combined odds the user accepted. */
   oddsAfter: number;
@@ -1407,34 +1057,21 @@ export interface PlanVersion {
   revertedAt: string | null;
 }
 
-// --- Rolling-horizon wrapper (S3c-1) ----------------------------------------
+// --- Rolling-horizon wrapper ----------------------------------------
 
-/**
- * Bumped when the persisted `CommittedPlan` shape changes so a stale row is safely
- * invalidated (treated as "no committed plan" ⇒ the no-regret fresh path) rather
- * than mis-replayed. Start at 1.
- */
+/** Bump when the persisted CommittedPlan shape changes, so a stale row is invalidated
+ *  (treated as "no committed plan") rather than mis-replayed. */
 export const COMMITTED_PLAN_SCHEMA_VERSION = 1;
 
-/**
- * The plan the user is currently following - the single piece of state the
- * rolling-horizon wrapper (OVERHAUL §5a substrate S3c-1) applies hysteresis
- * against so a reload doesn't thrash the imminent day for a marginal soft-objective
- * gain. One upserted row per user (mirrors `PortfolioStrategy`'s cache row); the
- * read path decides *what to show* against it (sticky vs. fresh) and the mutation
- * write path *rolls* it forward. It authors NO odds and adds no arrangement quality
- * - it only decides which already-priced arrangement to keep committing to as the
- * days advance. See `design/s3c-rolling-horizon-wrapper.md` and `lib/rolling.ts`.
- */
+/** The plan the user is currently following - the state the rolling-horizon wrapper
+ *  applies hysteresis against, so a reload doesn't thrash the imminent day for a
+ *  marginal soft gain. One row per user. Authors NO odds and adds no arrangement
+ *  quality: it only decides which already-priced arrangement to keep committing to.
+ *  See design/s3c-rolling-horizon-wrapper.md. */
 export interface CommittedPlan {
-  /** Forward-compat / safe invalidation (see COMMITTED_PLAN_SCHEMA_VERSION). */
   schemaVersion: number;
-  /**
-   * The committed cross-project order (the replay basis) - the ARRANGED, gated
-   * order the user follows (post `gatedReorder`), NOT the canonical order. Shipped
-   * for the dashboard display pack, the churn/J metrics, and (as a task-id sequence)
-   * the S1 re-solve verbatim replay.
-   */
+  /** The committed cross-project order - the ARRANGED, gated order the user follows,
+   *  not the canonical one. */
   order: EffectiveOrderEntry[];
   /** `todayISO()` at commit time - the frozen-zone (anchor) day. A date-granular roll
    *  fires when this advances; the read path tolerates a stale anchor safely. */
@@ -1446,21 +1083,14 @@ export interface CommittedPlan {
   /** The committed arrangement's soft score `J` (from `arrangementScore`) - the
    *  quantity the stability gate weighs the fresh candidate's improvement against. */
   j: number;
-  /** ISO timestamp the arrangement was committed. */
   committedAt: string;
 }
 
-/**
- * A local instant captured CLIENT-SIDE (OVERHAUL §5a substrate S3c-4,
- * design/s3c4-intraday-frozen-zone.md). The scheduler is deliberately clock-free
- * everywhere else (day-granular capacity, no timezone stored - S3b decision #5); the
- * intra-day frozen zone is the one place a real "now" is needed, and it follows the S2
- * timezone-gotcha resolution: the client knows its own offset, so it captures its local
- * time rather than the server deriving it from a UTC instant (which would be wrong by the
- * user's offset). Passed per request, NEVER stored - no migration, no stored timezone. It
- * enters ONLY the churn near-weight; absent or ambiguous ⇒ the wrapper is byte-identical to
- * the date-granular S3c-1 behaviour (no-regret).
- */
+/** A local instant captured CLIENT-side. The scheduler is deliberately clock-free
+ *  everywhere else (day-granular capacity, no stored timezone); the intra-day frozen
+ *  zone is the one place a real "now" is needed, and the client knows its own offset so
+ *  it captures its local time rather than the server guessing from a UTC instant.
+ *  Passed per request, never stored. Absent => date-granular behaviour. */
 export interface LocalNow {
   /** The client's local calendar day, `YYYY-MM-DD`. Compared against the plan's frozen-zone
    *  anchor; a mismatch (midnight rollover / travel / skew) ⇒ date-granular fallback. */
@@ -1470,52 +1100,31 @@ export interface LocalNow {
   minutesSinceMidnight: number;
 }
 
-// --- Rolling-horizon history (S3c-2) ----------------------------------------
+// --- Rolling-horizon history ----------------------------------------
 
-/**
- * Why a passive roll fired - the seam S3c-3's `diagnoseRoll` reads to narrate it
- * ("shifted because the Recital deadline moved in"). `material` = the stability
- * gate let a materially-better candidate through; `anchor` = the date advanced and
- * the near part re-froze; `initial` = the first-ever commit (no prior arrangement
- * to diff, so `prevJ` is null). Stored as free text (like {@link TaskOrigin}) so a
- * future roll-kind needs no migration; validated in TS.
- */
+/** Why a passive roll fired, for narration. `material` = the stability gate let a better
+ *  candidate through; `anchor` = the date advanced and the near part re-froze; `initial`
+ *  = first-ever commit, so prevJ is null. Free text so a new roll kind needs no
+ *  migration; validated in TS. */
 export type PlanRollKind = "material" | "anchor" | "initial";
 
-/**
- * One retained automatic roll of the committed plan (OVERHAUL §5a substrate S3c-2,
- * design/s3c2-passive-roll-history.md). Where {@link CommittedPlan} is the single
- * CURRENT plan, a `PlanRoll` is a capped history entry the rolling wrapper appends
- * each time it actually rolls (a material better-candidate or an anchor advance,
- * never a stay-put reload) - the memory that powers the "how my plan evolved"
- * timeline and a roll-undo. A SIBLING to {@link PlanVersion}, not an overload:
- * `PlanVersion` undoes an applied strategy bundle's ROW mutations, whereas a
- * `PlanRoll` retains an ARRANGEMENT snapshot whose undo restores a prior order
- * THROUGH reconcile + re-price (never resurrecting a completed/deleted task).
- * Authors no odds - it stores an arrangement + its soft score `j` only. Capped at
- * the most recent 50 per user (oldest pruned).
- */
+/** One retained automatic roll. Where CommittedPlan is the single CURRENT plan, this is
+ *  a capped history entry appended each time it actually rolls. Sibling to PlanVersion,
+ *  not an overload: PlanVersion undoes ROW mutations, a PlanRoll retains an ARRANGEMENT
+ *  whose undo restores a prior order through reconcile + re-price, so it can never
+ *  resurrect a completed task. Capped at 50 per user. */
 export interface PlanRoll {
   id: string;
-  /** ISO timestamp the roll fired. */
   rolledAt: string;
   /** The committed plan's frozen-zone (anchor) day at roll time (CommittedPlan.anchor). */
   anchor: string;
-  /** The committed plan's situation fingerprint at roll time (CommittedPlan.fingerprint). */
   fingerprint: string;
-  /** The committed arrangement's soft score `J` (from `arrangementScore`). */
   j: number;
-  /** Why the roll fired - the diff seam S3c-3's `diagnoseRoll` reads. */
   kind: PlanRollKind;
   /** The superseded arrangement's `J`; null for the first-ever commit (`initial`). */
   prevJ: number | null;
-  /**
-   * The committed cross-project order this roll retained - the ARRANGED, gated
-   * order (post `gatedReorder`), same shape as `CommittedPlan.order`. The replay
-   * basis a roll-undo feeds back through reconcile as a preference seed (never
-   * restored-verbatim as truth), so it can't resurrect a completed/deleted task.
-   * Persisted to the `plan_order` jsonb column (not `order`, a reserved word).
-   */
+  /** The order this roll retained. A roll-undo feeds it back through reconcile as a
+   *  preference seed, never restored verbatim as truth. Column is `plan_order`. */
   order: EffectiveOrderEntry[];
   /** Set when this roll is undone; the entry stays in history (struck-through). Null while it stands. */
   revertedAt: string | null;
@@ -1524,65 +1133,38 @@ export interface PlanRoll {
   schemaVersion: number;
 }
 
-/**
- * One captured drag-to-reorder of today's plan (OVERHAUL §5a substrate S3c-5,
- * design/s3c5-shared-calibration-brain.md §6) - the missing signal for the 🔴
- * calibration tier (`ARRANGE_WEIGHTS.{switch,energy,buffer}`). The arrangement
- * reorder is applied silently and odds-gated, so nothing normally reveals which dial
- * the user would have turned; a drag does. We keep it as a revealed-preference PAIR
- * `userOrder ≻ appOrder` - the user's dragged order versus the solver's own
- * `a* = argmin J` - recorded ONLY when the drag is odds-neutral vs `a*` (an
- * odds-worsening drag is honored but never taught from). A SIBLING to
- * {@link PlanRoll}: dispose-side bookkeeping that authors no odds. The client
- * records an ORDER, nothing more; the server reconciles, re-prices, gates, and (in
- * S4) calibrates `ArrangeWeights` by recomputing the feature vector φ from the live
- * feature functions over these two stored orders. Capped at the most recent per
- * user (oldest pruned), like `PlanRoll`.
- */
+/** One captured drag-to-reorder of today's plan - the signal for the arrange-weight
+ *  calibration tier. The reorder is applied silently and odds-gated, so nothing normally
+ *  reveals which dial the user would have turned; a drag does. Kept as a
+ *  revealed-preference PAIR (userOrder ≻ appOrder), recorded ONLY when the drag is
+ *  odds-neutral - an odds-worsening drag is honored but never taught from. The client
+ *  records an ORDER and nothing more; the server reconciles, re-prices and gates. */
 export interface PlanReorder {
   id: string;
-  /** The plan day this reorder applies to (today only, v1), `YYYY-MM-DD`. */
   date: string;
-  /** ISO timestamp the drag was captured. */
   capturedAt: string;
-  /**
-   * The solver's arrangement `a* = argmin J` at capture time - the order the user
-   * dragged AWAY from, the `φ(a*)` side of the revealed-preference contrast. Same
-   * shape as {@link CommittedPlan.order} (`EffectiveOrderEntry[]`). Persisted to the
-   * `app_order` jsonb column (not `order`, a reserved word).
-   */
+  /** The solver's own arrangement at capture time - the order the user dragged AWAY
+   *  from. Column is `app_order`. */
   appOrder: EffectiveOrderEntry[];
-  /**
-   * The user's dragged arrangement - odds-neutral vs `appOrder` (only odds-neutral
-   * drags are retained as calibration observations), the `φ(u)` side. Persisted to
-   * the `user_order` jsonb column.
-   */
   userOrder: EffectiveOrderEntry[];
   /** Reuse {@link COMMITTED_PLAN_SCHEMA_VERSION}: a row whose version doesn't match
    *  the current order shape is treated as invalid (dropped), like a stale roll. */
   schemaVersion: number;
 }
 
-// --- Offered-vs-kept move signal (step 5 slice 4 follow-on, limitation #3) ---
+// --- Offered-vs-kept move signal ---
 
 /** Bumped when {@link OfferedMove} changes shape, so a stale row is dropped rather
  *  than mis-read. Mirrors `COMMITTED_PLAN_SCHEMA_VERSION`'s role for orders. */
 export const MOVE_CHOICE_SCHEMA_VERSION = 1;
 
-/**
- * One move the strategist put on the table, and whether it survived the user's
- * checkboxes. Stores the INPUTS to the preference feature vector φ - the move kind,
- * and the diagnosed cause(s) of the goal(s) it serves - never φ itself, so editing
- * `CAUSE_MOVE_PREFERENCES` or `RECOVERY_STYLE_PREFERENCES` re-prices the whole
- * history (the same single-source-of-truth choice `PlanReorder` makes by storing
- * orders rather than feature vectors).
- */
-/**
- * A diagnosed cause and the `goalValue × risk` weight its goal carried. A single-goal
- * move has exactly one entry (a one-entry weighted mean IS the direct lookup, so the
- * weight is then irrelevant); a portfolio-wide move carries one per diagnosed goal, so
- * `aggregateCauseMovePref` replays the offer-time aggregation exactly.
- */
+/** One move the strategist offered, and whether it survived the user's checkboxes.
+ *  Stores the INPUTS to the preference vector φ - the move kind and the diagnosed
+ *  cause(s) - never φ itself, so editing the preference tables re-prices the whole
+ *  history. */
+/** A diagnosed cause and the goalValue × risk weight its goal carried. Single-goal moves
+ *  have one entry; a portfolio-wide move carries one per goal so the offer-time
+ *  aggregation replays exactly. */
 export interface CauseWeight {
   cause: DivergenceCause | null;
   weight: number;
@@ -1590,50 +1172,31 @@ export interface CauseWeight {
 
 export interface OfferedMove {
   kind: StrategyMoveKind;
-  /** The owning goal, or `""` for a portfolio-wide move (triage, activity skip). */
   projectId: string;
   /** The cause(s) this move served at offer time. Empty ⇒ a zero cause term. */
   causes: CauseWeight[];
-  /** Did the user leave this move checked when they applied the bundle? */
   kept: boolean;
 }
 
-/**
- * One applied strategist bundle, retained as a revealed preference over move
- * FAMILIES: the moves the user kept are preferred to the moves they declined. The
- * 🟠 tier of the calibration cohort (`STYLE_PREF_WEIGHT` / `CAUSE_PREF_WEIGHT`),
- * whose 1:1 ratio nothing previously revealed. A SIBLING to {@link PlanReorder}:
- * dispose-side bookkeeping that authors no odds, capped and pruned the same way.
- *
- * Only the strategist's own review surface writes these. The §5.6 check-in review
- * commits bundles too, but its moves are user-asserted facts with no diagnosed
- * cause, so they carry no taste signal.
- */
+/** One applied bundle as a revealed preference over move FAMILIES: what the user kept is
+ *  preferred to what they declined. Only the strategist's own review surface writes
+ *  these - check-in bundles are user-asserted facts with no diagnosed cause, so they
+ *  carry no taste signal. */
 export interface MoveChoice {
   id: string;
-  /** ISO timestamp the bundle was applied. */
   capturedAt: string;
   /** The recovery style in force when the bundle was offered - an INPUT to φ, so it
    *  is stored rather than read live (the offer was made under this lean). */
   recoveryStyle: RecoveryStyle;
-  /** Every move that was on the table, flagged kept or declined. */
   offered: OfferedMove[];
-  /** See {@link MOVE_CHOICE_SCHEMA_VERSION}. */
   schemaVersion: number;
 }
 
-/**
- * A read-only view of how the calibration seam (OVERHAUL §5a substrate S3c-5) has
- * tuned the plan's SOFT knobs to the user's own behaviour - the "how your plan is
- * tuned to you" surface (design/s3c5-shared-calibration-brain.md §7, S5). Every value
- * is computed SERVER-side (the client renders, computes nothing - Hard Rule §2.8 /
- * invariant 3). Both tiers start at their documented default and only sharpen off real
- * evidence, so a fresh account shows defaults everywhere (no-regret, honestly labelled).
- */
+/** Read-only view of how the calibration seam has tuned the soft knobs to the user's
+ *  behaviour. Every value is computed server-side. Both tiers start at their default and
+ *  only sharpen off real evidence, so a fresh account shows defaults everywhere. */
 export interface PlanTuning {
-  /** The 🔴-tier arrangement dials, learned from the drag-to-reorder history. */
   arrange: {
-    /** The calibrated soft-`J` term weights the plan is currently arranged under. */
     weights: ArrangeWeights;
     /** The default (no-data) weights `{1,1,1,1}` - the baseline "how far it moved" reads against. */
     prior: ArrangeWeights;
@@ -1643,24 +1206,20 @@ export interface PlanTuning {
      *  without one (their feature terms are identically 0), so the surface says so honestly. */
     windowLearned: boolean;
   };
-  /** The 🟡-tier stability (anti-thrash) knobs, learned from roll-undos. */
   stability: {
-    /** Calibrated flat hysteresis margin + churn penalty (both scaled by one stiffness factor). */
     stabilityMargin: number;
     churnCost: number;
     /** The documented defaults, for the "× stiffer than default" read. */
     priorMargin: number;
     priorCost: number;
-    /** Automatic reshuffles considered (the calibration denominator). */
     materialRolls: number;
     /** How many of those you undid - the churn-regret signal that stiffens the knobs. */
     reverts: number;
   };
-  /** The 🟠-tier recovery-taste weights, learned from the offered-vs-kept move history:
+  /** The recovery-taste weights, learned from the offered-vs-kept move history:
    *  how much the user's recovery STYLE vs the diagnosed CAUSE arbitrates a sub-epsilon
    *  odds tie between two recovery moves. These never override real odds. */
   movePrefs: {
-    /** Calibrated `[style, cause]` tiebreak weights the strategist currently uses. */
     style: number;
     cause: number;
     /** The co-equal `1.0 / 1.0` prior both shrink toward - the "how far it moved" baseline. */
@@ -1669,44 +1228,32 @@ export interface PlanTuning {
     /** Bundles that revealed a contrast (kept some, declined some). Keep-all / decline-all
      *  reveals nothing, so it is not counted. */
     samples: number;
-    /** Under the `balanced` recovery style every `movePref` is 0, so φ[0] ≡ 0 and the STYLE
-     *  weight can NEVER move off its prior (the scale-invariance trap `calibrate.ts` names).
-     *  False ⇒ the surface renders that dial inert and says why, rather than showing a frozen
-     *  number as if it were a reading. */
+    /** Under the `balanced` style every movePref is 0, so φ[0] ≡ 0 and the STYLE weight
+     *  can never move off its prior. False => the surface says the dial is inert instead
+     *  of showing a frozen number as if it were a reading. */
     styleLearnable: boolean;
   };
 }
 
-// --- §5.6 NL check-in / reflection loop -------------------------------------
+// --- NL check-in / reflection loop -------------------------------------
 //
-// The interpret → propose → review → commit loop over a free-form activity
-// report (design/s5.6-nl-checkin-loop.md). Interpret is THREE stages so the LLM
-// never authors a binding (§0 firewall):
-//   A - interpretCheckin()  (LLM, fuzzy): NL → ungrounded, quoted, register-tagged
-//                            intents referencing entities by quote + echoed handle.
-//   B - resolveCheckin()    (deterministic): fuzzy-bind each quote to the live
-//                            candidate set → resolved | ambiguous | unresolved.
-//   C - proposeFromCheckin() (deterministic): resolved intents → StrategyMove[]
-//                            (Family A) + odds-silent action intents (Family B);
-//                            odds ALWAYS from jointOddsWithMoves, never the LLM.
+// interpret -> propose -> review -> commit over a free-form activity report.
+// Interpret is three stages so the LLM never authors a binding:
+//   A - interpretCheckin()   (LLM): NL -> ungrounded quoted intents
+//   B - resolveCheckin()     (deterministic): bind quotes to live entities
+//   C - proposeFromCheckin() (deterministic): resolved intents -> StrategyMove[];
+//                             odds always from jointOddsWithMoves
 //
-// Two invariants this loop adds to the S1 list:
-//   - No move without a resolved entity AND a verbatim source quote (blocks
-//     fabrication, stale ids, and the prompt-injection vector of acting on an
-//     entity the user never named - every move traces to a `quote` span).
-//   - CompletionConfidence is a pure function of move PROVENANCE (check-in
-//     mark_done = self_assessed; spillover attain_skill = inferred), never of any
-//     model/resolution confidence score - those gate review PRESENTATION only.
+// Two extra invariants: no move without a resolved entity AND a verbatim source quote
+// (blocks fabrication and the injection vector of acting on an entity the user never
+// named), and CompletionConfidence is a pure function of move PROVENANCE, never of any
+// model confidence score - those gate review presentation only.
 
-/** The user's tone for one clause - orthogonal to the action it implies. */
 export type CheckinRegister = "status" | "idea" | "vent";
 
-/**
- * What one clause of a report wants to do - drives the move family in stage C.
- * Family A (forecast-affecting, rides S1 review/commit/undo): completed,
- * reschedule, add_task, skill_gained. Family B (odds-silent): time_logged, idea.
- * vent maps to no move (a non-actionable acknowledgement chip).
- */
+/** What one clause wants to do. Family A (forecast-affecting): completed, reschedule,
+ *  add_task, skill_gained. Family B (odds-silent): time_logged, idea. `vent` maps to no
+ *  move at all. */
 export type CheckinIntentKind =
   | "completed" // → mark_done (or resolve_blocker when the task is a blocker, slice 6b)
   | "reschedule" // → reschedule_task / defer
@@ -1721,12 +1268,8 @@ export type CheckinIntentKind =
  *  by default, low → proposed unchecked). NEVER feeds CompletionConfidence. */
 export type CheckinConfidence = "high" | "low";
 
-/**
- * Stage A output - one *ungrounded* intent. References any existing entity ONLY
- * by a verbatim `quote` plus the `handle` the model echoed from the candidate set
- * we control; it never emits a raw DB id. Deterministic stage B binds the handle/
- * phrase to a real entity; stage C turns it into a move.
- */
+/** Stage A output - one UNGROUNDED intent. References entities only by a verbatim quote
+ *  plus a handle echoed from the candidate set we control, never a raw DB id. */
 export interface CheckinIntent {
   kind: CheckinIntentKind;
   register: CheckinRegister;
@@ -1747,30 +1290,26 @@ export interface CheckinIntent {
 }
 
 /** Stage A result, shaped like ExtractionResult (returned with a `source` sibling
- *  by interpretCheckin). `intents` may be empty - a pure vent is valid. */
+ *  by interpretCheckin()). `intents` may be empty - a pure vent is valid. */
 export interface CheckinInterpretation {
   intents: CheckinIntent[];
-  /** Echo of the raw report - the review header + observability context. */
   rawReport: string;
 }
 
 /** One entity the resolver may bind a quote to - the candidate set is the blast
  *  radius (open tasks, the unlocked skill-node frontier, active activities). */
 export interface CheckinCandidate {
-  /** Stable handle shown to the model + used to disambiguate (e.g. "T3"). */
   handle: string;
   type: "task" | "skill_node" | "activity";
   /** The real DB id - stage B emits this only on a confident bind. */
   id: string;
   title: string;
-  /** Owning goal/project (for move construction + display). */
   goalId: string;
   goalName: string;
 }
 
 export type CheckinResolutionStatus = "resolved" | "ambiguous" | "unresolved";
 
-/** Stage B output - an intent paired with the outcome of binding it. */
 export interface ResolvedCheckinIntent {
   intent: CheckinIntent;
   status: CheckinResolutionStatus;
@@ -1782,10 +1321,9 @@ export interface ResolvedCheckinIntent {
   candidates: CheckinCandidate[];
 }
 
-/** A Family-B (odds-silent) action to confirm - a descriptor the capture bar
- *  dispatches to the matching Server Action. `log_progress` SETs actual time (so
- *  re-submitting is idempotent); it is odds-silent now but the raw material for
- *  future estimation calibration - don't let a "logs are inert" cleanup drop it. */
+/** An odds-silent action to confirm. `log_progress` SETs actual time, so re-submitting
+ *  is idempotent - it's inert today but the raw material for estimation calibration,
+ *  so don't let a "logs are unused" cleanup drop it. */
 export type CheckinActionIntent =
   | { kind: "log_progress"; taskId: string; title: string; minutes: number; quote: string }
   | { kind: "capture_idea"; text: string; quote: string }
@@ -1820,10 +1358,10 @@ export interface CheckinReview {
 }
 
 /**
- * Project scope for a task-scoped check-in (§5.6 slice 6a). When a check-in runs
+ * Project scope for a task-scoped check-in. When a check-in runs
  * bound to a goal (the capture bar on a project page), an `add_task` intent - "I
  * also need to do Y" - becomes a real Family-A `add_tasks` move ON THIS GOAL
- * (forecast-affecting, live-re-solved), instead of the odds-silent standalone
+ * (forecast()-affecting, live-re-solved), instead of the odds-silent standalone
  * capture the global bar produces with no project context. The scope is also the
  * disambiguation: the goal's own entities rank first in the interpret prompt.
  */
@@ -1867,14 +1405,11 @@ export function isTerminalJobStatus(status: JobRunStatus): boolean {
  */
 export interface JobRun {
   id: string;
-  /** A `Job["type"]` from lib/job-handlers.ts. */
   type: string;
-  /** The goal this job is about; null for portfolio-wide work. */
   subjectId: string | null;
   status: JobRunStatus;
   /** Whatever the body returned that the UI needs, e.g. `{ created: 4 }`. */
   result: Record<string, unknown> | null;
-  /** The failure message, shown beside the retry affordance. */
   error: string | null;
   createdAt: string;
   updatedAt: string;
@@ -1918,7 +1453,7 @@ export interface JobHandle {
   ranInline: boolean;
   /**
    * The outcome, when the action already has one.
-   *
+  *
    * These carry the INLINE path's result, and they are not a convenience: a
    * terminal job is never polled, so a handle that came back already finished
    * is the only chance the browser gets to see what it produced or why it
