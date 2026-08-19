@@ -12,6 +12,24 @@ REGION="${AWS_REGION:-ap-southeast-1}"
 LWA_ACCOUNT=753240598075
 fail=0
 
+# Checks can be turned off by name: PREFLIGHT_SKIP=bedrock,probes
+#
+# Only two are skippable, and only because CI has a reason to. `bedrock` sends a
+# real (billed) Converse on every run, and model access is an account-level
+# grant that does not change between deploys - checking it on every push is
+# paying repeatedly for an answer that changed once, in August. `probes` needs
+# read permission on six services, which the deploy role has, but a tightened
+# role would fail them in a way that looks like an outage and is not.
+#
+# Nothing that can differ per commit is skippable: the LWA pin, the bootstrap
+# state, the build artefacts and the alert email always run.
+skipped() {
+  case ",${PREFLIGHT_SKIP:-}," in
+    *",$1,"*) printf '  \033[90mskip\033[0m  %s (PREFLIGHT_SKIP)\n' "$1"; return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 ok()   { printf '  \033[32mok\033[0m    %s\n' "$1"; }
 bad()  { printf '  \033[31mFAIL\033[0m  %s\n' "$1"; fail=$((fail+1)); }
 warn() { printf '  \033[33mwarn\033[0m  %s\n' "$1"; }
@@ -97,12 +115,14 @@ probe() {
     *) ok "$name reachable" ;;
   esac
 }
+if skipped probes; then :; else
 probe s3         aws s3api list-buckets
 probe lambda     aws lambda list-functions
 probe ec2        aws ec2 describe-vpcs
 probe rds        aws rds describe-db-clusters
 probe cognito    aws cognito-idp list-user-pools --max-results 1
 probe sqs        aws sqs list-queues
+fi
 
 # --- 3. Bedrock model access ----------------------------------------------
 # A model that is not enabled fails at the first LLM call, in a worker, hours
@@ -122,6 +142,7 @@ probe sqs        aws sqs list-queues
 # retired; submit it with aws/scripts/submit-bedrock-use-case.sh instead. A
 # one-token Converse costs a fraction of a cent and is the only thing that
 # actually answers "can this account call this model".
+if skipped bedrock; then :; else
 for model in "${BEDROCK_MODEL:-global.anthropic.claude-haiku-4-5-20251001-v1:0}" \
              "${BEDROCK_FALLBACK_MODEL:-global.anthropic.claude-sonnet-4-6}"; do
   out=$(aws bedrock-runtime converse --region "$REGION" --model-id "$model" \
@@ -144,6 +165,7 @@ for model in "${BEDROCK_MODEL:-global.anthropic.claude-haiku-4-5-20251001-v1:0}"
       warn "bedrock: $model - unrecognised response: $(echo "$out" | head -1 | cut -c1-70)" ;;
   esac
 done
+fi
 
 # --- 4. Lambda Web Adapter layer ------------------------------------------
 # A stale pinned version fails as an opaque "layer not found" during rollback.
