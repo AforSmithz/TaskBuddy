@@ -14,47 +14,35 @@ import {
   bedrockRegion,
   isLLMConfigured,
   modelChain,
-} from "./bedrock-config";
+} from "@/lib/bedrock-config";
 
 // Re-exported so callers have one import site for the whole LLM layer.
-export { isLLMConfigured } from "./bedrock-config";
+export { isLLMConfigured } from "@/lib/bedrock-config";
 
-// Thin wrapper around Amazon Bedrock's Converse API. All LLM-powered features
-// (extraction, decomposition, check-in interpretation, the strategists, skill
-// links, follow-up messages) go through callBedrock / callBedrockJSON.
+// Thin wrapper around Bedrock's Converse API. Every LLM-powered feature goes through
+// callBedrock / callBedrockJSON.
 //
-// Replaces lib/foundry.ts. Four things genuinely changed, and each one silently
-// breaks a request if you get it wrong:
+// Replaces lib/foundry.ts. Four things changed, and each silently breaks a request:
 //
-//   1. SYSTEM PROMPTS ARE NOT MESSAGES. Converse takes them in a separate
-//      `system` array. Every call site in this app builds
-//      `[{role:"system"}, {role:"user"}]`, so passing that array straight
-//      through would send the system prompt as a user turn - the model still
-//      answers, plausibly, with the instructions treated as content. There is
-//      no error. `splitMessages` below is what stops that.
-//   2. `modelId` is an INFERENCE PROFILE id, not a catalog model id. Claude 4.5
-//      and newer refuse on-demand invocation with a bare model id.
-//   3. Structured output moved from `response_format` to
-//      `outputConfig.textFormat`, and `schema` is a JSON *string*, not an
-//      object. Passing the object produces a ValidationException that names
-//      neither the field nor the reason.
-//   4. Reasoning effort is `outputConfig.effort`, a first-class field that
-//      lives beside the schema rather than fighting it. This is the one place
-//      the port got simpler: on Foundry, reasoning and non-reasoning
-//      deployments rejected each other's parameters, so the request body had
-//      to be shaped per deployment. Converse takes the same body for every
-//      model.
+//   1. System prompts are NOT messages - Converse takes them in a separate `system` array.
+//      Every call site here builds [{role:"system"}, {role:"user"}], so passing that straight
+//      through sends the system prompt as a user turn. The model still answers, plausibly,
+//      with the instructions treated as content. No error. splitMessages is what stops that.
+//   2. `modelId` is an INFERENCE PROFILE id, not a catalog model id. Claude 4.5+ refuses
+//      on-demand invocation with a bare model id.
+//   3. Structured output moved from `response_format` to `outputConfig.textFormat`, and
+//      `schema` is a JSON STRING, not an object. Passing the object gives a
+//      ValidationException naming neither the field nor the reason.
+//   4. Reasoning effort is `outputConfig.effort`. This is the one place the port got simpler:
+//      on Foundry, reasoning and non-reasoning deployments rejected each other's parameters,
+//      so the body had to be shaped per deployment. Converse takes the same body for all.
 //
-// Requests still run through a model fallback chain: the primary is tried
-// first, the fallback on any failure. If every model fails, callers fall back
-// to their own offline heuristic.
+// Requests run through a model fallback chain: primary first, fallback on any failure. If
+// every model fails, callers drop to their own offline heuristic.
 
-/**
- * Reasoning tokens are billed against this ceiling and are invisible in the
- * response, so it is a shared budget between thinking and the actual JSON.
- * A large extraction emits a big nested object; too low a cap truncates it and
- * surfaces as stopReason "max_tokens" with unusable content.
- */
+/** Reasoning tokens bill against this ceiling and are invisible in the response, so it's a
+ *  shared budget between thinking and the actual JSON. Too low a cap truncates a large
+ *  extraction and surfaces as stopReason "max_tokens" with unusable content. */
 const MAX_TOKENS = 16000;
 
 /** Abort a hung request so a stuck primary doesn't stack its latency onto the fallback. */
@@ -71,68 +59,45 @@ export interface ChatMessage {
 /** Reasoning budget. Mapped onto Bedrock's `effort` by bedrockEffort(). */
 export type ReasoningEffort = "minimal" | "low" | "medium" | "high";
 
-/**
- * Final-answer length. Retained so the eleven call sites keep compiling, but
- * Converse has no counterpart and it is not sent. Kept rather than deleted
- * because removing it would touch every caller for no behavioural gain, and
- * because a future `outputConfig` field may well restore it.
- */
+/** Final-answer length. Converse has no counterpart so it isn't sent; kept because removing it
+ *  would touch all eleven call sites for no behavioural gain. */
 export type Verbosity = "low" | "medium" | "high";
 
 interface CallOptions {
-  /**
-   * How hard the model thinks. Defaults to "low" - the setting the original
-   * OpenRouter wrapper hardcoded for every caller. Raise it per call site for
-   * genuine planning work (decomposition, the strategists, check-in
-   * interpretation); "minimal" is right for one-shot prose.
-   */
+  /** How hard the model thinks. Defaults to "low". Raise it per call site for genuine planning
+   *  work (decomposition, the strategists, check-in); "minimal" is right for one-shot prose. */
   reasoningEffort?: ReasoningEffort;
   /** Accepted for source compatibility; not sent. See {@link Verbosity}. */
   verbosity?: Verbosity;
   temperature?: number;
   /** Force a single model for this call, bypassing the fallback chain. */
   model?: string;
-  /** Per-call output ceiling. Defaults to MAX_TOKENS. */
   maxCompletionTokens?: number;
-  /**
-   * Call-site name for the usage metrics. JSON calls get this free from
-   * `schemaName`, which is already distinct per site; only the prose call in
-   * lib/generate.ts has to pass it explicitly.
-   */
+  /** Call-site name for usage metrics. JSON calls get it free from schemaName; only the prose
+   *  call in generate.ts passes it explicitly. */
   label?: string;
 }
 
 interface JsonCallOptions<T> extends CallOptions {
-  /**
-   * A JSON Schema. When supplied the response is decoder-constrained to match
-   * it, which is what lets the system prompts drop their hand-written shape
-   * blocks.
-   *
-   * BEDROCK'S SUPPORTED SUBSET IS NOT THE SAME AS FOUNDRY'S, and the overlap
-   * is what this app already writes:
-   *   - `additionalProperties: false` is REQUIRED on every object. A schema
-   *     without it is rejected outright rather than loosely honoured.
-   *   - `minimum`/`maximum`, `minLength`/`maxLength` and `pattern` are not
-   *     supported at all. Foundry accepted them and enforced them by clamping
-   *     the decoder, which silently mangled output; Bedrock rejects them. The
-   *     app already keeps caps in prose plus a code-side check, so nothing
-   *     changes - but do not "helpfully" add a `maximum` to a schema.
-   *   - `minItems` is supported only for the values 0 and 1.
-   *   - Recursive schemas are not supported. None of the ten schemas here are
-   *     recursive; verified before the port.
-   *
-   * Grammars are compiled per schema and cached for 24 hours per account, so
-   * the first call after a schema edit is measurably slower. That is expected,
-   * not a regression.
-   */
+  /** A JSON Schema. When supplied the response is decoder-constrained to match it, which is
+   *  what lets the system prompts drop their hand-written shape blocks.
+  *
+   *  Bedrock's supported subset is NOT Foundry's:
+   *    additionalProperties: false is REQUIRED on every object, or the schema is rejected.
+   *    minimum/maximum, minLength/maxLength and pattern aren't supported at all. Foundry
+   *      accepted them and enforced them by clamping the decoder, which silently mangled
+   *      output; Bedrock just rejects them. Caps live in prose plus a code-side check, so
+   *      don't "helpfully" add a maximum to a schema.
+   *    minItems only supports 0 and 1.
+   *    No recursive schemas. None of the ten here are.
+  *
+   *  Grammars are compiled per schema and cached 24h per account, so the first call after a
+   *  schema edit is noticeably slower. Expected, not a regression. */
   schema?: Record<string, unknown>;
   /** Schema name; a-z, A-Z, 0-9, _ and - only. Required when schema is set. */
   schemaName?: string;
-  /**
-   * Reject a parsed-but-unusable response. A schema guarantees the shape but
-   * not the semantics: it cannot express "at least one task", a list cap, or a
-   * cross-field invariant. Returning false advances the chain.
-   */
+  /** Reject a parsed-but-unusable response. A schema guarantees shape, not semantics - it
+   *  can't express "at least one task" or a cross-field invariant. False advances the chain. */
   validate?: (parsed: T) => boolean;
 }
 
@@ -157,13 +122,10 @@ class BedrockError extends Error {
   }
 }
 
-// MODULE SCOPE, DELIBERATELY. The client holds the resolved credential chain
-// and a keep-alive HTTPS agent; rebuilding it per call would re-resolve the
-// role credentials and pay a fresh TLS handshake on every LLM request.
-//
-// `adaptive` rather than `standard` retry: it adds client-side rate limiting on
-// top of backoff, which is the correct behaviour against a service whose
-// throttles are account-wide rather than per-request.
+// Module scope, deliberately. The client holds the resolved credential chain and a keep-alive
+// HTTPS agent; rebuilding it per call would re-resolve role credentials and pay a fresh TLS
+// handshake on every LLM request. `adaptive` rather than `standard` retry because it adds
+// client-side rate limiting, which is right against account-wide throttles.
 let client: BedrockRuntimeClient | null = null;
 
 function getClient(): BedrockRuntimeClient {
@@ -177,19 +139,14 @@ function getClient(): BedrockRuntimeClient {
   return client;
 }
 
-/**
- * Split the app's flat message list into Converse's `system` + `messages`.
+/** Split the app's flat message list into Converse's system + messages.
  *
- * Converse also rejects two consecutive turns with the same role, which the
- * OpenAI-shaped API tolerated. No call site in this app does that today, so
- * rather than silently merging - which would change a prompt without saying so
- * - adjacent same-role turns are joined with a blank line and that is stated
- * here as the one transformation applied.
+ *  Converse also rejects two consecutive turns with the same role, which the OpenAI-shaped API
+ *  tolerated. No call site does that today, so rather than silently merging (which would change
+ *  a prompt without saying so) adjacent same-role turns are joined with a blank line.
  *
- * Exported as a test seam. aws/harness/offline.ts asserts the split directly,
- * because getting it wrong produces plausible output rather than an error and
- * would not be caught by anything else.
- */
+ *  Exported as a test seam - aws/harness/offline.ts asserts the split directly, because getting
+ *  it wrong produces plausible output rather than an error. */
 export function splitMessages(messages: ChatMessage[]): {
   system: SystemContentBlock[];
   turns: Message[];
@@ -221,29 +178,20 @@ export function splitMessages(messages: ChatMessage[]): {
   return { system, turns };
 }
 
-/**
- * One EMF line per completion, whatever the outcome.
+/** One EMF line per completion, whatever the outcome.
  *
- * DELIBERATELY EMITTED BEFORE THE ERROR CHECKS in invokeOnce. A response
- * truncated against maxTokens is the single most expensive failure available
- * here - it burns the entire budget and returns nothing - so it is exactly the
- * call that must not go unrecorded. Logging after the throw would keep only the
- * cheap cases.
+ *  Emitted BEFORE the error checks in invokeOnce, deliberately: a response truncated against
+ *  maxTokens is the most expensive failure available here - it burns the whole budget and
+ *  returns nothing - so it's exactly the call that must not go unrecorded.
  *
- * EMBEDDED METRIC FORMAT rather than the plain JSON line the Foundry wrapper
- * wrote. Same fields, but CloudWatch extracts the numbers into real metrics at
- * ingest, so token spend and latency per call site become chartable and
- * alarmable instead of only greppable - at no custom-metric API cost.
+ *  Embedded Metric Format rather than a plain JSON line, so CloudWatch extracts the numbers
+ *  into real metrics at ingest and token spend per call site becomes chartable and alarmable
+ *  instead of only greppable, at no custom-metric cost.
  *
- * ONE THING WAS LOST IN THE PORT AND IT IS WORTH NAMING. Foundry returned
- * `completion_tokens_details.reasoning_tokens`, which let `reasoning_share` say
- * how much of the bill was invisible thinking - the number that told you
- * whether lowering effort at a site would save anything. Bedrock's TokenUsage
- * has no reasoning breakdown, so that diagnostic is gone. `effort` is logged
- * instead, which at least makes the dial visible next to the cost it produces.
- *
- * Never throws: a broken log line must not fail a good request.
- */
+ *  One thing was lost in the port: Foundry returned reasoning_tokens, which let reasoning_share
+ *  say how much of the bill was invisible thinking. Bedrock's TokenUsage has no reasoning
+ *  breakdown, so that's gone. `effort` is logged instead, which at least puts the dial next to
+ *  the cost it produces. Never throws - a broken log line must not fail a good request. */
 function logUsage(
   modelId: string,
   options: JsonCallOptions<unknown>,
@@ -453,13 +401,9 @@ function isRetryable(err: unknown): boolean {
   return err.status !== undefined && err.status >= 500;
 }
 
-/**
- * Calls one model, retrying once on a throttle or server error.
- *
- * One retry here, on top of the SDK's own adaptive retries, deliberately: the
- * SDK retries the HTTP call, this retries the whole request including the
- * grammar compilation that a cold schema pays for.
- */
+/** Calls one model, retrying once on a throttle or server error. One retry on top of the SDK's
+ *  own adaptive retries, deliberately: the SDK retries the HTTP call, this retries the whole
+ *  request including the grammar compilation a cold schema pays for. */
 async function callModel(
   modelId: string,
   messages: ChatMessage[],
@@ -513,15 +457,11 @@ export async function callBedrock(
   );
 }
 
-/**
- * Calls the model chain and parses the response as JSON.
- *
- * With a schema supplied the response is decoder-constrained, so `JSON.parse`
- * cannot fail on a well-formed call - the try/catch is for the schema-less
- * path and for a truncation that slipped past the stopReason check. The
- * fence-stripping and regex salvage the OpenRouter wrapper needed are gone and
- * should not come back: if parsing fails here, the schema is wrong.
- */
+/** Calls the model chain and parses the response as JSON. With a schema the response is
+ *  decoder-constrained, so JSON.parse can't fail on a well-formed call - the try/catch is for
+ *  the schema-less path and for a truncation that slipped past the stopReason check. The
+ *  fence-stripping and regex salvage the old wrapper needed are gone and shouldn't come back:
+ *  if parsing fails here, the schema is wrong. */
 export async function callBedrockJSON<T>(
   messages: ChatMessage[],
   options: JsonCallOptions<T> = {},

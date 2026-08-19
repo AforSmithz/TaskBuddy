@@ -16,7 +16,6 @@ const KIND_STYLE: Record<GoalKind, string> = {
   learning: "bg-[var(--color-accent-subtle)] text-[var(--color-accent-fg)]",
 };
 
-/** A presentational chip showing a goal's kind (project vs learning). */
 export function GoalKindBadge({
   kind,
   className,

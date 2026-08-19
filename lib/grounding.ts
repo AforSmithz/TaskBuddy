@@ -12,40 +12,36 @@ import type {
   StrategyMoveKind,
   Task,
   TimeWindow,
-} from "./types";
-import { MIN_ESTIMATION_SAMPLES } from "./types";
+} from "@/lib/types";
+import { MIN_ESTIMATION_SAMPLES } from "@/lib/types";
 import {
   SHRINKAGE_STRENGTH,
   WINDOW_LABELS,
   type ResidualSample,
   type VelocityModel,
-} from "./velocity";
+} from "@/lib/velocity";
 import {
   fitCalibratedWeights,
   shrinkScalar,
   type PreferencePair,
-} from "./calibrate";
+} from "@/lib/calibrate";
 import {
   DEFAULT_VALUE_MODEL,
   movePref,
   type RecoveryStyle,
   type ValueModel,
-} from "./value-model";
-import { goalCompletion } from "./goal";
-import { skillProgress } from "./skill";
+} from "@/lib/value-model";
+import { goalCompletion } from "@/lib/goal";
+import { skillProgress } from "@/lib/skill";
 
-// Step 5 (§5 / vision §4.1) - cause-diagnosis.
+// Cause diagnosis. detectDivergence says THAT a goal is off track (the symptoms); this
+// classifies WHY - one-off slip vs chronic velocity vs constraint change vs structural
+// overload - because the cause picks which move family to prefer, so the strategist doesn't
+// reflexively cut scope over a single blown estimate.
 //
-// `detectDivergence` says *that* a goal is off track (the symptoms). This module
-// is the layer on top: it classifies *why* - one-off slip vs chronic velocity vs
-// constraint change vs structural overload - because the cause picks the response
-// *class* (which move family to prefer), so the strategist doesn't reflexively
-// cut scope for a single blown estimate.
-//
-// §0 invariant: the cause is decided here, deterministically, from estimation
-// residuals and a temporal baseline. The LLM may narrate a cause but never sets
-// one where it changes which odds or moves win. This file is pure (no I/O, no
-// `server-only`) so both the per-project and portfolio strategists can call it.
+// The cause is decided here, deterministically, from residuals and a temporal baseline. The
+// LLM may narrate one but never sets one where it changes which odds or moves win. Pure (no
+// I/O, no server-only) so both strategists can call it.
 
 /** ln(1.25): a goal "chronically" overruns once it's running ≥25% over (locked). */
 const LN_CHRONIC_OVERRUN = Math.log(1.25);
@@ -66,17 +62,12 @@ export interface CauseBaseline {
   probability: number | null;
 }
 
-/**
- * Everything {@link diagnoseCause} needs - a pure subset that `RecoveryContext`
- * (and `buildRecoveryPlan`'s locals) already satisfy structurally, so callers
- * pass the context they already hold.
- */
+/** Everything diagnoseCause needs - a pure subset RecoveryContext already satisfies
+ *  structurally, so callers just pass the context they already hold. */
 export interface CauseInput {
   /** The global learned estimation model (systematic bias + spread). */
   model: EstimationModel;
-  /** This goal's completed tasks - the per-goal residual sample. */
   completedTasks: Task[];
-  /** This goal's open tasks - for "added since the baseline" detection. */
   openTasks: Task[];
   /** The symptoms already detected (the layer this builds on). */
   reasons: DivergenceReason[];
@@ -84,18 +75,12 @@ export interface CauseInput {
   currentProbability: number;
   /** The temporal/odds baseline, or null when no strategy is cached yet. */
   baseline: CauseBaseline | null;
-  /**
-   * The GLOBAL per-window velocity (OVERHAUL S2 slice C) - how much each time-of-day
-   * window runs over/under your estimates, across all goals. Absent until session
-   * capture accrues; when absent the placement tempering can't fire and the
-   * diagnosis is bit-identical to before S2 (the no-regret anchor).
-   */
+  /** Global per-window velocity: how much each time-of-day window runs over/under estimate,
+   *  across all goals. Absent until session capture accrues, and while absent the placement
+   *  tempering can't fire. */
   windowVelocity?: VelocityModel;
-  /**
-   * This goal's window-tagged residuals (its completed tasks joined to their work
-   * sessions). The placement check asks whether this goal's overrun is just the
-   * low-energy windows it worked in. Absent/sparse ⇒ no tempering.
-   */
+  /** This goal's window-tagged residuals. The placement check asks whether the overrun is
+   *  just the low-energy windows it was worked in. Absent or sparse means no tempering. */
   windowedResiduals?: ResidualSample[];
 }
 
@@ -121,18 +106,12 @@ function mean(xs: number[]): number {
   return xs.length === 0 ? 0 : xs.reduce((a, b) => a + b, 0) / xs.length;
 }
 
-/**
- * S2 placement tempering: is this goal's chronic-looking overrun explained by the
- * low-energy WINDOWS it was worked in, rather than bad estimates? Net of each
- * window's global slowdown (`μ_window − μ₀`), does the goal's mean residual fall
- * back below the chronic threshold? If so, returns the window most responsible (+
- * how much slower it runs than your norm) for the message; else null.
+/** Is this goal's chronic-looking overrun explained by the low-energy WINDOWS it was worked
+ *  in rather than bad estimates? Net of each window's global slowdown, does the mean residual
+ *  fall back below the chronic threshold? If so, return the window most responsible.
  *
- * Inert until the loop has learned the windows: needs real `windowVelocity` and a
- * non-sparse window-tagged sample, so before S2 capture accrues it returns null and
- * the diagnosis is bit-identical to before (the no-regret anchor). It can only ever
- * DEMOTE a chronic_velocity reading - the conservative direction (§0; deterministic).
- */
+ *  Inert until the loop has learned windows, so before capture accrues it returns null. It can
+ *  only ever DEMOTE a chronic_velocity reading, which is the conservative direction. */
 function placementExplains(
   samples: ResidualSample[],
   windowVelocity: VelocityModel | undefined,
@@ -160,23 +139,16 @@ function placementExplains(
   return { window: worst, slowerPct: Math.round((Math.exp(worstEffect) - 1) * 100) };
 }
 
-/**
- * Classify *why* a goal diverged. Deterministic-first (§0). The checks run in a
- * fixed precedence so each cause means what it says:
+/** Classify WHY a goal diverged. The checks run in a fixed precedence so each cause means
+ *  what it says:
  *
- *   1. one_off_slip - a single big over-run while the rest of the goal's work
- *      sits near its estimates. Checked FIRST (locked decision) so one blow-out
- *      can't masquerade as a chronic pattern, and so the strategist can hold
- *      rather than over-react to an expected missed Friday.
- *   2. chronic_velocity - estimates systematically run over, globally or for this
- *      goal once it has its own sample. The estimates are the problem, not the
- *      arrangement. (2a) timing_placement intercepts the goal's own chronic read
- *      when the overrun is explained by the low-energy windows it was worked in - 
- *      a placement problem, not an estimation one (S2; inert until windows learned).
- *   3. constraint_change - neither slip nor pattern explains it, but the world
- *      moved since the plan was made (new work landed, or the odds fell).
- *   4. scope_structural - the default: more committed work than the time allows.
- */
+ *    1. one_off_slip     - one big over-run while the rest sits near estimate. Checked FIRST
+ *                          so a single blow-out can't masquerade as a chronic pattern.
+ *    2. chronic_velocity - estimates systematically run over, globally or for this goal.
+ *       2a. timing_placement intercepts that when the overrun is explained by the windows the
+ *           work happened in - a placement problem, not an estimation one.
+ *    3. constraint_change - neither explains it, but the world moved since the plan was made.
+ *    4. scope_structural  - the default: more committed work than time allows. */
 export function diagnoseCause(input: CauseInput): CauseDiagnosis {
   const { model, completedTasks, openTasks, currentProbability, baseline } =
     input;
@@ -201,33 +173,25 @@ export function diagnoseCause(input: CauseInput): CauseDiagnosis {
 
   // 2) chronic_velocity - a systematic over-run, for this goal or globally.
   //
-  //    The goal's own residual mean is SHRUNK toward the global bias (empirical
-  //    Bayes, κ = SHRINKAGE_STRENGTH) rather than SWITCHED to it at a hard
-  //    `n ≥ MIN_ESTIMATION_SAMPLES` cutoff. One blended read replaces the old
-  //    `goalChronic || globalChronic` disjunction, and it is strictly better at both
-  //    ends: a goal with 4 damning samples is no longer silently ignored, and a goal
-  //    with 10 clean ones is no longer condemned by a chronic global average it
-  //    doesn't share. This is the per-goal-cause sharpening S2's hierarchical
-  //    shrinkage was built to supply (`fitVelocityModel` uses the identical B).
+  //    The goal's residual mean is SHRUNK toward the global bias rather than switched to it at
+  //    a hard sample cutoff. One blended read replaces the old `goalChronic || globalChronic`
+  //    disjunction and is better at both ends: a goal with 4 damning samples is no longer
+  //    ignored, and a goal with 10 clean ones is no longer condemned by a chronic global
+  //    average it doesn't share.
   //
-  //    NO-REGRET at the anchor: `n = 0 ⇒ B = 0 ⇒ bias = model.meanLog`, i.e. exactly
-  //    the old `globalChronic` test. The global trust gate mirrors `fitVelocityModel`
-  // - below MIN_ESTIMATION_SAMPLES the global model is the unbiased *default*, not
-  //    evidence, so there is nothing to shrink toward and nothing to diagnose. (The
-  //    goal's sample is a subset of the global pool - `goalResiduals` shares
-  //    `estimationModel`'s gate - so this can never mask a goal that used to fire.)
+  //    n = 0 gives B = 0 gives bias = model.meanLog, i.e. exactly the old global test. Below
+  //    MIN_ESTIMATION_SAMPLES the global model is the unbiased default, not evidence, so
+  //    there's nothing to shrink toward.
   const chronicBias =
     model.sampleSize >= MIN_ESTIMATION_SAMPLES
       ? shrinkScalar(mean(residuals), model.meanLog, n, SHRINKAGE_STRENGTH)
       : null;
   if (chronicBias !== null && chronicBias >= LN_CHRONIC_OVERRUN) {
-    // 2a) timing_placement (S2) - before blaming the estimates, check whether THIS
-    //     goal's overrun is just the low-energy windows it was worked in. If net of
-    //     the windows the pace is fine, it's a placement problem (reschedule into
-    //     better hours), not an estimation one. Called unconditionally: it self-gates
-    //     to the goal's own chronic read (it returns null unless the goal's RAW mean
-    //     clears the threshold), so a purely global bias is still genuinely
-    //     chronic_velocity and can't be demoted by one goal's window history.
+  // 2a) Before blaming the estimates, check whether this goal's overrun is just the
+    //     low-energy windows it was worked in - if the pace is fine net of windows it's a
+    //     placement problem, not an estimation one. Called unconditionally: it self-gates to
+    //     the goal's own chronic read, so a purely global bias stays chronic_velocity and
+    //     can't be demoted by one goal's window history.
     const placement = placementExplains(
       input.windowedResiduals ?? [],
       input.windowVelocity,
@@ -245,11 +209,10 @@ export function diagnoseCause(input: CauseInput): CauseDiagnosis {
     };
   }
 
-  // 3) constraint_change - the world moved since the plan was made. v1 reads two
-  //    signals off the cached-strategy baseline: work that landed after it was
-  //    generated, or odds that have since fallen materially (the effect of a
-  //    pulled-in deadline / cut availability / new blocker). By here we've ruled
-  //    out "your own estimates explain it", so a drop is exogenous.
+  // 3) constraint_change - the world moved since the plan was made. Two signals off the
+  //    cached-strategy baseline: work that landed after it was generated, or odds that have
+  //    since fallen materially. By here we've ruled out "your estimates explain it", so a drop
+  //    is exogenous.
   if (baseline) {
     const baseTime = Date.parse(baseline.generatedAt);
     const addedSince =
@@ -278,34 +241,24 @@ export function diagnoseCause(input: CauseInput): CauseDiagnosis {
   };
 }
 
-// Step 5 slice 4 (§5 / vision §4.1) - response class: cause → preferred move family.
+// --- Response class: cause -> preferred move family ------------------------
 //
-// The diagnosed cause picks which *family* of recovery moves fits the situation,
-// so the strategist doesn't reflexively cut scope for a one-off slip, or merely
-// re-date a project whose estimates are the real problem. Like the value model's
-// recovery-style preference, these are TIEBREAKERS (bounded, same ±1 scale): the
-// joint optimizer only consults them when two candidates' odds are within an
-// epsilon, so the forecast always decides first and the cause only arbitrates a
-// genuine tie. The cause picks the family; the odds still decide within it (§0 - 
-// the cause itself is computed deterministically by `diagnoseCause`).
+// The diagnosed cause picks which FAMILY of moves fits, so the strategist doesn't cut scope
+// over a one-off slip or merely re-date a project whose estimates are the real problem. Like
+// the value model's style preference these are TIEBREAKERS on the same +-1 scale: the joint
+// optimizer only consults them when two candidates' odds are within an epsilon, so the
+// forecast always decides first.
 //
-// Mirrors the design table:
-//   one_off_slip      → smallest defer / reschedule (don't cut scope)
-//   chronic_velocity  → re-estimate (reshape) / move the deadline (the estimates,
-//                       not the arrangement, are wrong)
-//   timing_placement  → smallest reschedule into stronger hours (S2; the windows,
-//                       not the estimates, are wrong - don't reshape or cut scope)
-//   constraint_change → reroute / reschedule / triage (re-plan around the change)
-//   scope_structural  → triage / reroute (shed genuine over-commitment)
+//   one_off_slip      -> smallest defer / reschedule (don't cut scope)
+//   chronic_velocity  -> reshape / move the deadline (the estimates are wrong)
+//   timing_placement  -> reschedule into stronger hours (the windows are wrong)
+//   constraint_change -> reroute / reschedule / triage (re-plan around the change)
+//   scope_structural  -> triage / reroute (shed genuine over-commitment)
 //
-// `hold` IS enumerable now (step 5 slice 4 follow-on, limitation #2). It is not a
-// competitor to the real moves: `optimizeJointPlan` never lets a zero-gain move win
-// the accept gate. It is offered only at the moment the optimizer gives up - when
-// nothing left on the table clears `JOINT_MIN_GAIN` and a goal is still off track.
-// That state already MEANT "wait"; a `hold` candidate just says so out loud and
-// records the decision in the S1 plan-version history, which is the natural home for
-// it (a hold is a real decision). Only a cause that positively prefers holding can
-// surface one - hence the single entry below.
+// `hold` is enumerable but isn't a competitor to the real moves - optimizeJointPlan never
+// lets a zero-gain move win the accept gate. It's offered only when the optimizer gives up:
+// nothing clears JOINT_MIN_GAIN and a goal is still off track. That state already meant
+// "wait"; a hold candidate just says so and records the decision in the version history.
 
 export const CAUSE_MOVE_PREFERENCES: Record<
   DivergenceCause,
@@ -358,12 +311,9 @@ export const CAUSE_MOVE_PREFERENCES: Record<
   },
 };
 
-/**
- * Tiebreak bias for a move kind given the diagnosed cause (0 when the cause is
- * unknown or the kind isn't listed). Weighted-summed with the value model's
- * recovery-style `movePref` in the joint optimizer - both apply only within the
- * odds epsilon, so the forecast is never overridden.
- */
+/** Tiebreak bias for a move kind given the diagnosed cause (0 when unknown or unlisted).
+ *  Weighted-summed with the value model's style preference in the joint optimizer - both apply
+ *  only within the odds epsilon, so the forecast is never overridden. */
 export function causeMovePref(
   cause: DivergenceCause | null,
   kind: StrategyMoveKind,
@@ -372,16 +322,11 @@ export function causeMovePref(
   return CAUSE_MOVE_PREFERENCES[cause]?.[kind] ?? 0;
 }
 
-/**
- * Cause bias for a move that touches *several* goals at once (a portfolio-wide
- * triage / activity skip has no single owning goal). Returns the weighted mean of
- * each touched goal's `causeMovePref`, so the bias reflects the goals the move
- * actually serves and the most-weighted ones dominate (a triage that mostly
- * rescues a `scope_structural` goal still leans triage even if one touched goal is
- * a `one_off_slip`). Weights are caller-supplied (risk = `1 − currentProbability`
- * in v1, until per-goal *value* lands in the Value Model). Returns 0 when there
- * are no positively-weighted entries, matching the unknown-cause default.
- */
+/** Cause bias for a move touching SEVERAL goals at once (a portfolio-wide triage has no single
+ *  owning goal). Weighted mean of each touched goal's causeMovePref, so the most-weighted goals
+ *  dominate - a triage that mostly rescues a scope_structural goal still leans triage even if
+ *  one touched goal is a one-off slip. Weights are caller-supplied (risk = 1 - probability for
+ *  now). Returns 0 with no positively-weighted entries, matching the unknown-cause default. */
 export function aggregateCauseMovePref(
   entries: { cause: DivergenceCause | null; weight: number }[],
   kind: StrategyMoveKind,
@@ -397,21 +342,17 @@ export function aggregateCauseMovePref(
   return weightSum > 0 ? acc / weightSum : 0;
 }
 
-// --- The `prefFor` tiebreak weights (step 5 slice 4, limitation #3) ---------
+// --- The prefFor tiebreak weights ------------------------------------------
 //
-// `optimizeJointPlan` breaks a sub-epsilon odds tie with two nudges: the user's
-// recovery STYLE (`movePref`) and the diagnosed CAUSE's preferred move family
-// (`causeMovePref`). They were summed 1:1 - an unexamined assumption about which
-// should win. These are the named knobs for that ratio; both default to 1.0 (the
-// historical behaviour) and are LEARNED off the offered-vs-kept history by
-// `calibrateMovePrefWeights` below. They apply only within `PREF_TIE_EPS`, so the
-// forecast always decides first.
+// optimizeJointPlan breaks a sub-epsilon odds tie with two nudges: the user's recovery STYLE
+// and the diagnosed CAUSE's preferred family. They were summed 1:1, which was an unexamined
+// assumption about which should win. These are the named knobs for that ratio; both default to
+// 1.0 and are learned off the offered-vs-kept history below. They apply only within
+// PREF_TIE_EPS, so the forecast always decides first.
 //
-// The calibrator lives HERE, not in the strategist that consumes it: it needs this
-// module's preference tables as its feature extractor, exactly as
-// `calibrateArrangeWeights` lives in `arrange.ts` beside its φ and
-// `calibrateHysteresis` in `rolling.ts` beside its rolls. `grounding.ts` also
-// carries no `server-only`, so the whole seam stays unit-testable.
+// The calibrator lives HERE rather than in the strategist that consumes it, because it needs
+// this module's preference tables as its feature extractor - same reason calibrateArrangeWeights
+// lives in arrange.ts beside its φ.
 
 export const STYLE_PREF_WEIGHT = 1;
 export const CAUSE_PREF_WEIGHT = 1;
@@ -430,19 +371,13 @@ export interface MovePrefWeights {
   samples: number;
 }
 
-/**
- * φ for one offered move, priced under the recovery style in force when it was
- * offered. The preference TABLES are read live (a table edit re-prices history);
- * only their INPUTS - kind, cause, style - come off the stored row.
+/** φ for one offered move, priced under the style in force when it was offered. The tables are
+ *  read live (a table edit re-prices history); only their INPUTS come off the stored row.
  *
- * The components are NEGATED, and that is the entire adaptation of the shared seam
- * to this consumer: `fitCalibratedWeights` fits an argMIN objective (the preferred
- * item must score LOWER, since its arrange consumer picks `argmin w·φ`), whereas
- * `prefFor` is an argMAX (the preferred move scores HIGHER). Negating both terms
- * makes "kept ≻ declined" mean the same thing to the perceptron. The deployed
- * weights stay positive-clamped in `[WEIGHT_MIN, WEIGHT_MAX]`, so a learned weight
- * can rescale a nudge but never invert its meaning.
- */
+ *  The components are NEGATED, and that's the whole adaptation to this consumer:
+ *  fitCalibratedWeights fits an argMIN objective while prefFor is an argMAX, so negating both
+ *  terms makes "kept ≻ declined" mean the same thing to the perceptron. The deployed weights
+ *  stay positive-clamped, so a learned weight can rescale a nudge but never invert it. */
 function movePrefFeatures(m: OfferedMove, style: RecoveryStyle): number[] {
   const vm: ValueModel = { ...DEFAULT_VALUE_MODEL, recoveryStyle: style };
   // A single-goal move stores one cause entry, and a one-entry weighted mean IS the
@@ -460,32 +395,22 @@ function centroid(vectors: number[][]): number[] {
   return [out[0] / vectors.length, out[1] / vectors.length];
 }
 
-/**
- * Learn the STYLE-vs-CAUSE ratio from the user's own accept/decline behaviour - the
- * 🟠 tier of the calibration cohort (design/step5 → limitation #3, "calibrate from
- * live data"). Each applied bundle contributes ONE revealed preference: the centroid
- * of the moves the user kept is preferred to the centroid of the moves they declined.
+/** Learn the style-vs-cause ratio from the user's own accept/decline behaviour. Each applied
+ *  bundle contributes ONE revealed preference: the centroid of the kept moves is preferred to
+ *  the centroid of the declined ones.
  *
- * Why a centroid and not every `kept × declined` pair: κ counts *observations*, and a
- * bundle with 3 kept and 3 declined moves is ONE decision, not 9 independent ones.
- * Feeding the cross product would let a single click blow through the shrinkage.
+ *  Centroid rather than every kept × declined pair because κ counts observations, and a bundle
+ *  with 3 kept and 3 declined moves is one decision, not nine. Feeding the cross product would
+ *  let a single click blow through the shrinkage.
  *
- * Why no odds-tie gate (unlike `plan_reorders`, which only records odds-NEUTRAL drags):
- * a drag that worsens the odds is the user overriding the forecast, a different kind of
- * statement worth excluding. Declining a *recommendation* is never that - and these two
- * weights only ever scale nudges that `PREF_TIE_EPS` already confines to genuine odds
- * ties. A mis-learned weight therefore cannot override a real gain; the structural
- * invariant that licenses `prefFor` at all is the same one that makes this safe to
- * learn from every decline.
+ *  No odds-tie gate here, unlike plan_reorders which only records odds-neutral drags. A drag
+ *  that worsens the odds is the user overriding the forecast, which is worth excluding;
+ *  declining a recommendation never is, and these weights only scale nudges that PREF_TIE_EPS
+ *  already confines to genuine ties. A mis-learned weight can't override a real gain.
  *
- * NO-REGRET: no rows (or no row with both a kept and a declined move) ⇒ no pairs ⇒
- * `fitCalibratedWeights` returns the prior ⇒ exactly today's co-equal `1.0 / 1.0`.
- *
- * Scale-invariance caveat (the trap `calibrate.ts` documents): under the `balanced`
- * recovery style every `movePref` is 0, so φ[0] ≡ 0, Δ[0] ≡ 0, and `style` never moves
- * off its prior. That is correct - with no style there is no style-vs-cause ratio to
- * learn - but it means the 🟠 tier only sharpens for users who picked a lean.
- */
+ *  No rows means no pairs means the prior, i.e. today's co-equal 1.0 / 1.0. Caveat: under the
+ *  `balanced` style every movePref is 0, so φ[0] ≡ 0 and `style` never moves - correct (no
+ *  style, no ratio to learn), but it means this only sharpens for users who picked a lean. */
 export function calibrateMovePrefWeights(
   choices: readonly MoveChoice[],
 ): MovePrefWeights {
@@ -504,21 +429,15 @@ export function calibrateMovePrefWeights(
   return { style, cause, samples: pairs.length };
 }
 
-// Step 5 (§5 / vision §4.3) - the grounding gate's "cost to the goal" check.
+// --- The grounding gate's "cost to the goal" check -------------------------
 //
-// A recovery move reports its odds gain ("+30% on time"). But a deadline-buying
-// cut can lift the odds while doing nothing for the goal's *reason for being* - 
-// its definition of done (project) or its skill milestones (learning). This
-// function computes that cost so it can be shown beside the odds gain: the bar
-// the move leaves unaddressed. Fully derived from `goalCompletion` /
-// `skillProgress` (§0 - never authored), so a green number can't hide a goal
-// being quietly abandoned.
+// A move reports its odds gain ("+30% on time"), but a deadline-buying cut can lift the odds
+// while doing nothing for the goal's reason for being - its definition of done, or its skill
+// milestones. This computes that cost so it can sit beside the odds gain. Fully derived from
+// goalCompletion/skillProgress, so a green number can't hide a goal being quietly abandoned.
 
-/**
- * The honest cost-to-the-goal beyond the deadline. Returns null when there's no
- * recorded bar to measure against (no criteria / no skills), or when the bar is
- * already fully cleared - in those cases a cut carries no hidden goal cost.
- */
+/** The cost to the goal beyond the deadline. Null when there's no recorded bar to measure
+ *  against, or the bar is already cleared - either way a cut carries no hidden goal cost. */
 export function goalCutCost(
   kind: GoalKind,
   criteria: GoalCriterion[],

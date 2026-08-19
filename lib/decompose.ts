@@ -1,14 +1,12 @@
 import "server-only";
-import type { ExtractedSkill, SkillDecomposition } from "./types";
-import type { ChatMessage } from "./bedrock";
-import { callBedrockJSON } from "./bedrock";
-import { isLLMConfigured } from "./extraction";
+import type { ExtractedSkill, SkillDecomposition } from "@/lib/types";
+import type { ChatMessage } from "@/lib/bedrock";
+import { callBedrockJSON } from "@/lib/bedrock";
+import { isLLMConfigured } from "@/lib/extraction";
 
-// Learning-goal decomposer (Engine 1, the LLM-proposes half of §0). Turns a
-// stated learning goal into a prerequisite graph of skills + checkpoints. The
-// LLM proposes the structure and the effort estimates; progress and scheduling
-// are decided elsewhere. Falls back to an offline heuristic when no API key is
-// configured, so the feature works without Bedrock.
+// Learning-goal decomposer. Turns a stated learning goal into a prerequisite graph of skills and
+// checkpoints. The LLM proposes the structure and the effort estimates; progress and scheduling
+// are decided elsewhere. Falls back to an offline heuristic with no API key.
 
 const MIN_SKILLS = 3;
 const MAX_SKILLS = 9;
@@ -26,10 +24,9 @@ Rules:
 - Write titles and descriptions in the same language as the stated goal.
 - If the goal is empty, nonsensical, or is not a learning goal at all (an errand or a one-off task), return an empty skills array and nothing else.`;
 
-// Strict schema. The per-field guidance that used to live in the prompt's shape
-// block now rides on the property descriptions, where the model reads it beside
-// the constraint. The 5-9 count and the 2-4 checkpoint count cannot be
-// expressed here at all, so they stay in prose and are enforced below.
+// Strict schema. The per-field guidance that used to live in the prompt's shape block now rides
+// on the property descriptions, where the model reads it beside the constraint. The 5-9 count
+// and 2-4 checkpoint count can't be expressed here, so they stay in prose and are enforced below.
 const DECOMPOSITION_SCHEMA = {
   type: "object",
   additionalProperties: false,
@@ -80,13 +77,10 @@ const DECOMPOSITION_SCHEMA = {
   },
 } as const;
 
-/**
- * Reject a decomposition the pipeline cannot use, so the deployment chain
- * advances. An EMPTY array is deliberately not rejected - the prompt now uses
- * it to mean "this is not a learning goal", which is a real answer rather than
- * a failure. What is rejected is an over-long graph or duplicate keys, neither
- * of which a strict schema can catch.
- */
+/** Reject a decomposition the pipeline can't use, so the fallback chain advances. An EMPTY array
+ *  is deliberately fine - the prompt uses it to mean "this isn't a learning goal", which is a
+ *  real answer. What's rejected is an over-long graph or duplicate keys, neither of which a
+ *  strict schema catches. */
 function isUsable(d: SkillDecomposition): boolean {
   if (!Array.isArray(d?.skills)) return false;
   if (d.skills.length === 0) return true;
@@ -95,10 +89,8 @@ function isUsable(d: SkillDecomposition): boolean {
   return new Set(keys).size === keys.length;
 }
 
-/**
- * Decompose a learning goal into a skill graph. Uses the LLM when configured,
- * otherwise a deterministic heuristic so the app stays usable offline.
- */
+/** Decompose a learning goal into a skill graph. LLM when configured, deterministic heuristic
+ *  otherwise so the app stays usable offline. */
 export async function decomposeLearningGoal(
   name: string,
   description: string | null,
@@ -135,16 +127,10 @@ export async function decomposeLearningGoal(
   }
 }
 
-/**
- * Defensive clean-up of an LLM-proposed graph: drop prerequisite references to
- * unknown keys and any that would point at a later skill (which would imply a
- * cycle, since the prompt orders foundations-first). Keeps persistence honest
- * regardless of what the model returns.
- *
- * Still load-bearing after the move to a strict schema: the graph invariant,
- * the count cap and the minute range are all outside what JSON Schema can
- * express, and `maxItems` would truncate the array without telling the model.
- */
+/** Defensive clean-up of a proposed graph: drop prerequisite references to unknown keys and any
+ *  pointing at a later skill (which would imply a cycle, since the prompt orders
+ *  foundations-first). Still load-bearing under a strict schema - the graph invariant, the count
+ *  cap and the minute range are all outside what JSON Schema can express. */
 function sanitizeSkills(skills: ExtractedSkill[]): ExtractedSkill[] {
   const seen = new Set<string>();
   return skills.slice(0, MAX_SKILLS).map((s) => {
@@ -166,10 +152,8 @@ function sanitizeSkills(skills: ExtractedSkill[]): ExtractedSkill[] {
   });
 }
 
-/**
- * Offline fallback: a generic learn-anything ladder. Honest about being generic
- * - it's a scaffold to edit, not a real domain plan, used only without an API key.
- */
+/** Offline fallback: a generic learn-anything ladder. Honest about being generic - a scaffold to
+ *  edit, not a real domain plan. */
 function heuristicSkills(name: string): ExtractedSkill[] {
   const subject = name.replace(/^learn(ing)?\s+/i, "").trim() || "the subject";
   return [

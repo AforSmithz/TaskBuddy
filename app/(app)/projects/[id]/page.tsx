@@ -146,7 +146,7 @@ export default async function ProjectPage({
         <GoalKindEditor goalId={project.id} kind={project.kind} />
       </div>
 
-      {/* Task-scoped check-in (§5.6 slice 6a): a free-form update bound to THIS goal.
+      {/* Task-scoped check-in: a free-form update bound to THIS goal.
           "finished X", "pushing Y", or "I also need to Z" resolve against the goal's
           own work first, and a new task lands on the goal with live-re-solved odds. */}
       <div className="mt-5">

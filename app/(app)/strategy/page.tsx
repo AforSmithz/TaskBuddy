@@ -51,7 +51,7 @@ export default async function StrategyPage() {
   const { forecasts, recoveries, pitWall, globalPlan, tuning } = dashboard;
   const tasksById = new Map(tasks.map((t) => [t.id, t]));
 
-  // "Why your plan changed" (S3c-3) - narrate each roll server-side by diffing it against the
+  // "Why your plan changed" - narrate each roll server-side by diffing it against the
   // roll it superseded (the next-older one; the list is newest-first, so index+1). Pure and
   // odds-free; the timeline renders the shipped string, computing nothing client-side.
   const rollCauses: Record<string, string> = {};
@@ -62,7 +62,7 @@ export default async function StrategyPage() {
     ).summary;
   }
 
-  // "Your reliable hours" (S2 slice C) - per-window velocity over real sessions,
+  // "Your reliable hours" - per-window velocity over real sessions,
   // calibrated to the same estimation bias the forecast uses. Empty until sessions
   // accrue, so only surface the card once there's at least one to read.
   const energy = energyWindows(
@@ -145,7 +145,7 @@ export default async function StrategyPage() {
         </Card>
       </Reveal>
 
-      {/* Your reliable hours (S2 §5a) - per-window velocity from real sessions.
+      {/* Your reliable hours - per-window velocity from real sessions.
           Surfaced beside the strategist that uses the same read to temper its
           cause diagnosis; shown only once there's at least one session. */}
       {totalSessions > 0 && (
@@ -154,7 +154,7 @@ export default async function StrategyPage() {
         </Reveal>
       )}
 
-      {/* How your plan is tuned to you (S3c-5 §5a) - the calibrated arrangement dials, plan
+      {/* How your plan is tuned to you - the calibrated arrangement dials, plan
           stickiness, and recovery taste, learned from your drags, roll-undos, and the moves
           you keep vs decline. Shown once ANY tier has signal; each section shows its own
           still-learning state otherwise. */}
@@ -167,7 +167,7 @@ export default async function StrategyPage() {
       )}
 
       {/* Plan history - every applied bundle and every automatic roll, newest first,
-          each with its own undo (vision §1.3). Shown only once there's something to record. */}
+          each with its own undo. Shown only once there's something to record. */}
       {(planVersions.length > 0 || planRolls.length > 0) && (
         <Reveal delay={0.25} className="mt-7">
           <Card>

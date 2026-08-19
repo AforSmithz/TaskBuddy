@@ -46,7 +46,7 @@ export function ReviewPanel({
   const [declined, setDeclined] = useState<Set<string>>(new Set());
   const [pending, startTransition] = useTransition();
 
-  // --- Filing the user confirms before the draft goes live ------------------
+   // --- Filing the user confirms before the draft goes live ------------------
   const initialArea = tasks[0]?.area ?? "Work";
   const areaOptions = [...new Set([...SEED_AREAS, initialArea])];
   const [area, setArea] = useState(initialArea);

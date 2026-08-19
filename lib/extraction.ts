@@ -1,6 +1,6 @@
-import type { EntryKind, ExtractionResult } from "./types";
-import type { ChatMessage } from "./bedrock";
-import { heuristicExtract, heuristicPlan } from "./heuristic";
+import type { EntryKind, ExtractionResult } from "@/lib/types";
+import type { ChatMessage } from "@/lib/bedrock";
+import { heuristicExtract, heuristicPlan } from "@/lib/heuristic";
 
 // Meeting extraction orchestrator.
 // Uses Amazon Bedrock when configured; otherwise falls back to the offline
@@ -10,15 +10,14 @@ import { heuristicExtract, heuristicPlan } from "./heuristic";
 // "is the LLM layer configured". Nine modules and three route components import
 // it from here, including app/(app)/layout.tsx, which uses it to decide demo
 // mode - a second, drifting copy would silently flip half the app.
-export { isLLMConfigured } from "./bedrock-config";
-import { isLLMConfigured } from "./bedrock-config";
+export { isLLMConfigured } from "@/lib/bedrock-config";
+import { isLLMConfigured } from "@/lib/bedrock-config";
 
-// The 1-5 rubric is shared by both prompts. It used to live only in the meeting
-// prompt, and the plan prompt referred to it as "the same rubrics as meeting
-// extraction" - a dangling cross-reference, because exactly one of the two
-// prompts is ever sent. Every level is now enumerated: these six numbers feed
-// computePriority directly, so an undefined middle level is where all the
-// run-to-run variance came from.
+// The 1-5 rubric is shared by both prompts. It used to live only in the meeting prompt while the
+// plan prompt referred to "the same rubrics as meeting extraction" - a dangling cross-reference,
+// since exactly one of the two is ever sent. Every level is enumerated now: these six numbers
+// feed computePriority directly, so an undefined middle level is where the run-to-run variance
+// came from.
 const FACTOR_RUBRIC = `Score each 1-5 factor. Use the whole scale.
 - Urgency: 5=due today or tomorrow, 4=due in 2-3 days, 3=due this week, 2=due next week, 1=no deadline.
 - Impact: 5=directly changes a deliverable or a stakeholder decision, 4=materially improves the deliverable, 3=useful supporting work, 2=nice to have, 1=optional.
@@ -65,16 +64,14 @@ ${SHARED_RULES}
 
 ${FACTOR_RUBRIC}`;
 
-// Strict JSON Schema for ExtractionResult. One schema serves BOTH prompts - 
-// the fields are identical, only the population rules differ, and the plan-only
-// invariants (owner/source_quote null, is_ai_suggested true) are enforced in
+// Strict JSON Schema for ExtractionResult. One schema serves BOTH prompts - the fields are
+// identical, only the population rules differ, and the plan-only invariants are enforced in
 // normalize() rather than by forking the schema.
 //
-// Strict mode requires every property in `required` and additionalProperties
-// false on every object; optionality is a ["string","null"] union, never an
-// omitted key. Caps stay in prose: maxItems is enforced by truncating the
-// decoder rather than by telling the model, which makes it cram the discarded
-// content into the last surviving element.
+// Strict mode requires every property in `required` and additionalProperties false everywhere;
+// optionality is a ["string","null"] union, never an omitted key. Caps stay in prose - maxItems
+// truncates the decoder rather than telling the model, which makes it cram the discarded content
+// into the last surviving element.
 const CONFIDENCE_ENUM = { type: "string", enum: ["High", "Medium", "Low"] };
 const FACTOR = { type: "integer", enum: [1, 2, 3, 4, 5] };
 
@@ -229,15 +226,10 @@ const MAX_LLM_ATTEMPTS = 2;
 const MAX_TASKS = 15;
 const MAX_LIST_ITEMS = 8;
 
-/**
- * Extract a structured plan from raw input. `kind` selects the meeting
- * transcript prompt or the goal-planning prompt.
- *
- * The LLM call is retried up to MAX_LLM_ATTEMPTS times - a response with no
- * tasks is treated as a failure, since a fresh attempt often succeeds. If
- * every attempt fails, falls back to the offline heuristic so the user always
- * gets a usable result instead of an empty review page.
- */
+/** Extract a structured plan from raw input. `kind` selects the meeting-transcript prompt or the
+ *  goal-planning one. Retried up to MAX_LLM_ATTEMPTS - a response with no tasks counts as a
+ *  failure, since a fresh attempt often succeeds. If every attempt fails, falls back to the
+ *  offline heuristic so the user gets something usable instead of an empty review page. */
 export async function extractEntry(
   rawInput: string,
   kind: EntryKind,
@@ -249,7 +241,7 @@ export async function extractEntry(
 
   // Imported lazily so the app loads without Bedrock configured; lib/bedrock.ts
   // is server-only.
-  const { callBedrockJSON } = await import("./bedrock");
+  const { callBedrockJSON } = await import("@/lib/bedrock");
   const projectHint = context.projectNames?.length
     ? `\n\nExisting projects you may reuse by exact name: ${context.projectNames.join(", ")}.`
     : "";
@@ -294,13 +286,9 @@ export async function extractEntry(
   return { result: HEURISTIC[kind](rawInput), source: "heuristic" };
 }
 
-/**
- * Enforces what the schema provably cannot: the list caps, the plan-only
- * invariants, `depends_on` referential integrity, and the verbatim-quote rule.
- * The `arr()` / `?? null` guards below are unreachable under a strict schema
- * but are kept as cheap defence for the heuristic path and any future
- * non-strict caller.
- */
+/** Enforces what the schema provably can't: the list caps, the plan-only invariants, depends_on
+ *  referential integrity, and the verbatim-quote rule. The arr() / ?? null guards below are
+ *  unreachable under a strict schema but kept as cheap defence for the heuristic path. */
 function normalize(
   r: ExtractionResult,
   kind: EntryKind,

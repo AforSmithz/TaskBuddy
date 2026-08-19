@@ -1,5 +1,5 @@
 import { Search } from "lucide-react";
-import { ThemeToggle } from "./theme-toggle";
+import { ThemeToggle } from "@/components/layout/theme-toggle";
 
 function greeting(d: Date): string {
   const h = d.getHours();

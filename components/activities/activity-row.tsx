@@ -13,7 +13,6 @@ import { Pill } from "@/components/ui/badge";
 import { formatMinutes } from "@/lib/format";
 import { cn } from "@/lib/cn";
 
-/** Plain-language cadence summary for an activity. */
 function cadenceLabel(state: RecurringState): string {
   const a = state.activity;
   if (a.period === "week") return `${a.target_count}× per week`;

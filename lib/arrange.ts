@@ -6,100 +6,62 @@ import {
   type DayCapacity,
   type DependencyEdge,
   type WindowCapacity,
-} from "./schedule";
-import type { EffectiveOrderEntry, EstimationModel, PlanReorder } from "./types";
-import { globalForecastJoint, type ForecastOptions } from "./forecast";
-import { ALL_WINDOWS, type EnergyWindow, type TimeWindow } from "./velocity";
-import { fitCalibratedWeights, type PreferencePair } from "./calibrate";
+} from "@/lib/schedule";
+import type { EffectiveOrderEntry, EstimationModel, PlanReorder } from "@/lib/types";
+import { globalForecastJoint, type ForecastOptions } from "@/lib/forecast";
+import { ALL_WINDOWS, type EnergyWindow, type TimeWindow } from "@/lib/velocity";
+import { fitCalibratedWeights, type PreferencePair } from "@/lib/calibrate";
 
-// Local arrangement optimizer (OVERHAUL §5a substrate S3b) - the *arrangement*
-// half of the forecast-as-risk-core / solver-as-arrangement split. The Monte-Carlo
-// forecast stays the sole owner of feasibility & odds (§0); this module only makes
-// the plan you actually *follow* good on the soft objectives the forecast doesn't
-// price - context-switching, energy-window placement, daily load. Everything here
-// is a pure, deterministic, dispose-side transform over the already-built plan: no
-// LLM, no new probability authored anywhere.
+// Local arrangement optimizer. The Monte Carlo forecast owns feasibility and odds; this
+// module only makes the plan you actually follow good on the soft stuff the forecast
+// doesn't price: context switching, energy-window placement, daily load. Pure and
+// deterministic, no LLM, no probability authored here.
 //
-// The chooser is one **deterministic within-day reorder over the canonical order**
-// (`arrangeOrder`): it buckets the order into the days the greedy pack lands it on,
-// then re-sequences each near-horizon day to group projects (cut context-switches)
-// and slot hard work into learned-fast windows (energy placement). The reorder is
-// **odds-*gated*, never odds-authoring**: `gatedReorder` re-prices the arranged order
-// with the same Monte Carlo the headline uses and adopts it only while `allOnTime ≥
-// canonical − ε`. Because the reorder is deterministic (no RNG) and reads only inputs
-// the client already mirrors (order, capacities, deps, window profile, comfort cap),
-// the gate decision compresses to ONE boolean the client replays - so the S1 14/14
-// client==server parity rides for free (the same discipline comfort-smoothing used).
+// arrangeOrder buckets the canonical order into the days the greedy pack lands it on,
+// then re-sequences each near-horizon day to group projects and slot hard work into
+// learned-fast windows. gatedReorder re-prices the result with the same Monte Carlo the
+// headline uses and adopts it only while allOnTime >= canonical - eps. The reorder is
+// deterministic and reads only inputs the client already mirrors, so the whole gate
+// decision compresses to one boolean the client replays.
 //
-// No-regret: reordering the order array changes the forecast's seed, so an
-// odds-*neutral* reorder is not byte-identical. The gate's boolean is therefore set
-// true ONLY when there is an odds-relevant signal (windows learned OR comfort active)
-// AND the gate passes; with no signal the grouping is display-only and the forecast
-// flows the canonical order (byte-identical - the honest no-regret anchor, since the
-// day-granular flow is order-invariant within a day so the grouping genuinely costs
-// nothing). See `design/s3b-arrangement-optimizer.md`.
+// Reordering the array reseeds the forecast, so an odds-neutral reorder isn't
+// byte-identical. The gate boolean is therefore only set when there's an odds-relevant
+// signal (windows learned or comfort active) AND the gate passes; with no signal the
+// grouping is display-only. See design/s3b-arrangement-optimizer.md.
 
-/** Per-objective weights for the soft score `J` (lower is better). Knobs defaulting
- *  to `1.0`, calibrated later by S2's loop (step-5 precedent). At these defaults the
- *  switch term (a unit penalty per project change) dominates the energy term (bounded
- *  by `|netMult−1|·difficulty`, typically <0.5), so energy placement operates *within*
- *  a project's cluster (group first, then sequence each cluster by energy); raising
- *  `energy` is the lever that lets it break a cluster for a strong window gain. The
- *  energy + buffer terms share the `(netMult−1)` window coupling, so both vanish without
- *  a learned profile and the score reduces EXACTLY to grouping - context-switch clustering
- *  with the `domain` term keeping same-area projects adjacent (a coarser axis under switch). */
+/** Per-objective weights for the soft score J (lower is better), all defaulting to 1 and
+ *  calibrated later. At the defaults the switch term dominates the energy term, so energy
+ *  placement operates WITHIN a project's cluster; raising `energy` is what lets it break a
+ *  cluster for a strong window gain. Energy and buffer share the (netMult-1) coupling, so
+ *  both vanish without a learned profile and J reduces to pure grouping. */
 export interface ArrangeWeights {
   /** Penalty per project change across a day's within-day sequence (context-switch cost). */
   switch: number;
-  /** Penalty per LIFE-AREA change across a day's within-day sequence (OVERHAUL S3b Phase-4
-   *  refinement - domain-axis grouping). A COARSER grouping axis than `switch`: since a
-   *  project belongs to one area, an area change always implies a project change, so this
-   *  term is a subset of `switch` - it never fires without `switch` also firing, and only
-   *  biases WHICH project the greedy switches to (another project in the SAME area before
-   *  crossing areas: Work with Work, Hobby with Hobby). Odds-neutral by the identical
-   *  mechanism as `switch` (a within-day permutation - display-only without a window/comfort
-   *  signal, MC-gated with one). Defaults to 1 (on, as a secondary axis under `switch`) and
-   *  reads `area` off the order entry, so it degrades to 0 when areas are absent. Learned
-   *  alongside `switch` from drag history (a correlated feature - the shrink seam shares
-   *  credit); both are "always live" (no window coupling), so grouping preferences teach
-   *  them first. */
+  /** Penalty per LIFE-AREA change within a day. Coarser than `switch`: a project belongs to
+   *  one area, so an area change always implies a project change - this never fires without
+   *  `switch` also firing, it only biases WHICH project to switch to (Work with Work, Hobby
+   *  with Hobby). Degrades to 0 when areas are absent. */
   domain: number;
-  /** Weight on the energy term `difficulty·impactBoost·(netMult−1)` - negative (reward) for
-   *  placing cognitively-HARD work in a fast window, positive (penalty) for hard work in a
-   *  slow one. `difficulty` is the `effort`-derived cognitive load (S2): "do hard work when
-   *  you're sharp". `impactBoost` (S3b Phase 4) modulates it ±`IMPACT_ENERGY_WEIGHT` by the
-   *  task's impact so a fast window goes to work that is hard AND valuable - a secondary
-   *  factor (effort stays dominant); see `impactEnergyBoost`. When effort correlates with
-   *  duration this also shrinks effective work and *raises* the odds (the design's
-   *  odds-improving placement); when it doesn't, the reorder is odds-neutral and the gate
-   *  keeps it honest. Inert (0) when no window profile is learned. (Duration-weighting was
-   *  reasoned out in Phase 3 - a long task would hog the fast lane.) */
+  /** Weight on `difficulty·impactBoost·(netMult-1)` - negative (reward) for hard work in a
+   *  fast window, positive for hard work in a slow one. Basically "do hard work when you're
+   *  sharp", with impact as a secondary tiebreak so a fast window goes to work that's hard
+   *  AND valuable. Inert without a learned window profile. Not duration-weighted on purpose:
+   *  a long task would hog the fast lane. */
   energy: number;
-  /** Weight on the buffer term `urgency·(netMult−1)` for a THIN-buffer (at-risk) project's
-   *  work - the same window coupling as energy but cognitive-difficulty-INDEPENDENT. The S3a
-   *  critical-chain lever (`lib/buffer.ts`): give the work whose safety margin is thinnest
-   *  first claim on the day's FAST windows - the hours it is most likely to finish in - 
-   *  widening its buffer, even when that remaining work is light. `urgency ∈ (0,1]` grades by
-   *  HOW thin the buffer is (`bufferUrgency`, S3b Phase 4 - rising as the odds approach the
-   *  on-track line), so the thinnest deadline gets the strongest pull (was a binary 1 for any
-   *  thin project). Combines additively with energy. Inert (0) without a window profile
-   *  (`netMult≡1`) or when no project is thin. The thin-buffer URGENCY map is decided once on
-   *  the base plan's odds (it can't be recomputed from the client's data) and shipped for the
-   *  S1 re-solve to replay. */
+  /** Weight on `urgency·(netMult-1)` for a thin-buffer project's work - same window coupling
+   *  as energy but independent of difficulty. Gives the work whose safety margin is thinnest
+   *  first claim on the day's fast windows, widening its buffer even when the remaining work
+   *  is light. urgency grades by HOW thin (was a binary flag). Inert without a window profile
+   *  or when nothing is thin. */
   buffer: number;
 }
 
 /** Default weights - `1.0` as knobs, calibrated later by S2's loop. */
 export const ARRANGE_WEIGHTS: ArrangeWeights = { switch: 1, domain: 1, energy: 1, buffer: 1 };
 
-/** How strongly a task's impact modulates the ENERGY term (S3b Phase 4): the boost spans
- *  `[1−IMPACT_ENERGY_WEIGHT, 1+IMPACT_ENERGY_WEIGHT]` across impact 1→5 (neutral at 3). A
- *  knob (calibrated later); set to 0 to make energy purely effort-driven again. Effort is
- *  the dominant signal - this only breaks near-ties between a harder-but-trivial task and a
- *  slightly-easier-but-valuable one in favour of the valuable one. (Within-day window
- *  placement is orthogonal to the WSJF cross-day ordering, so this is not double-counting;
- *  the canonical-rank tiebreak only fired on EXACT energy ties, which differing difficulty
- *  usually breaks first.) */
+/** How strongly impact modulates the ENERGY term: the boost spans [1-w, 1+w] across impact
+ *  1->5, neutral at 3. Set to 0 to make energy purely effort-driven. Effort stays dominant -
+ *  this only breaks near-ties in favour of the more valuable task. */
 export const IMPACT_ENERGY_WEIGHT = 0.5;
 
 /** Impact 1-5 → an energy-term multiplier in `[1−IMPACT_ENERGY_WEIGHT, 1+IMPACT_ENERGY_WEIGHT]`
@@ -113,21 +75,19 @@ const NO_THIN_BUFFER: ReadonlyMap<string, number> = new Map();
 
 /** How far out we re-arrange: the committed near-horizon. Beyond it the plan is
  *  re-derived as time advances, so re-sequencing it now is wasted (and out of
- *  scope - §4 "committed horizon"). Out-of-horizon days are returned untouched. */
+ *  scope - "committed horizon"). Out-of-horizon days are returned untouched. */
 export const ARRANGE_HORIZON_DAYS = 14;
 
 export interface ArrangeOrderOptions {
-  /** Per-window velocity profile - activates the energy term (null/absent ⇒ switch-only). */
   windowProfile?: WindowProfile | null;
   /** Comfort cap (hard min/day) - when set, the day-bucketing mirrors the comfort-capped
    *  pack so the reorder permutes inside the same days the comfort flow lands work on. */
   comfortCapMinutes?: number | null;
   /** projectId → thin-buffer URGENCY `(0,1]` under the base plan - the S3a `w_buffer` lever,
-   *  graded by how thin (S3b Phase 4). Their work is biased into the day's fast windows in
+   *  graded by how thin. Their work is biased into the day's fast windows in
    *  proportion to urgency. Decided once on the base + shipped for parity; absent/empty ⇒ no
    *  buffer bias. */
   thinBufferUrgency?: ReadonlyMap<string, number> | null;
-  /** Moves confined to this many days from `today` (default ARRANGE_HORIZON_DAYS). */
   horizonDays?: number;
   /** `J` term weights (default ARRANGE_WEIGHTS). */
   weights?: ArrangeWeights;
@@ -145,20 +105,16 @@ function dayOffset(today: string, iso: string): number {
 
 // --- Within-day reorder: context-switch grouping + energy-window placement ---
 //
-// `arrangeOrder` re-sequences the canonical order WITHIN each near-horizon day. It
-// buckets the order by the greedy pack offsets (so a bucket = a day's tasks), then
-// runs a deterministic, dependency-safe search over each bucket that minimises the
-// per-pick marginal `J = w_switch·(project changed) + w_energy·difficulty·(netMult−1)`.
-// Picking a task advances the day's cumulative minutes, which selects the next task's
-// start window (hence its `netMult`) - so within a project's cluster the greedy slots
-// cognitively-HARD work into the day's FASTEST windows while continuing that cluster.
-// The search is two-stage (design's "greedy best-improvement"): a greedy CONSTRUCTION,
-// then a best-improvement swap loop (`improveDaySwaps`) that repairs the greedy's one-step
-// myopia (a task's window depends on the whole day-prefix, not just its predecessor) - the
-// second stage only ever accepts strict `J` drops, so it is never worse than the greedy.
-// With no window profile the energy term is 0 and it reduces EXACTLY to context-switch
-// clustering (continue current project among ready blocks, else lowest-canonical-rank);
-// with a single task per day it is the identity. Pure + RNG-free ⇒ the client replays it.
+// arrangeOrder re-sequences the canonical order within each near-horizon day. It buckets
+// by the greedy pack offsets, then runs a dependency-safe search over each bucket
+// minimising the per-pick marginal J. Picking a task advances the day's cumulative
+// minutes, which selects the next task's window (hence its netMult), so within a cluster
+// the greedy slots hard work into the fastest windows while continuing that cluster.
+//
+// Two stages: a greedy CONSTRUCTION, then a best-improvement swap loop that repairs the
+// greedy's one-step myopia (a task's window depends on the whole day-prefix, not just its
+// predecessor). The second stage only accepts strict J drops, so it's never worse. With no
+// window profile the energy term is 0 and this reduces to context-switch clustering.
 
 /** True when every same-bucket prerequisite of `taskId` has been emitted. */
 function depsReady(
@@ -172,11 +128,9 @@ function depsReady(
   return true;
 }
 
-/** The window index (0..4, clock order) a task STARTING at `cumMinutes` into the day
- *  falls in, given the day's per-window capacities. Skips exhausted/empty windows and
- *  clamps an over-capacity cursor to the last window - mirroring the lane walk the
- *  windowed forecast does, so the reorder's window estimate matches what it'll be
- *  priced at. */
+/** Which window (0..4, clock order) a task starting at `cumMinutes` into the day falls in.
+ *  Skips exhausted windows and clamps an over-capacity cursor to the last one, mirroring
+ *  the lane walk the windowed forecast does so the estimate matches what it'll be priced at. */
 function windowIndexAt(cumMinutes: number, caps: number[]): number {
   let acc = 0;
   for (let i = 0; i < caps.length; i++) {
@@ -209,17 +163,12 @@ const COST_EPSILON = 1e-9;
  *  landscape. Not a tuning knob - the search is exhaustive within a pass, this just terminates it. */
 const ARRANGE_MAX_IMPROVE_STEPS = 64;
 
-/**
- * The four UNWEIGHTED soft-objective terms of placing `e` next - the per-pick contribution to the
- * feature vector `φ = (switch, domain, energy, buffer)`. A context-SWITCH is a unit when the project
- * changes; a DOMAIN switch is a unit when the life-area changes (a coarser grouping axis - area
- * change ⟹ project change, so `dm ≤ sw`, i.e. it only picks which project to switch to); the ENERGY
- * term is cognitively-hard (impact-weighted) work coupled to the window's net multiplier; the BUFFER
- * term gives a thin-buffer project's work the same fast-window coupling independent of difficulty.
- * Both window terms carry `(mult − 1)`, so both vanish when `mult === 1` (no learned profile) and `φ`
- * reduces to the switch + domain counts. The SINGLE source of the term math - `marginalJ` dots this
- * with the weights (chooser + scorer), `arrangementFeatures` sums it (calibrator's `φ`) - so the
- * chooser, the scorer, AND the calibrated preference contrast can never drift apart. Pure. */
+/** The four unweighted terms of placing `e` next - the per-pick contribution to
+ *  φ = (switch, domain, energy, buffer). A switch is a unit when the project changes, a
+ *  domain switch when the life-area does (so dm <= sw). Both window terms carry (mult - 1),
+ *  so both vanish with no learned profile and φ reduces to the switch + domain counts.
+ *  The single source of the term math: marginalJ dots it with the weights and
+ *  arrangementFeatures sums it, so chooser, scorer and calibrator can't drift apart. */
 function marginalFeatures(
   e: EffectiveOrderEntry,
   current: string | null | undefined,
@@ -238,11 +187,8 @@ function marginalFeatures(
   return [sw, dm, en, bf];
 }
 
-/**
- * The marginal `J` of placing `e` next: `weights · marginalFeatures(...)` - the switch, energy,
- * and buffer terms weighted and summed. `sequenceDay` greedily MINIMISES it to choose an order and
- * `arrangementScore` SUMS it to price one, both through the shared `marginalFeatures`, so the
- * chooser and the scorer can never drift. Pure. */
+/** The marginal J of placing `e` next. sequenceDay minimises it, arrangementScore sums it,
+ *  both through marginalFeatures, so the chooser and the scorer can't drift. */
 function marginalJ(
   e: EffectiveOrderEntry,
   current: string | null | undefined,
@@ -255,13 +201,9 @@ function marginalJ(
   return weights.switch * sw + weights.domain * dm + weights.energy * en + weights.buffer * bf;
 }
 
-/**
- * The full-day soft score `J` of a within-day sequence: `Σ_t marginalJ(t | prev-project,
- * prev-area, window-at-cursor)` - the exact per-day slice `arrangementFeatures` weights and sums,
- * so the best-improvement search descends the SAME objective the scorer and calibrator price. The
- * window a task lands in is `windowIndexAt(cum)`, i.e. it depends on the running cumulative minutes
- * - on the WHOLE prefix, not just the immediate predecessor. That coupling is precisely what a
- * one-step greedy construction can misjudge, and what best-improvement repairs. Pure. */
+/** The full-day J of a within-day sequence. The window a task lands in depends on the
+ *  running cumulative minutes - i.e. on the whole prefix, not just its predecessor. That
+ *  coupling is exactly what a one-step greedy misjudges and best-improvement repairs. */
 function dayScore(
   seq: readonly EffectiveOrderEntry[],
   segs: { caps: number[]; mult: number[] },
@@ -303,24 +245,14 @@ function seqDepsValid(
   return true;
 }
 
-/**
- * Best-improvement local search over pairwise swaps from a given `seed` order - the
- * "best-improvement" half of the design's locked "greedy best-improvement" search
- * (`design/s3b-arrangement-optimizer.md`; only the greedy CONSTRUCTION shipped before, this
- * completes it). `sequenceDay` runs it from two starts (the greedy construction AND the canonical
- * order) and keeps the better. The greedy construction is one-step myopic: because a task's window
- * - hence its energy multiplier - depends on the whole day-prefix, placing a big low-difficulty
- * task early can shove a hard task out of a fast window in a way a nearest-neighbour pick can't
- * foresee. Each pass scans every pair `(i,j)` and applies the SINGLE dependency-valid swap that
- * most lowers the day `J`, repeating to a local optimum or `ARRANGE_MAX_IMPROVE_STEPS`.
+/** Best-improvement local search over pairwise swaps from `seed`. sequenceDay runs it from
+ *  two starts (the greedy construction and the canonical order) and keeps the better, because
+ *  the greedy is one-step myopic: placing a big easy task early can shove a hard task out of a
+ *  fast window in a way a nearest-neighbour pick can't foresee. Each pass applies the single
+ *  dependency-valid swap that most lowers J, up to a local optimum or ARRANGE_MAX_IMPROVE_STEPS.
  *
- * Deterministic (no RNG; fixed scan order; a swap is accepted only on a STRICT improvement beyond
- * `COST_EPSILON`, so on a near-tie the earliest-scanned pair wins) and monotone (`J` strictly
- * decreases each accepted pass) ⇒ the result is NEVER worse than the `seed` and IS a
- * swap-local-optimum, and the pure client re-solve replays it exactly (S1 parity, no new shipped
- * input). With no window profile the energy+buffer terms vanish and `J` is the switch+domain count,
- * so a swap only fires to undo a dependency-forced grouping the greedy couldn't avoid - still an
- * odds-neutral within-day permutation. Pure. */
+ *  Deterministic (fixed scan order, strict improvement only) and monotone, so the result is
+ *  never worse than the seed and the client replays it exactly. */
 function improveDaySwaps(
   seed: EffectiveOrderEntry[],
   prereqs: Map<string, Set<string>>,
@@ -354,16 +286,10 @@ function improveDaySwaps(
   return cur;
 }
 
-/**
- * Re-sequence one day's tasks to descend `J` (switches + energy misfit), staying
- * dependency-valid, in two stages: a deterministic greedy CONSTRUCTION, then a
- * best-improvement local search (`improveDaySwaps`) that repairs the greedy's one-step
- * myopia - together the design's "greedy best-improvement". The greedy: among the ready
- * tasks (same-day prereqs emitted), take the one with the lowest marginal cost for the
- * current cursor - continuing the project (no switch) and, in a fast window, preferring
- * hard work (the energy reward). Ties break on canonical rank, so the result is reproducible;
- * the improvement pass only ever accepts strict `J` drops, so it is never worse than the greedy.
- */
+/** Re-sequence one day's tasks to descend J, staying dependency-valid, in two stages: a
+ *  greedy construction then a best-improvement search. The greedy takes, among ready tasks,
+ *  the lowest marginal cost for the current cursor - continuing the project and, in a fast
+ *  window, preferring hard work. Ties break on canonical rank so it's reproducible. */
 function sequenceDay(
   entries: EffectiveOrderEntry[],
   prereqs: Map<string, Set<string>>,
@@ -408,14 +334,11 @@ function sequenceDay(
     current = best.projectId ?? null;
     currentArea = best.area ?? null;
   }
-  // Repair the greedy's one-step myopia with a TWO-START best-improvement local search: descend
-  // from BOTH the greedy construction (`out`) and the canonical bucket order (`entries`, itself a
-  // valid topological order) and keep the lower-`J` result. The greedy is the better start in most
-  // days (it groups first), but its myopic construction can occasionally score ABOVE the order it
-  // was handed; also descending from the canonical order guarantees the arrangement is NEVER worse
-  // than the input - J-level no-regret, the same anchor the odds gate holds. Both starts run to a
-  // swap-local-optimum, so the min is one too. Ties keep the greedy-seeded result (closest to the
-  // designed construction). Deterministic + dependency-valid throughout.
+  // Two-start best-improvement: descend from BOTH the greedy construction and the canonical
+  // bucket order (itself a valid topological order) and keep the lower J. The greedy is the
+  // better start most days, but its myopic construction can occasionally score above the
+  // order it was handed - starting from canonical too guarantees the arrangement is never
+  // worse than the input. Ties keep the greedy-seeded result.
   const fromGreedy = improveDaySwaps(out, prereqs, segs, weights, thinBuffer);
   const fromCanonical = improveDaySwaps(entries.slice(), prereqs, segs, weights, thinBuffer);
   return dayScore(fromCanonical, segs, weights, thinBuffer) <
@@ -424,15 +347,10 @@ function sequenceDay(
     : fromGreedy;
 }
 
-/**
- * Re-sequence the canonical order WITHIN each near-horizon day to descend `J`
- * (context-switches + energy-window misfit), dependency-safe. Pure + deterministic
- * (no RNG): identical inputs ⇒ identical order, so the S1 client replays it exactly.
- * Out-of-horizon buckets and single-task buckets are returned unchanged. The result
- * is a dependency-valid permutation of `order` (cross-day order is preserved - only
- * tasks the greedy pack lands on the same day are permuted, and same-day prereqs are
- * honoured by the per-bucket constrained greedy).
- */
+/** Re-sequence the canonical order within each near-horizon day to descend J,
+ *  dependency-safe. Pure and deterministic, so the client replays it exactly.
+ *  Out-of-horizon and single-task buckets come back unchanged. Cross-day order is
+ *  preserved - only tasks the pack lands on the same day are permuted. */
 export function arrangeOrder(
   order: EffectiveOrderEntry[],
   capacities: DayCapacity[],
@@ -448,7 +366,7 @@ export function arrangeOrder(
   const thinBuffer = opts.thinBufferUrgency ?? NO_THIN_BUFFER;
 
   // Bucket the order into the days the greedy pack lands it on (comfort-capped when a
-  // cap is in force, so the buckets match the days the comfort flow actually uses) - 
+   // cap is in force, so the buckets match the days the comfort flow actually uses) -
   // the neighbour structure the within-day reorder permutes inside. Offsets are
   // non-decreasing, so a bucket is a contiguous run of equal offsets.
   const durations = order.map((e) => Math.max(0, e.estimatedMinutes));
@@ -491,11 +409,8 @@ export function arrangeOrder(
   return changed ? out : order; // same reference when nothing moved (cheap no-op signal)
 }
 
-/** The four-component feature vector `φ = (switch, domain, energy, buffer)` of an order - the
- *  UNWEIGHTED decomposition of `arrangementScore` (`J = weights · φ` exactly). The switch total is
- *  the context-switch count; the domain total the life-area-change count (a coarser grouping axis);
- *  the energy total the summed impact-weighted hard-work × window coupling; the buffer total the
- *  summed thin-buffer × window coupling. */
+/** φ = (switch, domain, energy, buffer) for an order - the unweighted decomposition of
+ *  arrangementScore, so J = weights · φ exactly. */
 export interface ArrangeFeatures {
   switch: number;
   domain: number;
@@ -503,16 +418,11 @@ export interface ArrangeFeatures {
   buffer: number;
 }
 
-/**
- * The feature vector `φ = (switch, energy, buffer)` of an order AS GIVEN - the weight-INDEPENDENT
- * inputs `arrangementScore` weights and sums. Buckets the order into days by the identical
- * (comfort-capped when a cap is in force) pack as `arrangeOrder`/`arrangementScore`, then walks
- * each near-horizon bucket summing `marginalFeatures` (no re-sequencing). Out-of-horizon buckets
- * contribute 0. With no window profile the energy+buffer components vanish and `φ` reduces to the
- * context-switch count. This is what the drag-to-reorder calibrator (`calibrateArrangeWeights`)
- * contrasts between the user's dragged order and the solver's to learn `ArrangeWeights` - because
- * `φ` is weight-free, a stored preference pair re-prices under the CURRENT feature functions.
- * Pure + deterministic. */
+/** φ for an order AS GIVEN - the weight-independent inputs arrangementScore weights and
+ *  sums. Buckets by the identical pack, then walks each near-horizon bucket summing
+ *  marginalFeatures with no re-sequencing. This is what the drag calibrator contrasts
+ *  between the user's order and the solver's; because φ is weight-free, a stored pair
+ *  re-prices under the CURRENT feature functions. */
 export function arrangementFeatures(
   order: EffectiveOrderEntry[],
   capacities: DayCapacity[],
@@ -570,15 +480,10 @@ export function arrangementFeatures(
   return { switch: sSwitch, domain: sDomain, energy: sEnergy, buffer: sBuffer };
 }
 
-/**
- * The total soft score `J` of an order AS GIVEN (lower is better) - the same objective
- * `arrangeOrder` minimises, evaluated instead of optimised: `weights · arrangementFeatures(...)`.
- * Routing through `arrangementFeatures` guarantees the scorer, the chooser (`marginalJ`), and the
- * calibrator's `φ` share the exact same term math. With no window profile the energy+buffer terms
- * vanish and `J` reduces to the context-switch count. Pure + deterministic. This is what the S3c
- * stability gate weighs: a fresh candidate is adopted over the sticky committed plan only when its
- * `J` improvement clears the churn-scaled hysteresis margin (`design/s3c-rolling-horizon-wrapper.md`).
- */
+/** The total soft score J of an order as given - the same objective arrangeOrder minimises,
+ *  evaluated instead of optimised. Routing through arrangementFeatures keeps the scorer, the
+ *  chooser and the calibrator's φ on identical term math. This is what the rolling-horizon
+ *  stability gate weighs. */
 export function arrangementScore(
   order: EffectiveOrderEntry[],
   capacities: DayCapacity[],
@@ -590,24 +495,16 @@ export function arrangementScore(
   return weights.switch * f.switch + weights.domain * f.domain + weights.energy * f.energy + weights.buffer * f.buffer;
 }
 
-/**
- * Calibrate the arrangement's soft `ArrangeWeights` from the user's drag-to-reorder history
- * (design/s3c5-shared-calibration-brain.md §4b/§5 - the 🔴 tier). Each stored pair is a revealed
- * preference `userOrder ≻ appOrder` captured odds-neutral; we recompute the feature vector
- * `φ = (switch, domain, energy, buffer)` for BOTH orders under the CURRENT feature functions
- * (`arrangementFeatures`, so a feature-fn change re-prices history - the single-source choice
- * `diagnoseRoll` also makes) and hand the contrasts to the shared perceptron+shrink seam
- * (`fitCalibratedWeights`). The solver picks `argmin w·φ`, so the user's order is the PREFERRED
- * (should-score-lower) side of each `PreferencePair`.
+/** Calibrate ArrangeWeights from the drag-to-reorder history. Each stored pair is a
+ *  revealed preference (userOrder ≻ appOrder) captured odds-neutral; we recompute φ for BOTH
+ *  orders under the CURRENT feature functions, so a feature change re-prices history, and
+ *  hand the contrasts to the shared perceptron+shrink seam. The solver picks argmin w·φ, so
+ *  the user's order is the should-score-lower side.
  *
- * NO-REGRET is structural: no drags ⇒ no pairs ⇒ the seam returns the prior ⇒ exactly
- * `ARRANGE_WEIGHTS`, and a learned weight only reweights the SOFT `J` the odds gate already
- * dominates (design invariant 2). `φ` is priced under the SAME arrange options the live plan uses
- * (`windowProfile`/`comfortCapMinutes`/`thinBufferUrgency`), so the energy/buffer components are 0
- * - hence those weights stay at prior - until a window profile is learned; the switch AND domain
- * components are always live (no window coupling), so grouping preferences teach `switch`/`domain`
- * first (§4b identifiability - the two are correlated, `dm ≤ sw`, and the shrink seam shares the
- * credit). Pure. */
+ *  No drags means no pairs means the seam returns the prior, so this is a no-op until there
+ *  is real evidence. The energy/buffer components are 0 until a window profile is learned,
+ *  so those weights stay at prior; switch and domain are always live, so grouping
+ *  preferences get taught first. */
 export function calibrateArrangeWeights(
   prefs: readonly Pick<PlanReorder, "appOrder" | "userOrder">[],
   capacities: DayCapacity[],
@@ -624,24 +521,18 @@ export function calibrateArrangeWeights(
   return { switch: sw, domain: dm, energy: en, buffer: bf };
 }
 
-// --- Pillar 1: the window-capacity model (OVERHAUL S3b Phase 2) --------------
+// --- The window-capacity model ---------------------------------------------
 //
-// To PRICE work by time-of-day we must know how much room each window holds. Today
-// capacity is hours-per-DAY; we split each day's minutes across the five S2 windows
-// by a SHRUNK observed share and tag each segment with its net-of-global velocity
-// multiplier. Both inputs degrade to a no-op: an unobserved share ⇒ the default
-// profile, an unlearned window ⇒ multiplier exactly 1, so a flat split flows
-// byte-identically to the day-granular forecast (the no-regret anchor proven against
-// `flowFinishOffsets`). The realised `WindowCapacity[]` is what `globalForecastJoint`
-// flows over; Phase 3's gated search will also place hard work into the fast windows
-// this model exposes. Pure, client-safe - the S1 client re-solve rebuilds identical
-// segments from identical capacities, so 14/14 parity rides for free.
+// To price work by time-of-day we need to know how much room each window holds. Capacity
+// is hours-per-DAY, so we split each day's minutes across the five windows by a shrunk
+// observed share and tag each segment with its net-of-global velocity multiplier. Both
+// inputs degrade to a no-op: an unobserved share gives the default profile, an unlearned
+// window gives multiplier 1, so a flat split flows byte-identically to the day-granular
+// forecast. Pure and client-safe, so the client re-solve rebuilds identical segments.
 
-/** A day's deployable minutes distributed across the five windows + each window's
- *  net velocity multiplier - the static, skip-independent inputs to a windowed
- *  forecast. `windowCapacities(days, profile)` realises it against ANY day series
- *  (base or skip-adjusted), so the server headline and the S1 client re-solve build
- *  identical segments from identical capacities. */
+/** A day's deployable minutes spread across the five windows plus each window's net
+ *  velocity multiplier. Realised against ANY day series (base or skip-adjusted), so server
+ *  and client build identical segments from identical capacities. */
 export interface WindowProfile {
   /** Per-window fraction of a day's minutes (sums to 1); shrunk toward DEFAULT_WINDOW_SHARE. */
   share: Record<TimeWindow, number>;
@@ -649,11 +540,9 @@ export interface WindowProfile {
   netMultiplier: Record<TimeWindow, number>;
 }
 
-/** A-priori distribution of deployable minutes across the day's windows, used until
- *  session history earns the real one. Daytime-skewed (focused work lands mostly in
- *  morning/afternoon/evening). It only BOUNDS how much work may claim a window's
- *  multiplier - never feasibility (placement spends slack under Phase 3's gate) - so a
- *  rough prior is safe; a calibratable knob. Sums to 1. */
+/** A-priori split of deployable minutes across the day, used until session history earns
+ *  the real one. Daytime-skewed. It only BOUNDS how much work may claim a window's
+ *  multiplier, never feasibility, so a rough prior is safe. Sums to 1. */
 export const DEFAULT_WINDOW_SHARE: Record<TimeWindow, number> = {
   early: 0.1,
   morning: 0.25,
@@ -662,7 +551,7 @@ export const DEFAULT_WINDOW_SHARE: Record<TimeWindow, number> = {
   night: 0.1,
 };
 
-/** Pseudo-session mass anchoring `observedWindowShare` to the default profile - 
+/** Pseudo-session mass anchoring `observedWindowShare` to the default profile -
  *  "how many sessions of evidence move the share halfway off the prior" (at N=κ the
  *  blend is 50/50). Prior-favoring so a handful of sessions can't produce a degenerate
  *  share; a knob, calibrated later by S2's loop. */
@@ -688,15 +577,11 @@ export function observedWindowShare(
   return share;
 }
 
-/** Build a `WindowProfile` from the S2 energy-window read (`energyWindows`, which
- *  carries each window's multiplier `exp(μ_w)` + its session count) and the global
- *  prior. `netMultiplier = multiplier / exp(μ₀) = exp(μ_w − μ₀)` - exactly 1 for an
- *  unlearned window (its multiplier IS `exp(μ₀)`), so the profile is flat until windows
- *  are earned. Returns null when no window has any session (the no-signal gate: the
- *  caller then keeps the day-granular forecast, the exact pre-S3b path). `shareOverride`
- *  (S3b Phase 4) replaces the derived session share when the user pinned an explicit
- *  per-window availability - it must already sum to 1; the null-gate is unchanged, so a
- *  pin has no forecast effect until window velocity is learned. */
+/** Build a WindowProfile from the energy-window read and the global prior.
+ *  `netMultiplier = exp(μ_w - μ₀)`, so exactly 1 for an unlearned window and the profile is
+ *  flat until windows are earned. Null when no window has any session, which is the
+ *  no-signal gate - the caller then stays on the day-granular forecast. `shareOverride`
+ *  replaces the derived share when the user pinned an explicit availability. */
 export function windowProfileFromEnergy(
   energy: EnergyWindow[],
   prior: EstimationModel,
@@ -717,12 +602,10 @@ export function windowProfileFromEnergy(
   return { share: opts.shareOverride ?? observedWindowShare(counts, opts), netMultiplier };
 }
 
-/** Split each day's deployable minutes into the five window segments by `profile.share`,
- *  tagging each with the window's net multiplier - the windowed-forecast input. The split
- *  PRESERVES the day total exactly (largest-remainder rounding), so a flat profile flows
- *  byte-identically to the whole-day capacity (the no-regret anchor). Windows stay in clock
- *  order (early→night) so a task's start-window is the earliest unfilled window of its day.
- *  Pure; realise it against whichever day series a forecast pass uses (skip-safe). */
+/** Split each day's minutes into the five window segments by profile.share, tagging each
+ *  with its net multiplier. Largest-remainder rounding preserves the day total exactly, so a
+ *  flat profile flows byte-identically to whole-day capacity. Windows stay in clock order so
+ *  a task's start window is the earliest unfilled window of its day. */
 export function windowCapacities(
   days: DayCapacity[],
   profile: WindowProfile,
@@ -762,23 +645,18 @@ function splitMinutes(total: number, share: Record<TimeWindow, number>): number[
   return parts;
 }
 
-// --- Pillar 3 (Phase 3, slice 1): comfort-capped load smoothing ---
+// --- Comfort-capped load smoothing -----------------------------------------
 //
-// Phases 1-2 arranged WITHIN a day (context-switch grouping, odds-neutral) and PRICED the
-// canonical order's window placement. This is the first arrangement that changes the odds:
-// it spreads HARD (cognitively-demanding) work across days so no day piles on more than a
-// sustainable amount - productivity research caps focused work at ~3-4 h/day (Ericsson;
-// "deep work"), and resource SMOOTHING relaxes a plan within its slack rather than levelling
-// it to the deadline (which Parkinson's Law would just refill). Spreading work later costs
-// completion odds, so the move is odds-GATED, never odds-authoring: a comfort-capped plan is
-// admissible only while its `allOnTime ≥ canonical − ε`. `forecast()` stays the sole owner
-// of odds (§0); the smoother only chooses among layouts the Monte Carlo prices.
+// The first arrangement that changes the odds: it spreads cognitively hard work across days
+// so no day piles on more than a sustainable amount. Focused work caps out around 3-4h/day,
+// and smoothing relaxes a plan within its slack rather than levelling it to the deadline
+// (which Parkinson's Law would just refill). Spreading work later costs odds, so it's
+// odds-GATED: a capped plan is admissible only while allOnTime >= canonical - eps.
 //
-// The order is UNCHANGED - only the per-day hard-work cap shifts WHEN work happens (no
-// reorder, so dependencies/grouping are preserved for free, and the client reproduces the
-// plan from a single shipped scalar in slice 2). Two-stage pricing: a deterministic
-// point-estimate scan finds the most-comfortable cap that keeps every deadline; the full MC
-// then gates it. No RNG ⇒ identical inputs, identical plan.
+// The ORDER is unchanged - only the per-day hard-work cap shifts when work happens - so
+// dependencies and grouping are preserved for free and the client reproduces the plan from
+// one shipped scalar. Two-stage: a point-estimate scan finds the most comfortable cap that
+// keeps every deadline, then the full MC gates it.
 
 /** Target soft daily ceiling on HARD work (minutes) - what the smoother relaxes toward.
  *  ~4 h is the generous end of the sustainable focused-work window. A knob, calibrated later. */
@@ -791,13 +669,11 @@ export interface ComfortSmoothOptions {
   /** Estimation-bias options for the MC (sigma/meanLog; iterations optional). */
   forecast: ForecastOptions;
   /** Window profile for windowed pricing - applied to BOTH the canonical baseline AND the
-   *  comfort-capped gate MC (Phase 4 composition), so the gate compares apples-to-apples:
+   *  comfort-capped gate MC, so the gate compares apples-to-apples:
    *  a windowed-canonical vs a windowed-comfort plan. (Pre-Phase-4 the comfort gate dropped
    *  windows, making it conservative when windows were favourable; the composition lifts that.) */
   windowProfile?: WindowProfile | null;
-  /** Hard-work ceiling to relax toward (default COMFORT_CAP_MINUTES). */
   comfortCapMinutes?: number;
-  /** Gate slack on `allOnTime` (default ARRANGE_ODDS_EPSILON). */
   oddsEpsilon?: number;
 }
 
@@ -833,16 +709,11 @@ function perProjectOverBy(
   return over;
 }
 
-/**
- * Spread hard work across days up to the comfort cap, but only when slack allows
- * (resource smoothing within float). Applies the target hard-work cap iff its
- * comfort-capped plan keeps every deadline (point-estimate screen) AND holds `allOnTime ≥
- * canonical − ε` (full MC gate); otherwise canonical stands (no affordable relaxation).
- * The order is never changed - only the per-day hard budget shifts WHEN work lands. Pure:
- * same inputs ⇒ same result. (A graduated scan over intermediate caps is a refinement; in
- * practice the gate is near all-or-nothing - full comfort under a loose deadline, none
- * under a tight one - so a single target keeps the mechanism honest and simple.)
- */
+/** Spread hard work across days up to the comfort cap, but only when slack allows. Applies
+ *  the cap iff the capped plan keeps every deadline (point-estimate screen) AND holds
+ *  allOnTime >= canonical - eps (MC gate); otherwise canonical stands. The order never
+ *  changes. A graduated scan over intermediate caps would be a refinement, but in practice
+ *  the gate is near all-or-nothing, so one target keeps it honest and simple. */
 export function comfortSmooth(
   order: EffectiveOrderEntry[],
   capacities: DayCapacity[],
@@ -914,7 +785,7 @@ export function comfortSmooth(
     if (over > (canonicalOver.get(pid) ?? 0)) return noChange;
   }
   // Stage 2 - the full MC gate: spread only as far as the odds can afford. The comfort cap
-  // and the window pricing COMPOSE (Phase 4): the gate prices the comfort-capped plan with
+  // and the window pricing COMPOSE: the gate prices the comfort-capped plan with
   // the same window velocity the canonical baseline uses, so a favourable window doesn't make
   // a comfortable pace look worse than it is.
   const joint = globalForecastJoint(order, capacities, deadlineByProject, today, {
@@ -928,31 +799,24 @@ export function comfortSmooth(
   return noChange;
 }
 
-// --- Pillar 3 (Phase 3, slice 3): the odds-gated within-day reorder ----------
+// --- The odds-gated within-day reorder -------------------------------------
 //
-// `arrangeOrder` is the deterministic chooser; `gatedReorder` is its odds gate. It
-// re-prices the arranged order with the SAME Monte Carlo (and the same comfort/window
-// precedence) the headline uses and decides ONE boolean - "should the forecast flow
-// the arranged order?" - that the strategy optimizer + the S1 client replay. The
-// reorder is adopted only while `allOnTime ≥ canonical − ε` (§Decisions #3: arrangement
-// is odds-gated, never odds-authoring). Because reordering the order array reseeds the
-// MC, an odds-*neutral* reorder is not byte-identical - so when there is no odds-relevant
-// signal (no windows AND no comfort) the grouping is returned for DISPLAY only and the
-// forecast stays on the canonical order (the byte-identical no-regret anchor: a
-// day-granular flow is order-invariant within a day, so the grouping is genuinely free).
+// arrangeOrder is the chooser, gatedReorder is its gate. It re-prices the arranged order
+// with the same Monte Carlo the headline uses and decides ONE boolean - should the forecast
+// flow the arranged order? - that the optimizer and the client replay. Adopted only while
+// allOnTime >= canonical - eps. Because reordering reseeds the MC, an odds-neutral reorder
+// isn't byte-identical, so with no odds-relevant signal the grouping is display-only and the
+// forecast stays on the canonical order.
 
 export interface GatedReorderOptions {
   /** Estimation-bias options for the MC gate (sigma/meanLog; iterations optional). */
   forecast: ForecastOptions;
-  /** Per-window velocity profile (activates the energy term + windowed pricing). */
   windowProfile?: WindowProfile | null;
-  /** The comfort cap already decided for this plan (comfort takes pricing precedence). */
   comfortCapMinutes?: number | null;
   /** projectId → thin-buffer urgency `(0,1]` decided on the base plan - the S3a `w_buffer`
    *  lever (graded, S3b Phase 4), biasing those projects' work into fast windows in
    *  proportion to how thin. Absent ⇒ no buffer bias. */
   thinBufferUrgency?: ReadonlyMap<string, number> | null;
-  /** Gate slack on `allOnTime` (default ARRANGE_ODDS_EPSILON). */
   oddsEpsilon?: number;
   /** `J` term weights (default ARRANGE_WEIGHTS). */
   weights?: ArrangeWeights;
@@ -969,11 +833,8 @@ export interface GatedReorderResult {
   joint: { byProject: Map<string, number>; allOnTime: number };
 }
 
-/**
- * Decide whether to adopt the within-day reorder, gating its odds against the canonical
- * baseline. Returns the boolean the client replays, the order to display, and the odds
- * to show. Pure given its inputs (the MC seed is fixed). See the section comment.
- */
+/** Decide whether to adopt the within-day reorder. Returns the boolean the client replays,
+ *  the order to display, and the odds to show. See the section comment above. */
 export function gatedReorder(
   order: EffectiveOrderEntry[],
   capacities: DayCapacity[],
@@ -1000,8 +861,8 @@ export function gatedReorder(
     return { changed: false, order: arranged, joint: canonicalJoint };
   }
 
-  // Odds-relevant ⇒ gate: re-price the arranged order the same way the headline does - 
-  // the comfort cap and window pricing COMPOSE (Phase 4), both applied when both are in
+   // Odds-relevant ⇒ gate: re-price the arranged order the same way the headline does -
+  // the comfort cap and window pricing COMPOSE, both applied when both are in
   // force - and adopt it only while `allOnTime ≥ canonical − ε`.
   const opts2: ForecastOptions = { ...opts.forecast };
   if (cap != null) opts2.comfortCapMinutes = cap;

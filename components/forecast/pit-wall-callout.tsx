@@ -31,20 +31,15 @@ function toneText(p: number): string {
       : "text-[var(--color-status-done)]";
 }
 
-/**
- * The pit wall: the bird's-eye view of what the shared hours can't satisfy and
- * the cross-project trade-off to make. Always mounted on Today - when nothing
- * collides it shows a calm one-liner, so its automation toggle (in the header)
- * stays reachable. Two conflict paths, matching locked decision #3: an auto
- * recovery (shed the lowest-value doomed work) and, only on a genuine
- * comparable-value tie, an escalation where the user picks which colliding
- * project to protect. Every move reuses the reversible defer.
+/** The pit wall: the bird's-eye view of what the shared hours can't satisfy and the
+ *  cross-project trade-off to make. Always mounted on Today - when nothing collides it shows a
+ *  calm one-liner, so its automation toggle stays reachable. Two conflict paths: an auto recovery
+ *  (shed the lowest-value doomed work) and, only on a genuine comparable-value tie, an escalation
+ *  where the user picks which project to protect. Every move reuses the reversible defer.
  *
- * `autoStrategy` is the G6 mode. On = the auto path applies itself on sight and
- * leaves an undoable receipt here (this card outlives the cleared conflict, so
- * the receipt persists); off = each move is surfaced for one click. A tie always
- * stays the user's call - auto escalates ties, it never resolves them.
- */
+ *  `autoStrategy` on = the auto path applies itself on sight and leaves an undoable receipt here;
+ *  off = each move is surfaced for one click. A tie always stays the user's call - auto escalates
+ *  ties, it never resolves them. */
 export function PitWallCallout({
   pitWall,
   autoStrategy,
@@ -219,11 +214,8 @@ export function PitWallCallout({
   );
 }
 
-/**
- * The auto/manual switch for the pit wall, compact for the card header. State is
- * owned by the parent so the switch and its description stay in lockstep; the
- * sentence under the header explains what each mode does.
- */
+/** The auto/manual switch, compact for the card header. State is owned by the parent so the
+ *  switch and its description stay in lockstep. */
 function StrategyToggle({
   on,
   onToggle,
@@ -265,11 +257,8 @@ function StrategyToggle({
   );
 }
 
-/**
- * Manual mode: defer the lowest-WSJF doomed work, surfaced for a click - all at
- * once, or one task at a time. Each shows the odds it recovers (always from the
- * forecast). Reversible from the project's Deferred section.
- */
+/** Manual mode: defer the lowest-WSJF doomed work, surfaced for a click - all at once or one at
+ *  a time. Each shows the odds it recovers. Reversible from the project's Deferred section. */
 function ManualTriage({ triage }: { triage: PitWall["triage"] }) {
   const [pending, startTransition] = useTransition();
   const [busy, setBusy] = useState<string | null>(null);
@@ -349,12 +338,9 @@ function ManualTriage({ triage }: { triage: PitWall["triage"] }) {
   );
 }
 
-/**
- * The escalated tie: two comparable-value projects collide and auto won't pick
- * for you. Each option protects one by deferring the others' open work; choosing
- * it batch-defers the sacrifice set. Only one can win, so once one is applied the
- * rest disappear.
- */
+/** The escalated tie: two comparable-value projects collide and auto won't pick for you. Each
+ *  option protects one by deferring the others' open work. Only one can win, so once one is
+ *  applied the rest disappear. */
 function Escalation({ options }: { options: PitWallOption[] }) {
   const [pending, startTransition] = useTransition();
   const [busy, setBusy] = useState<string | null>(null);

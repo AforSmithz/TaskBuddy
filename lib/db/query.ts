@@ -1,34 +1,26 @@
-import { isJsonbColumn } from "./columns";
+import { isJsonbColumn } from "@/lib/db/columns";
 
 // A PostgREST-compatible query builder.
 //
-// This module is deliberately PURE: no `server-only`, no `next/headers`, no
-// pool. It turns a chain of builder calls into `{ text, values }` and hands that
-// to an injected executor. `./shim.ts` is the thin request-scoped wrapper that
-// supplies a real one.
+// Deliberately pure: no server-only, no next/headers, no pool. It turns a chain of builder
+// calls into { text, values } and hands that to an injected executor; ./shim.ts is the
+// request-scoped wrapper that supplies a real one. That split is what lets azure/harness/
+// assert the exact SQL text offline, with no database and no Next runtime - and this is the
+// part that can be wrong in ways nothing else notices (an off-by-one in `.range()` deletes live
+// undo history, a missed jsonb cast breaks undo silently).
 //
-// The split is not decoration. The SQL this file generates is the part that can
-// be wrong in ways nothing else notices - an off-by-one in `.range()` deletes
-// live undo history, a missed jsonb cast breaks undo silently - and keeping it
-// free of server-only imports is what lets `azure/harness/` assert the exact
-// SQL text offline, with no database and no Next runtime.
+// store.ts is 5.7k lines and 103 query chains and is NOT being rewritten. This exists so it
+// doesn't have to be: it reimplements exactly the slice of the supabase-js surface store.ts
+// uses, same { data, error } contract, nothing else.
 //
-// `lib/store.ts` is 5.7k lines and 103 query chains, and it is NOT being
-// rewritten. This file exists so it doesn't have to be: it reimplements exactly
-// the slice of the supabase-js surface that store.ts actually uses, with the
-// same `{ data, error }` response contract, and nothing else.
+// The method surface is deliberately incomplete. `.single()`, `.neq`, `.or`, `.filter`,
+// `.contains`, `.rpc`, embedded selects and the `count` option all have zero call sites
+// (verified), so reaching for one is a TypeError rather than a subtly wrong query. A wrong
+// `.single()` is worse than no `.single()`.
 //
-// THE METHOD SURFACE IS DELIBERATELY INCOMPLETE. `.single()`, `.neq`, `.or`,
-// `.filter`, `.contains`, `.rpc`, embedded selects and the `count` option all
-// have zero call sites, verified exhaustively. They are not implemented, so
-// reaching for one is a TypeError at the call site rather than a subtly wrong
-// query. A wrong `.single()` is worse than no `.single()`.
-//
-// THE ONE RULE THIS FILE MUST NEVER BREAK: a terminal resolves, it never
-// rejects. `store.ts:279` (`bestEffortRows`) inspects `res.error` as a *value*;
-// a thrown rejection would propagate straight past it and fell the whole
-// Strategy page instead of degrading one panel. Every path below funnels
-// through `fail()`.
+// The one rule this file must never break: a terminal RESOLVES, it never rejects. bestEffortRows
+// in store.ts inspects res.error as a value, and a thrown rejection would propagate past it and
+// fell the whole Strategy page instead of degrading one panel. Every path funnels through fail().
 
 export type Row = Record<string, unknown>;
 
@@ -78,7 +70,7 @@ function messageOf(err: unknown): string {
     const msg = typeof e.message === "string" ? e.message : String(err);
     // Carry the SQLSTATE. This whole file is the mitigation for a class of bug
     // where a failed query was indistinguishable from an empty table; when one
-    // does fail, the operator should not have to guess why.
+    // does fail(), the operator should not have to guess why.
     const code = typeof e.code === "string" ? `${e.code}: ` : "";
     const detail = typeof e.detail === "string" ? ` (${e.detail})` : "";
     return `${code}${msg}${detail}`;
@@ -88,14 +80,10 @@ function messageOf(err: unknown): string {
 
 // --- payload normalisation --------------------------------------------------
 
-/**
- * Mirror `JSON.stringify`: drop `undefined`-valued keys, keep `null` as SQL NULL.
- *
- * PostgREST received a JSON body, so an `undefined` field simply wasn't there and
- * the column kept its value. A naive `Object.entries()` would write NULL instead.
- * The live path that needs this is `lib/actions.ts:955` `updateActivityAction`,
- * an exported Server Action that passes a caller-supplied patch straight through.
- */
+/** Mirror JSON.stringify: drop undefined-valued keys, keep null as SQL NULL. PostgREST got a
+ *  JSON body, so an undefined field simply wasn't there and the column kept its value - a naive
+ *  Object.entries() would write NULL instead. The live path that needs this is
+ *  updateActivityAction, which passes a caller-supplied patch straight through. */
 function definedEntries(obj: Row): [string, unknown][] {
   return Object.entries(obj).filter(([, v]) => v !== undefined);
 }
@@ -114,7 +102,7 @@ function makeBinder(): Binder {
       // jsonb needs an explicit stringify and cast. node-postgres' prepareValue
       // turns a JS array into a PostgreSQL array literal - `{a,b}` - rather than
       // JSON, so object-valued jsonb survives by accident while array-valued
-      // jsonb breaks silently. See ./columns.ts.
+           // jsonb breaks silently. See ./columns.ts.
       if (isJsonbColumn(table, column)) {
         values.push(value === null ? null : JSON.stringify(value));
         return `$${values.length}::jsonb`;
@@ -160,16 +148,13 @@ export class QueryBuilder implements PromiseLike<ShimResult> {
     this.exec = exec;
   }
 
-  /**
-   * The SQL this chain would run, without running it. Exists for the harness in
-   * `azure/harness/`, which asserts the exact text and parameter list for every
-   * chain shape store.ts uses - and for anyone debugging a query at 2am.
-   */
+  /** The SQL this chain would run, without running it. For the harness, which asserts the exact
+   *  text and parameters for every chain shape store.ts uses - and for debugging at 2am. */
   toSQL(): { text: string; values: unknown[] } | null {
     return this.build();
   }
 
-  // --- verbs ---------------------------------------------------------------
+   // --- verbs ---------------------------------------------------------------
 
   /**
    * Before a verb: this is a read, and `cols` is the projection. After a write
@@ -185,11 +170,9 @@ export class QueryBuilder implements PromiseLike<ShimResult> {
     return this;
   }
 
-  // Payloads are typed `object`, not `Record<string, unknown>`, on purpose.
-  // store.ts passes domain interfaces (`Task`, `SkillNode`, …) straight in, and
-  // a TypeScript interface has no implicit index signature - so the stricter
-  // type would reject every real call site and force edits to a file this
-  // migration exists to leave alone.
+  // Payloads are typed `object`, not Record<string, unknown>, on purpose: store.ts passes domain
+  // interfaces straight in, and a TS interface has no implicit index signature, so the stricter
+  // type would reject every real call site.
   insert<T extends object>(values: T | T[]): this {
     this.verb = "insert";
     this.payload = (Array.isArray(values) ? values : [values]) as Row[];
@@ -214,22 +197,17 @@ export class QueryBuilder implements PromiseLike<ShimResult> {
     return this;
   }
 
-  // --- filters -------------------------------------------------------------
+   // --- filters -------------------------------------------------------------
 
   eq(column: string, value: string | number | boolean | null): this {
     this.filters.push({ column, op: "eq", value });
     return this;
   }
 
-  /**
-   * `column IS NULL`, PostgREST's `.is(col, null)`.
-   *
-   * Not reachable through `.eq(col, null)`, and the difference is the classic
-   * SQL trap rather than a style choice: `.eq` binds a parameter and
-   * `col = NULL` is never true, so the query silently returns nothing at all.
-   * The one caller that needs it is the job-run lookup for portfolio-wide work,
-   * whose `subject_id` is genuinely NULL.
-   */
+  /** `column IS NULL`. Not reachable through.eq(col, null), and that's the classic SQL trap
+   *  rather than a style choice: .eq binds a parameter and `col = NULL` is never true, so the
+   *  query silently returns nothing. The one caller is the job-run lookup for portfolio-wide
+   *  work, whose subject_id is genuinely NULL. */
   isNull(column: string): this {
     this.filters.push({ column, op: "isNull", value: null });
     return this;
@@ -250,7 +228,7 @@ export class QueryBuilder implements PromiseLike<ShimResult> {
     return this;
   }
 
-  // --- shaping -------------------------------------------------------------
+   // --- shaping -------------------------------------------------------------
 
   order(column: string, options?: { ascending?: boolean }): this {
     this.orderBys.push({ column, ascending: options?.ascending ?? true });
@@ -262,14 +240,10 @@ export class QueryBuilder implements PromiseLike<ShimResult> {
     return this;
   }
 
-  /**
-   * PostgREST ranges are INCLUSIVE at both ends: `range(50, 1050)` is rows 51
-   * through 1051, i.e. `OFFSET 50 LIMIT 1001`.
-   *
-   * Four soft-cap prunes read `.order(<time>, {ascending:false}).range(CAP, CAP+1000)`
-   * and then delete every id that comes back. An off-by-one here destroys live
-   * `plan_versions` / `plan_rolls` undo state, so the `+ 1` is not cosmetic.
-   */
+  /** PostgREST ranges are INCLUSIVE at both ends: range(50, 1050) is rows 51-1051, i.e.
+   *  OFFSET 50 LIMIT 1001. Four soft-cap prunes read .order(...).range(CAP, CAP+1000) and delete
+   *  every id that comes back, so an off-by-one here destroys live undo state. The +1 isn't
+   *  cosmetic. */
   range(from: number, to: number): this {
     this.offsetCount = from;
     this.limitCount = to - from + 1;
@@ -282,7 +256,7 @@ export class QueryBuilder implements PromiseLike<ShimResult> {
     return this;
   }
 
-  // --- execution -----------------------------------------------------------
+   // --- execution -----------------------------------------------------------
 
   then<TResult1 = ShimResult, TResult2 = never>(
     onfulfilled?:
@@ -298,11 +272,9 @@ export class QueryBuilder implements PromiseLike<ShimResult> {
   }
 
   private async execute(): Promise<ShimResult> {
-    // No session: do not execute. This is not defensive tidiness. Thirteen
-    // `.select()` chains carry no filter at all, and four prune DELETEs
-    // (`store.ts:1732`, `:1907`, `:2014`, `:2595`) carry none either - their
-    // entire scoping is `app.user_id`. Running any of them with the GUC unset is
-    // a cross-tenant read at best and a cross-tenant DELETE at worst.
+  // No session: do not execute. Thirteen.select chains carry no filter at all, and four
+  // prune DELETEs carry none either - their entire scoping is app.user_id. Running any of them
+  // with the GUC unset is a cross-tenant read at best and a cross-tenant DELETE at worst.
     if (!this.exec) {
       return fail("Not signed in.");
     }
@@ -314,7 +286,7 @@ export class QueryBuilder implements PromiseLike<ShimResult> {
       return fail(messageOf(err));
     }
 
-    // A no-op write (see build()): nothing to send, and PostgREST answered 200.
+       // A no-op write (see build()): nothing to send, and PostgREST answered 200.
     if (built === null) return { data: null, error: null };
 
     try {
@@ -339,7 +311,7 @@ export class QueryBuilder implements PromiseLike<ShimResult> {
       return { data: rows[0], error: null };
     }
 
-    // A write with no `.select()` returns no body, exactly like PostgREST's
+       // A write with no `.select()` returns no body, exactly like PostgREST's
     // default `Prefer: return=minimal`. Only `mustOk` reads these.
     if (this.verb !== "select" && this.returning === null) {
       return { data: null, error: null };
@@ -348,7 +320,7 @@ export class QueryBuilder implements PromiseLike<ShimResult> {
     return { data: rows, error: null };
   }
 
-  // --- SQL generation ------------------------------------------------------
+   // --- SQL generation ------------------------------------------------------
 
   /** Returns null when the statement is a legitimate no-op. */
   private build(): { text: string; values: unknown[] } | null {
@@ -369,7 +341,7 @@ export class QueryBuilder implements PromiseLike<ShimResult> {
       case "insert": {
         const rows = this.payload ?? [];
         // No site inserts an empty array today (all 8 are length-guarded), but
-        // `INSERT INTO t () VALUES ()` does not parse, so make it a no-op.
+               // `INSERT INTO t () VALUES ()` does not parse, so make it a no-op.
         if (rows.length === 0) return null;
         return this.buildInsert(rows, b, null);
       }
@@ -382,12 +354,10 @@ export class QueryBuilder implements PromiseLike<ShimResult> {
 
       case "update": {
         const entries = definedEntries(this.patch ?? {});
-        // `.update({})` is a LIVE path: `updateRecurringActivity`
-        // (`store.ts:2971`) has no empty-patch guard, unlike `updateTask`, and
-        // `updateActivityAction` feeds it a caller-supplied patch. PostgREST
-        // answered 200 with no change; `UPDATE t SET  WHERE id = $1` is a
-        // syntax error. Resolve as the no-op the caller already expects - its
-        // own comment documents `null` as "no row matched the id".
+        // .update({}) is a LIVE path: updateRecurringActivity has no empty-patch guard, unlike
+        // updateTask, and updateActivityAction feeds it a caller-supplied patch. PostgREST
+        // answered 200 with no change, while `UPDATE t SET  WHERE id = $1` is a syntax error.
+        // Resolve as the no-op the caller already expects.
         if (entries.length === 0) return null;
         if (this.filters.length === 0) {
           throw new Error(
@@ -408,7 +378,7 @@ export class QueryBuilder implements PromiseLike<ShimResult> {
       case "delete": {
         if (this.filters.length === 0) {
           // Free insurance: PostgREST permitted this, all 13 deletes here carry
-          // `.eq()` or `.in()`, and an accidental table-wide DELETE inside a
+                   // `.eq()` or `.in()`, and an accidental table-wide DELETE inside a
           // transaction that commits is unrecoverable.
           throw new Error(
             `Refusing an unfiltered DELETE on ${this.table}: every delete in ` +
@@ -429,7 +399,7 @@ export class QueryBuilder implements PromiseLike<ShimResult> {
   ): { text: string; values: unknown[] } {
     // Union of keys across all rows, so a row missing a key gets NULL rather
     // than silently dropping the column for everyone. Every array insert in
-    // store.ts is built by a `.map()` and is uniform, so this is belt-and-braces.
+       // store.ts is built by a `.map()` and is uniform, so this is belt-and-braces.
     const columns: string[] = [];
     for (const row of rows) {
       for (const [k] of definedEntries(row)) {
@@ -473,14 +443,10 @@ export class QueryBuilder implements PromiseLike<ShimResult> {
     return { text: sql + this.returningClause(), values: b.values };
   }
 
-  /**
-   * Last write wins per conflict key.
-   *
-   * Postgres raises "ON CONFLICT DO UPDATE command cannot affect row a second
-   * time" if one statement touches the same key twice. Only `availability`
-   * upserts multiple rows, and its single caller passes one row today - so this
-   * is latent rather than live, which is exactly when it is cheapest to fix.
-   */
+  /** Last write wins per conflict key. Postgres raises "ON CONFLICT DO UPDATE command cannot
+   *  affect row a second time" if one statement touches the same key twice. Only availability
+   *  upserts multiple rows and its single() caller passes one today, so this is latent rather than
+   *  live - which is exactly when it's cheapest to fix. */
   private dedupeByConflictKey(rows: Row[]): Row[] {
     if (rows.length < 2 || this.conflictColumns.length === 0) return rows;
     const seen = new Map<string, Row>();
@@ -505,7 +471,7 @@ export class QueryBuilder implements PromiseLike<ShimResult> {
         case "isNull":
           return `${col} IS NULL`;
         case "in":
-          // `= ANY($n::uuid[])`. All 13 `.in()` sites target `id`, `entry_id` or
+                 // `= ANY($n::uuid[])`. All 13 `.in()` sites target `id`, `entry_id` or
           // `skill_node_id`, all uuid. It is also valid on an empty array and
           // correctly returns zero rows, which the callers already guard for.
           b.values.push(f.value);

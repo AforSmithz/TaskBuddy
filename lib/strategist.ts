@@ -12,29 +12,26 @@ import type {
   RerouteSuggestion,
   SuggestedTask,
   TaskModification,
-} from "./types";
-import type { Task } from "./types";
-import type { ChatMessage } from "./bedrock";
-import { isLLMConfigured } from "./extraction";
+} from "@/lib/types";
+import type { Task } from "@/lib/types";
+import type { ChatMessage } from "@/lib/bedrock";
+import { isLLMConfigured } from "@/lib/extraction";
 import {
   getRecoveryContext,
   previewProbabilityWithModifications,
   previewProbabilityWithReroute,
   previewProbabilityWithTasks,
   type RecoveryContext,
-} from "./store";
+} from "@/lib/store";
 
-// LLM strategist - Step 1: Generate.
+// LLM strategist, step 1: Generate.
 //
-// The deterministic recovery engine only rearranges opaque blocks (defer /
-// re-date / re-sequence). This module is the one move that needs the LLM: it
-// proposes *net-new* corrective tasks for genuine holes reality created - 
-// rework after a failed review, an unblock action, or work to de-risk a task
-// that's blowing its estimate. Everything here is advisory and user-approved.
+// The deterministic recovery engine only rearranges opaque blocks (defer / re-date /
+// re-sequence). This is the one move that needs the LLM: proposing NET-NEW corrective tasks for
+// holes reality created - rework after a failed review, an unblock action, work to de-risk a
+// task blowing its estimate. All advisory and user-approved.
 //
-// Hard guardrail: the LLM proposes *what to do*; only `forecast()` (via
-// previewProbabilityWithTasks) assigns *how likely it is*. The model never
-// emits a probability.
+// Guardrail: the LLM proposes what to do, only forecast() assigns how likely it is.
 
 const GAP_KINDS: GapKind[] = ["rework", "unblock", "de_risk"];
 
@@ -93,15 +90,13 @@ ${NO_ODDS_RULE}
 
 ${FACTOR_RUBRIC}`;
 
-// --- Strict response schemas -------------------------------------------------
+// --- Strict response schemas -----------------------------------------------
 //
-// These replace the prose shape blocks the three prompts used to carry. What a
-// schema CANNOT express stays in prose AND in the normalizers, which remain
-// load-bearing: the scope_down/split arithmetic, cross-item ref uniqueness, date
-// validity, and the two deterministic forecast gates that keep the model out of the
-// probability business. `maxItems` is deliberately not used - it truncates the array
-// without telling the model, so it crams the discarded content into the last element
-// instead of planning for the cap.
+// These replace the prose shape blocks the prompts used to carry. What a schema CAN'T express
+// stays in prose and in the normalizers, which are still load-bearing: the scope_down/split
+// arithmetic, cross-item ref uniqueness, date validity, and the two forecast() gates. maxItems is
+// deliberately unused - it truncates the array without telling the model, so it crams the
+// discarded content into the last element instead of planning for the cap.
 
 const FACTOR = { type: "integer", enum: [1, 2, 3, 4, 5] };
 const FACTOR_KEYS = [
@@ -121,7 +116,6 @@ const FACTOR_PROPS = {
   confidence: FACTOR,
 };
 
-/** The task object shared by Generate and Re-route. Only Generate carries gap_kind. */
 function taskObject(withGapKind: boolean) {
   return {
     type: "object",
@@ -273,12 +267,9 @@ interface RawSuggestion {
   tasks?: unknown;
 }
 
-/**
- * Propose net-new corrective tasks for an off-track project. Returns null when
- * the LLM is unconfigured, the project isn't off-track, the call fails, or the
- * model finds no genuine gap - every one of those means "show nothing", so the
- * UI never nags. The returned probability is computed by `forecast()`.
- */
+/** Propose net-new corrective tasks for an off-track project. Null when the LLM is
+ *  unconfigured, the project isn't off-track, the call fails, or the model finds no genuine
+ *  gap - all of those mean "show nothing", so the UI never nags. */
 export async function generateCorrectiveTasks(
   projectId: string,
 ): Promise<RecoverySuggestion | null> {
@@ -288,7 +279,7 @@ export async function generateCorrectiveTasks(
   if (!ctx) return null;
 
   // Imported lazily so the app loads without Bedrock configured.
-  const { callBedrockJSON } = await import("./bedrock");
+  const { callBedrockJSON } = await import("@/lib/bedrock");
 
   const messages: ChatMessage[] = [
     { role: "system", content: SYSTEM_PROMPT },
@@ -317,7 +308,7 @@ export async function generateCorrectiveTasks(
   return {
     projectId,
     tasks,
-    // Guardrail: the deterministic forecast scores the proposal, not the LLM.
+    // Guardrail: the deterministic forecast() scores the proposal, not the LLM.
     previewProbability: previewProbabilityWithTasks(ctx, tasks),
     rationale:
       typeof raw.rationale === "string" && raw.rationale.trim()
@@ -416,16 +407,12 @@ function normalizeTasks(raw: unknown, ctx: RecoveryContext): SuggestedTask[] {
   return out;
 }
 
-// LLM strategist - Step 2: Modify.
+// LLM strategist, step 2: Modify.
 //
-// Generate adds net-new work; Modify reshapes the work that already exists so it
-// fits the budget. Two moves, both needing the LLM to understand what a task *is*:
-//   - scope_down: replace a task with a lighter version (smaller estimate).
-//   - split:      break a stuck monolith into smaller real steps.
-//
-// Same hard guardrail as Generate: the model proposes the reshape;
-// `previewProbabilityWithModifications` (i.e. `forecast()`) scores it, and a
-// reshape that doesn't actually improve the odds is dropped before it's shown.
+// Generate adds net-new work; Modify reshapes what already exists so it fits the budget.
+// scope_down replaces a task with a lighter version, split breaks a stuck monolith into real
+// steps. Same guardrail: the model proposes the reshape, forecast() scores it, and a reshape
+// that doesn't actually improve the odds is dropped before it's shown.
 
 const MOD_KINDS: ModificationKind[] = ["scope_down", "split"];
 
@@ -476,12 +463,8 @@ interface RawModifications {
   modifications?: unknown;
 }
 
-/**
- * Reshape existing tasks to fit the budget. Returns null on the same "show
- * nothing" conditions as Generate (LLM unconfigured, project on-track, the call
- * fails, or nothing reshapes usefully). Every surviving modification is one the
- * deterministic forecast confirms actually improves the odds.
- */
+/** Reshape existing tasks to fit the budget. Null on the same "show nothing" conditions as
+ *  Generate. Every surviving modification is one the forecast() confirms improves the odds. */
 export async function generateTaskModifications(
   projectId: string,
 ): Promise<ModificationSuggestion | null> {
@@ -490,7 +473,7 @@ export async function generateTaskModifications(
   const ctx = await getRecoveryContext(projectId);
   if (!ctx) return null;
 
-  const { callBedrockJSON } = await import("./bedrock");
+  const { callBedrockJSON } = await import("@/lib/bedrock");
 
   const messages: ChatMessage[] = [
     { role: "system", content: MODIFY_SYSTEM_PROMPT },
@@ -518,7 +501,7 @@ export async function generateTaskModifications(
   return {
     projectId,
     modifications: mods,
-    // Guardrail: the deterministic forecast scores the reshaped plan.
+    // Guardrail: the deterministic forecast() scores the reshaped plan.
     previewProbability: previewProbabilityWithModifications(ctx, mods),
     rationale:
       typeof raw.rationale === "string" && raw.rationale.trim()
@@ -637,9 +620,9 @@ function normalizeModifications(
       replacements,
     };
 
-    // Deterministic guardrail: only keep reshapes the forecast confirms help.
+    // Deterministic guardrail: only keep reshapes the forecast() confirms help.
     // Compared against the current probability with a small margin so a change
-    // that only moved by forecast discretization isn't surfaced as a fix.
+    // that only moved by forecast() discretization isn't surfaced as a fix.
     if (previewProbabilityWithModifications(ctx, [mod]) <= ctx.currentProbability + 0.005) {
       continue;
     }
@@ -652,20 +635,16 @@ function normalizeModifications(
   return out;
 }
 
-// LLM strategist - Step 3: Re-route.
+// LLM strategist, step 3: Re-route.
 //
-// Generate adds, Modify reshapes - both keep the current plan's *approach*. This
-// is the boldest move: when the path itself won't fit, replace the entire open
-// plan with a different way to hit the same deliverable (buy vs build, a managed
-// service vs custom, a template vs from-scratch). All-or-nothing - the user
-// switches to the new approach or keeps the old one.
+// Generate adds and Modify reshapes, both keeping the current approach. This is the boldest
+// move: when the path itself won't fit, replace the whole open plan with a different way to hit
+// the same deliverable (buy vs build, managed service vs custom). All-or-nothing.
 //
-// The division of labour: the LLM judges *whether* a genuinely lighter route
-// exists and *what* it is (returning nothing when the plan only needs trimming - 
-// that's Modify's job). `previewProbabilityWithReroute` (i.e. `forecast()`) is
-// the sole authority on whether the alternative is actually better; a re-route
-// that doesn't clear the current odds by a real margin is dropped before it's
-// shown. As always, the model never emits a probability.
+// The LLM judges WHETHER a genuinely lighter route exists and WHAT it is, returning nothing
+// when the plan only needs trimming - that's Modify's job. forecast() is the sole authority on
+// whether the alternative is actually better; a route that doesn't clear the current odds by a
+// real margin is dropped before it's shown.
 
 // A whole new plan can run a little longer than Generate's gap-fill, but a
 // re-route with a dozen tasks isn't a route, it's another monolith.
@@ -714,13 +693,8 @@ interface RawReroute {
   degraded_criteria?: unknown;
 }
 
-/**
- * Propose a whole-plan alternative for an off-track project. Returns null on the
- * same "show nothing" conditions as the other moves (LLM unconfigured, project
- * on-track, the call fails, the model finds no genuine alternative) - and also
- * when the deterministic forecast says the proposed route doesn't beat the
- * current odds by a real margin. The probability is always `forecast()`'s.
- */
+/** Propose a whole-plan alternative. Null on the same conditions as the other moves, and also
+ *  when the forecast() says the route doesn't beat the current odds by a real margin. */
 export async function generateReroute(
   projectId: string,
 ): Promise<RerouteSuggestion | null> {
@@ -729,7 +703,7 @@ export async function generateReroute(
   const ctx = await getRecoveryContext(projectId);
   if (!ctx) return null;
 
-  const { callBedrockJSON } = await import("./bedrock");
+  const { callBedrockJSON } = await import("@/lib/bedrock");
 
   const messages: ChatMessage[] = [
     { role: "system", content: REROUTE_SYSTEM_PROMPT },
@@ -754,7 +728,7 @@ export async function generateReroute(
 
   const previewProbability = previewProbabilityWithReroute(ctx, tasks);
   // Deterministic guardrail: a whole-plan swap only earns its place if the
-  // forecast says it clearly improves the odds.
+  // forecast() says it clearly improves the odds.
   if (previewProbability <= ctx.currentProbability + REROUTE_MIN_GAIN) {
     return null;
   }
@@ -776,7 +750,7 @@ export async function generateReroute(
       estimated_minutes: t.estimated_minutes,
     })),
     // The definition-of-done items this lighter route lowers - validated against
-    // the goal's real criteria, recorded as degraded notes on accept (§5 check 2).
+    // the goal's real criteria, recorded as degraded notes on accept.
     degradedCriteria: normalizeDegradedCriteria(raw.degraded_criteria, ctx.criteria),
     previewProbability,
   };
@@ -841,12 +815,10 @@ function criterionHandle(i: number): string {
   return `C${i + 1}`;
 }
 
-/**
- * Validate the model's degraded-DoD claims against the goal's real criteria.
- * Drops anything that doesn't map to a provided handle or carries no note, and
- * dedups - so a hallucinated id can never write a `degraded_note` (§0: which
- * criteria exist is the data's call, only the human note is the model's).
- */
+/** Validate the model's degraded-DoD claims against the goal's real criteria. Drops anything
+ *  that doesn't map to a provided handle or carries no note, and dedups - so a hallucinated id
+ *  can never write a degraded_note. Which criteria exist is the data's call; only the note is
+ *  the model's. */
 function normalizeDegradedCriteria(
   raw: unknown,
   criteria: GoalCriterion[],

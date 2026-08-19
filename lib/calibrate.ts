@@ -1,34 +1,23 @@
-// The calibration seam - substrate S3c-5 (OVERHAUL §5a). The shared, reusable
-// empirical-Bayes core that turns fixed soft-knob constants (the churn hysteresis
-// `STABILITY_MARGIN`/`CHURN_COST`, the arrangement `ArrangeWeights`) into values
-// LEARNED from the user's own behaviour, without ever starting worse than the
-// constant.
+// The calibration seam - the shared empirical-Bayes core that turns fixed soft-knob constants
+// (the churn hysteresis, the arrangement weights) into values LEARNED from the user's own
+// behaviour without ever starting worse than the constant.
 //
-// Pure + deterministic, ZERO imports (numbers in, numbers out) - the calibration
-// side of §0's propose/dispose, NEVER the LLM, never the DB. It authors no odds:
-// every knob it returns feeds the SOFT layer only (the churn hysteresis and the
-// arrangement `J`), which the odds gate already dominates (design §3, invariant 2).
-// Mirrors `lib/velocity.ts` (the same shrink-to-prior discipline) and `lib/buffer.ts`
-// (pure, unit-testable via the compiled-to-`/tmp` node harness). See
-// `design/s3c5-shared-calibration-brain.md`.
+// Pure, deterministic, zero imports. Authors no odds: every knob it returns feeds the SOFT
+// layer only, which the odds gate already dominates. Same shrink-to-prior discipline as
+// lib/velocity.ts. See design/s3c5-shared-calibration-brain.md.
 //
-// The one idea, in two shapes:
+// One idea in two shapes:
 //
-//     B = n / (n + κ)                    // EB / James - Stein shrinkage weight
-//     scalar:  x̂ = x₀ + B·(x̄ − x₀)       (§4a - a rate → a knob: hysteresis)
-//     vector:  ŵ = w₀ + B·(w_raw − w₀)    (§4b - preference pairs → weights: arrange)
+//     B = n / (n + kappa)                    // EB / James-Stein shrinkage weight
+//     scalar:  x = x0 + B*(xbar - x0)        // a rate -> a knob (hysteresis)
+//     vector:  w = w0 + B*(w_raw - w0)       // preference pairs -> weights (arrange)
 //
-// No-regret is STRUCTURAL: n = 0 ⇒ B = 0 ⇒ x̂ = x₀ and ŵ = w₀ = today's constant,
-// bit-for-bit. It can only sharpen off real evidence; it can never start below the
-// prior. Sparse/noisy evidence stays near the prior (large κ) - the same safety
-// `fitVelocityModel` relies on. Any non-finite input falls back to the prior.
+// No-regret is structural: n = 0 gives B = 0 gives today's constant, bit-for-bit. Sparse or
+// noisy evidence stays near the prior (large kappa). Any non-finite input falls back to it too.
 
-/**
- * The empirical-Bayes shrinkage weight `B = n/(n+κ)` - "how many of its OWN
- * observations a statistic needs to earn half its weight" (at `n = κ`, `B = 0.5`).
- * `n ≤ 0` ⇒ 0 (no evidence ⇒ pure prior). `κ` non-finite ⇒ 0 (disabled ⇒ prior).
- * `κ ≤ 0` ⇒ 1 (no shrinkage ⇒ trust the observation fully). Always in `[0, 1]`.
- */
+/** The shrinkage weight B = n/(n+k) - how many of its OWN observations a statistic needs to
+ *  earn half its weight. n <= 0 gives 0 (pure prior), non-finite k gives 0 (disabled), k <= 0
+ *  gives 1 (trust the observation fully). Always in [0,1]. */
 export function shrinkageWeight(n: number, kappa: number): number {
   if (!Number.isFinite(n) || n <= 0) return 0;
   if (!Number.isFinite(kappa)) return 0;
@@ -42,13 +31,9 @@ export function clamp(x: number, lo: number, hi: number): number {
   return x < lo ? lo : x > hi ? hi : x;
 }
 
-/**
- * Shrink one observed scalar statistic toward its prior: `x₀ + B·(x̄ − x₀)`,
- * `B = shrinkageWeight(n, κ)`. `n = 0` (or a non-finite observation) ⇒ exactly the
- * prior. The §4a primitive; the hysteresis consumer (S1) supplies the observed churn
- * regret rate as `observed`, the rate the current constants are tuned for as `prior`,
- * then maps the shrunk rate to the knob's units.
- */
+/** Shrink one observed scalar toward its prior. n = 0 or a non-finite observation gives exactly
+ *  the prior. The hysteresis consumer supplies the observed churn regret rate as `observed` and
+ *  the rate the current constants are tuned for as `prior`, then maps the result to knob units. */
 export function shrinkScalar(
   observed: number,
   prior: number,
@@ -60,13 +45,9 @@ export function shrinkScalar(
   return prior + b * (observed - prior);
 }
 
-/**
- * Shrink each component of a learned vector toward a prior vector - the §4b tail.
- * Length-mismatched or non-finite inputs fall back to a copy of the prior (no-regret
- * under any malformation). `n` is the shared evidence count (number of preference
- * pairs); every component shrinks by the same `B`, preserving the vector's direction
- * as it pulls toward the prior.
- */
+/** Shrink each component of a learned vector toward a prior vector. Length-mismatched or
+ *  non-finite inputs fall back to a copy of the prior. `n` is the shared evidence count, and
+ *  every component shrinks by the same B, preserving the vector's direction. */
 export function shrinkVector(
   learned: readonly number[],
   prior: readonly number[],
@@ -102,13 +83,9 @@ function dot(a: readonly number[], b: readonly number[]): number {
   return s;
 }
 
-/**
- * One revealed preference: the user's dragged order is PREFERRED over the solver's
- * order. Feature vectors `φ = (S, E, B)` = (switch count, energy term, buffer term);
- * the solver picks `argmin w·φ`, so "preferred" means the user's order should score
- * LOWER. `solver` = `φ(a*)` (dispreferred), `user` = `φ(u)` (preferred). Both are
- * captured odds-neutral (design §6), so this is a pure soft-preference contrast.
- */
+/** One revealed preference: the user's dragged order is preferred over the solver's. φ = (switch
+ *  count, energy term, buffer term); the solver picks argmin w·φ, so "preferred" means the
+ *  user's order should score LOWER. Both captured odds-neutral, so this is a pure soft contrast. */
 export interface PreferencePair {
   /** `φ` of the arrangement the solver proposed (the dispreferred order). */
   solver: readonly number[];
@@ -130,13 +107,10 @@ export interface WeightFitOptions {
   hi?: number;
 }
 
-/**
- * Default shrinkage strength κ for the calibration seam - deliberately STRONGER
- * (prior-favouring) than velocity's 8, because a preference/policy signal is noisier
- * than a duration residual: ~12 observations for half weight, ~36 for 75%. So the
- * dials have to CLEARLY and REPEATEDLY be argued against before they move off the
- * hand-tuned constant. Itself EB-refinable later (the mild recursion §9 accepts).
- */
+/** Shrinkage strength for this seam - deliberately stronger (more prior-favouring) than
+ *  velocity's 8, because a preference signal is noisier than a duration residual: ~12
+ *  observations for half weight, ~36 for 75%. The dials have to be clearly and repeatedly argued
+ *  against before they move off the hand-tuned constant. */
 export const CALIBRATE_KAPPA = 12;
 
 /** Perceptron step size - small, so one drag is a gentle nudge, not a lurch. */
@@ -150,24 +124,19 @@ export const PERCEPTRON_MARGIN = 0;
 export const WEIGHT_MIN = 0.25;
 export const WEIGHT_MAX = 4;
 
-/**
- * Fit calibrated soft weights from a list of revealed preferences (§4b). Structured
- * perceptron over the pairs, then shrink toward the prior, then clamp:
+/** Fit calibrated soft weights from revealed preferences. Structured perceptron over the pairs,
+ *  then shrink toward the prior, then clamp:
  *
- *   1. `w_raw ← prior`; for each pair, `Δ = φ(solver) − φ(user)`. We want the user's
- *      order to score no worse, i.e. `w·Δ ≥ 0`. On a violation (`w_raw·Δ < margin`)
- *      nudge `w_raw += η · Δ/‖Δ‖`. The unit-normalised step makes each preference a
- *      bounded, scale-consistent contribution - a big-magnitude feature (the integer
- *      switch count) can't dominate the bounded energy/buffer terms.
- *   2. `w_deployed = shrinkVector(w_raw, prior, n=pairs.length, κ)` - sparse/noisy
- *      evidence stays near the prior.
- *   3. clamp each component to `[lo, hi]`.
+ *    1. w_raw starts at the prior; per pair, delta = φ(solver) - φ(user). We want the user's
+ *       order to score no worse, so on a violation nudge w_raw += eta * delta/||delta||. The
+ *       unit-normalised step keeps each preference bounded and scale-consistent, so the integer
+ *       switch count can't dominate the bounded energy/buffer terms.
+ *    2. shrinkVector toward the prior with n = pairs.length.
+ *    3. clamp each component.
  *
- * NO-REGRET: `pairs = []` ⇒ no steps ⇒ `w_raw = prior` ⇒ `B = 0` ⇒ returns the prior
- * (clamped, a no-op when the prior is in range) = today's `ARRANGE_WEIGHTS` exactly.
- * Order-independent in spirit but not in exact value (the perceptron is sequential);
- * that's inherent to online preference learning and swamped by the shrinkage anyway.
- */
+ *  No pairs means no steps means the prior exactly. Order-independent in spirit but not in exact
+ *  value - the perceptron is sequential, which is inherent to online preference learning and
+ *  swamped by the shrinkage anyway. */
 export function fitCalibratedWeights(
   pairs: readonly PreferencePair[],
   prior: readonly number[],

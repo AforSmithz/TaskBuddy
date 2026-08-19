@@ -1,29 +1,22 @@
-import { callBedrockJSON } from "../../../lib/bedrock";
-import { VERDICT_SCHEMA } from "../../../lib/skill-links";
+import { callBedrockJSON } from "@/lib/bedrock";
+import { VERDICT_SCHEMA } from "@/lib/skill-links";
 
 /**
  * Judges one (task, skill) pair. One Distributed Map item, one invocation.
  *
- * ---------------------------------------------------------------------------
- * WHY THIS IS A SEPARATE FUNCTION AT ALL
- * ---------------------------------------------------------------------------
- * `filterVerified` in lib/skill-links.ts already judges pairs concurrently with
- * an in-process cap, and it fails CLOSED - a judgement that errors drops the
- * pair rather than admitting an unchecked link. That is the right default and
- * the wrong failure mode at scale: a burst of Bedrock throttles silently
- * deletes good suggestions and reports success, which is exactly what the
- * comment above that function describes having already happened once.
+ * filterVerified in lib/skill-links.ts already judges pairs concurrently with an in-process cap,
+ * and it fails CLOSED - a judgement that errors drops the pair rather than admitting an unchecked
+ * link. Right default, wrong failure mode at scale: a burst of Bedrock throttles silently deletes
+ * good suggestions and reports success, which is exactly what happened once already.
  *
- * As a Map item the same burst is a retry with backoff that Step Functions
- * owns, the concurrency cap is enforced by the service rather than by a
- * semaphore that resets whenever an execution environment recycles, and a pair
- * that still cannot be judged is a recorded failure in the execution history
- * instead of a `false` nobody can distinguish from a considered no.
+ * As a Map item the same burst is a retry with backoff Step Functions owns, the concurrency cap
+ * is enforced by the service rather than a semaphore that resets on recycle, and a pair that
+ * still can't be judged is a recorded failure in the execution history instead of a `false`
+ * nobody can distinguish from a considered no.
  *
- * NO DATABASE. This function judges text and returns a verdict; persistence is
- * the worker's job. Keeping it out means no connection is held open across a
- * fan-out of thirty items - which would defeat Aurora auto-pause for the whole
- * run.
+ * No database. This judges text and returns a verdict; persistence is the worker's job. Keeping
+ * it out means no connection is held open across a fan-out of thirty items, which would defeat
+ * Aurora auto-pause for the whole run.
  */
 
 const SYSTEM_PROMPT = `You judge whether performing a TASK necessarily demonstrates a SKILL.
@@ -71,11 +64,10 @@ export async function handler(item: Item): Promise<Verdict> {
     );
     return { ...item, demonstrates: verdict.demonstrates === true, why: verdict.why, errored: false };
   } catch (err) {
-    // RETHROWN, NOT SWALLOWED, and this is the whole reason the fan-out moved
-    // out of process. Throwing lets Step Functions apply the retry policy for
-    // throttles; only after those are exhausted does the item fail, and then it
-    // is visible. Returning `demonstrates: false` here would recreate the exact
-    // silent-deletion bug this function exists to fix.
+  // Rethrown, not swallowed, and this is the whole reason the fan-out moved out of process.
+  // Throwing lets Step Functions apply the retry policy for throttles; only after those are
+  // exhausted does the item fail, and then it's visible. Returning `demonstrates: false` here
+  // would recreate the exact silent-deletion bug this function exists to fix.
     console.error(`judge failed for ${item.taskId}/${item.skillNodeId}:`, err);
     throw err;
   }

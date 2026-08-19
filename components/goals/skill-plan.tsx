@@ -151,7 +151,6 @@ function JobNotice({ pending, error }: { pending: boolean; error: string | null 
   );
 }
 
-/** The two-bar effort-vs-skill read - the crux of §5.3b made visible. */
 function SkillProgressBars({
   progress,
 }: {

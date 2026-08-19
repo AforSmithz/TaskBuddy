@@ -2,9 +2,9 @@ import {
   packOffsets,
   packOffsetsComfort,
   type DayCapacity,
-} from "./schedule";
-import { ARRANGE_HORIZON_DAYS, type ArrangeOrderOptions } from "./arrange";
-import { CALIBRATE_KAPPA, clamp, shrinkScalar } from "./calibrate";
+} from "@/lib/schedule";
+import { ARRANGE_HORIZON_DAYS, type ArrangeOrderOptions } from "@/lib/arrange";
+import { CALIBRATE_KAPPA, clamp, shrinkScalar } from "@/lib/calibrate";
 import {
   COMMITTED_PLAN_SCHEMA_VERSION,
   type CommittedPlan,
@@ -12,31 +12,27 @@ import {
   type LocalNow,
   type PlanRoll,
   type PlanRollKind,
-} from "./types";
+} from "@/lib/types";
 
-// Rolling-horizon wrapper (OVERHAUL §5a substrate S3c-1) - the *continuity* layer over
-// the S3b arrangement. S3b prices which within-day arrangement is best RIGHT NOW; this
-// module decides which already-priced arrangement to keep COMMITTING to as the days roll,
-// so the plan you're following doesn't thrash on every reload for a sub-epsilon gain, yet
-// still re-plans when the situation genuinely moves. See `design/s3c-rolling-horizon-wrapper.md`.
+// Rolling-horizon wrapper - the continuity layer over the arrangement. arrange.ts prices
+// which arrangement is best RIGHT NOW; this decides which already-priced arrangement to
+// keep committing to as the days roll, so the plan doesn't thrash on every reload for a
+// sub-epsilon gain but still re-plans when the situation genuinely moves.
+// See design/s3c-rolling-horizon-wrapper.md.
 //
-// Everything here is PURE, deterministic, and client-safe (types-only + pure imports, no
-// `server-only`, no DB, no LLM, no probability authored - it mirrors `arrange.ts` /
-// `buffer.ts` / `grounding.ts`). The Monte-Carlo reprice and the soft-score `J` are injected
-// as closures (`repriceAllOnTime` / `scoreJ`) so the odds engine stays in `store.ts` while
-// the DECISION logic (the roll cycle §4) lives here, unit-testable with fake pricers.
+// Pure, deterministic and client-safe. The Monte Carlo reprice and the soft score J are
+// injected as closures so the odds engine stays in store.ts while the decision logic lives
+// here, unit-testable with fake pricers.
 //
-// Two structural guarantees the whole module is built to hold:
-//   - No-regret: no committed row (or a reconcile that empties it) ⇒ the output is the fresh
-//     candidate verbatim, so S3c can never start worse than today's S3b behaviour.
-//   - Feasibility/odds dominate stability, always: a sticky plan is kept only while it stays
-//     within ε of the fresh candidate's odds; the moment it isn't it is discarded regardless
-//     of how little churn adopting the candidate would cost. Stickiness never costs odds.
+// Two guarantees the module is built around: no committed row means the output is the fresh
+// candidate verbatim (so this can never start worse than the plain arrangement), and
+// feasibility/odds always dominate stability - a sticky plan is kept only while it stays
+// within eps of the candidate's odds. Stickiness never costs odds.
 
 // --- Hysteresis knobs (documented constants; EB-calibratable later - S3c-5) --
 
 /** How far the reconciled committed plan's odds may sit below the fresh candidate's before
- *  feasibility/odds override stability and force a roll (§4 step 4). Mirrors S3b's
+ *  feasibility/odds override stability and force a roll. Mirrors S3b's
  *  `ARRANGE_ODDS_EPSILON` - a sticky plan may ride a sliver of slack, never a real drop. */
 export const ROLL_ODDS_EPSILON = 0.02;
 
@@ -45,32 +41,27 @@ export const ROLL_ODDS_EPSILON = 0.02;
  *  documented constant like `ArrangeWeights`' `1.0`; one switch-grouping's worth of `J`. */
 export const STABILITY_MARGIN = 1.0;
 
-/** How much each unit of near-weighted churn ADDS to the margin the candidate must clear - 
+/** How much each unit of near-weighted churn ADDS to the margin the candidate must clear -
  *  disrupting the imminent day costs more than tidying a far one. Standard receding-horizon
- *  hysteresis; a knob (S3c-5 EB-calibrates it against the user's accept/override behaviour). */
+ *  hysteresis; a knob. */
 export const CHURN_COST = 2.0;
 
 /** Nominal start of the active day, in minutes since local midnight (08:00). The intra-day
- *  frozen zone (S3c-4) measures "how much of today's deployable effort is behind us" from
+ *  frozen zone measures "how much of today's deployable effort is behind us" from
  *  here; the only new clock knob, documented + defensively bounded, EB-calibratable later
- *  (the S3c-5 lineage). See `design/s3c4-intraday-frozen-zone.md` §2. */
+ *  (the S3c-5 lineage). See `design/s3c4-intraday-frozen-zone.md`. */
 export const DAY_START_MIN = 8 * 60;
 
-/**
- * How many of TODAY's deployable effort-minutes are already behind us, or `null` to disable
- * the intra-day split (⇒ date-granular S3c-1 behaviour). Pure; the single place the
- * client-captured `LocalNow` is turned into the intra-day frozen-zone offset, so every
- * defensive fallback (design/s3c4 §2 decision #4) lives here and is unit-testable:
+/** How many of today's deployable minutes are already behind us, or null to disable the
+ *  intra-day split. The single place the client-captured LocalNow becomes a frozen-zone
+ *  offset, so all the defensive fallbacks live here:
  *
- *   - no `localNow`                     → null  (no clock ⇒ date-granular, the no-regret path)
- *   - `localNow.date !== anchor`        → null  (client's local day ≠ the plan's frozen-zone
- *                                                 day: midnight rollover / travel / skew)
- *   - `cap0 <= 0`                       → null  (no deployable time today ⇒ no day-0 queue to split)
+ *    no localNow              -> null (no clock, so date-granular)
+ *    localNow.date != anchor  -> null (midnight rollover / travel / skew)
+ *    cap0 <= 0                -> null (no time today, so no day-0 queue to split)
  *
- * Otherwise `clamp(minutesSinceMidnight − DAY_START_MIN, 0, cap0)`: before the day starts ⇒ 0
- * (whole day ahead); past the day's whole budget ⇒ `cap0` (everything today is behind ⇒ frozen).
- * `cap0` is today's deployable minutes (`capacities[0].capacityMinutes`).
- */
+ *  Otherwise clamp(minutesSinceMidnight - DAY_START_MIN, 0, cap0): before the day starts is
+ *  0 (whole day ahead), past the budget is cap0 (everything today is behind). */
 export function resolveElapsedToday(
   localNow: LocalNow | undefined,
   anchor: string,
@@ -83,22 +74,16 @@ export function resolveElapsedToday(
   return Math.min(cap0, Math.max(0, raw));
 }
 
-// --- Reconcile the committed order to the current task set (§4 step 2) -------
+// --- Reconcile the committed order to the current task set -------
 
-/**
- * Bring the committed order up to date with the CURRENT task set, defensively: drop ids that
- * went stale (done / deleted / deferred - the S1 "stale ids no-op" precedent) and insert
- * genuinely-new tasks (never committed) at their canonical rank. Kept tasks are refreshed to
- * their CURRENT field values (estimate/difficulty/impact may have changed since commit) while
- * preserving the committed sequence, so the reconciled order both replays the frozen intent
- * AND prices against live data. This is the defense that keeps the frozen zone from ever
- * freezing into a stale or infeasible plan (§4 "defensive freeze").
+/** Bring the committed order up to date with the current task set: drop stale ids (done,
+ *  deleted, deferred) and insert genuinely-new tasks at their canonical rank. Kept tasks are
+ *  refreshed to their CURRENT field values while preserving the committed sequence, so the
+ *  order replays the frozen intent but prices against live data. This is what keeps the
+ *  frozen zone from freezing into a stale or infeasible plan.
  *
- * `canonical` is the fresh `buildGlobalPlan(...).order` over the current set - the source of
- * both the live entry values and the canonical rank new tasks slot in by. Pure + deterministic:
- * when the committed id sequence already equals the canonical one (no drops, no new work) the
- * result is `canonical` itself, entry-for-entry - the no-regret anchor for the sticky path.
- */
+ *  `canonical` is the fresh buildGlobalPlan order over the current set. When the committed
+ *  sequence already equals it, the result IS canonical, entry for entry. */
 export function reconcileCommitted(
   committed: EffectiveOrderEntry[],
   canonical: EffectiveOrderEntry[],
@@ -138,11 +123,9 @@ export function reconcileCommitted(
 
 // --- Churn: how much adopting the candidate would disturb the committed plan -
 
-/** Per-task `(day, rank, startMin)` under the same bucketing the arranger uses (comfort-capped
- *  when a cap is in force): day = the pack offset, rank = the position within that day's
- *  contiguous run, startMin = the effort-minutes into that day the task begins (the running
- *  sum of same-day durations before it). The coordinates a churn comparison keys on; `startMin`
- *  is what the intra-day frozen zone (S3c-4) splits day-0 by. */
+/** Per-task (day, rank, startMin) under the same bucketing the arranger uses. day = pack
+ *  offset, rank = position within that day's run, startMin = effort-minutes into the day the
+ *  task begins. The coordinates churn keys on; startMin is what the frozen zone splits day-0 by. */
 function bucketPositions(
   order: EffectiveOrderEntry[],
   capacities: DayCapacity[],
@@ -174,17 +157,11 @@ function bucketPositions(
   return out;
 }
 
-/**
- * Near-weight of a change landing at position `(day, startMin)` - how much disturbing it counts
- * in the churn metric. Generalizes the S3c-1 day-index step `1/(1+day)` to a CONTINUOUS
- * *imminence* `1/(1 + day + f)` where `f ∈ [0,1)` is today's elapsed fraction (S3c-4): the
- * imminent part of today keeps weight ≈ 1 (frozen), while the later part relaxes smoothly toward
- * `1/2` - exactly `nearWeight` at day-1 - as the day slips, so re-planning the evening is cheap
- * but reshuffling the next task is not. `f` is 0 for every future day and whenever the intra-day
- * split is disabled (`elapsedToday == null`), so the whole metric is byte-identical to S3c-1
- * when no clock is supplied (no-regret). `cap0` is today's deployable minutes (the split's
- * denominator); `elapsedToday` is `resolveElapsedToday(...)`.
- */
+/** Near-weight of a change landing at (day, startMin) - how much disturbing it counts for.
+ *  Generalizes the day-index step 1/(1+day) to a continuous 1/(1 + day + f) where f is today's
+ *  elapsed fraction: the imminent part of today keeps weight ~1 while the later part relaxes
+ *  toward 1/2, so re-planning the evening is cheap but reshuffling the next task is not. f is 0
+ *  for every future day and whenever the intra-day split is off. */
 function nearWeight(
   day: number,
   startMin: number,
@@ -198,22 +175,16 @@ function nearWeight(
   return 1 / (1 + day + f);
 }
 
-/**
- * How much adopting `candidate` would disturb the plan the user is following (`committed`),
- * in `[0, 1]`: over the tasks present in BOTH orders within the near-horizon, the near-weighted
- * fraction whose `(day, rank)` moves. 0 iff every shared task keeps its exact slot; → 1 as the
- * shared tasks are fully displaced, with a today-swap weighing far more than a day-13 swap.
- * Tasks only in one order (new / removed work) are handled by reconciliation (§4 step 2), not
- * counted here - a material set change also moves the fingerprint and generally rolls anyway.
+/** How much adopting `candidate` would disturb the plan the user is following, in [0,1]: over
+ *  the tasks in BOTH orders within the near horizon, the near-weighted fraction whose (day,
+ *  rank) moves. 0 iff every shared task keeps its slot; a today-swap weighs far more than a
+ *  day-13 swap. Tasks in only one order are handled by reconciliation, not counted here.
  *
- * `elapsedToday` (S3c-4, from {@link resolveElapsedToday}; `null` ⇒ off) sharpens the frozen zone
- * WITHIN today: the moved-mass numerator discounts a later-today reshuffle (it disturbs less
- * still-frozen work as the day slips) while the imminent prefix stays full-weight, all against a
- * stable date-granular denominator so day≥1 work is untouched. `null` ⇒ byte-identical to S3c-1.
+ *  `elapsedToday` sharpens the frozen zone within today: the moved-mass numerator discounts a
+ *  later-today reshuffle while the imminent prefix stays full-weight, against a stable
+ *  date-granular denominator so day>=1 work is untouched.
  *
- * Pure + deterministic. `capacities`/`opts` must match what the arranger buckets by so the
- * `(day, rank)` coordinates line up with the priced plan.
- */
+ *  capacities/opts must match what the arranger buckets by or the coordinates won't line up. */
 export function churn(
   committed: EffectiveOrderEntry[],
   candidate: EffectiveOrderEntry[],
@@ -237,12 +208,10 @@ export function churn(
     const nearer =
       c.day < k.day || (c.day === k.day && c.startMin <= k.startMin) ? c : k;
     if (nearer.day >= horizon) continue; // beyond the arranged horizon - not disturbed
-    // Denominator: the STABLE date-granular near-weight (`elapsedToday = null` ⇒ `f = 0`), the
-    // total near-term mass at stake - clock-independent, so day≥1 work and the imminent prefix
-    // are weighed exactly as S3c-1. Numerator (moved tasks only): the intra-day-DISCOUNTED
-    // weight, so a later-today reshuffle disturbs less frozen mass as the day slips, while the
-    // imminent prefix (`f ≈ 0`) still costs full weight. Decoupling the two keeps S3c-4's effect
-    // confined to *within today*: `elapsedToday = null` ⇒ numerator == denominator ⇒ S3c-1 exact.
+    // Denominator is the STABLE date-granular weight (clock-independent, so day>=1 work is
+    // weighed the same either way). Numerator uses the intra-day-discounted weight, so a
+    // later-today reshuffle disturbs less frozen mass as the day slips while the imminent
+    // prefix still costs full weight. Decoupling the two confines the clock's effect to today.
     weightSum += nearWeight(nearer.day, nearer.startMin, null, cap0);
     if (c.day !== k.day || c.rank !== k.rank) {
       movedSum += nearWeight(nearer.day, nearer.startMin, elapsedToday, cap0);
@@ -251,17 +220,13 @@ export function churn(
   return weightSum > 0 ? movedSum / weightSum : 0;
 }
 
-// --- Stability gate: the churn-scaled hysteresis (§4 step 5) -----------------
+// --- Stability gate: the churn-scaled hysteresis -----------------
 
-/**
- * Should the fresh candidate be adopted over the sticky committed plan, on the soft objective
- * alone? Standard receding-horizon hysteresis: adopt only when the candidate's `J` improvement
- * (`deltaJ = J(committed) − J(candidate)`, positive ⇒ candidate better) clears a fixed margin
- * PLUS a churn-proportional penalty - so a marginal gain that would reshuffle today is refused,
- * while a large gain (or one that costs almost no churn) is taken. Pure. The odds/feasibility
- * override (§4 step 4) is applied by the caller BEFORE this - the gate only runs once the sticky
- * plan is already known odds-competitive, so it never trades odds for stability.
- */
+/** Should the candidate be adopted over the sticky plan on the soft objective alone? Standard
+ *  receding-horizon hysteresis: adopt only when deltaJ clears a fixed margin plus a
+ *  churn-proportional penalty, so a marginal gain that would reshuffle today is refused. The
+ *  odds/feasibility override runs in the caller BEFORE this, so the gate only sees plans
+ *  already known odds-competitive and never trades odds for stability. */
 export function stabilityGate(
   deltaJ: number,
   churnValue: number,
@@ -272,7 +237,7 @@ export function stabilityGate(
   return deltaJ >= margin + cost * churnValue;
 }
 
-// --- Hysteresis calibration (S3c-5 §5, the 🟡 tier) -------------------------
+// --- Hysteresis calibration -------------------------
 
 /** The material-roll revert rate the default hysteresis constants are tuned for: we tolerate
  *  up to ~1 in 5 automatic reshuffles being undone before the plan is judged too eager to roll.
@@ -296,22 +261,15 @@ export interface CalibratedHysteresis {
   churnCost: number;
 }
 
-/**
- * EB-calibrate the hysteresis knobs from the user's own roll-undo history (design
- * s3c5-shared-calibration-brain.md §4a/§5). The signal is churn REGRET: a `material` roll (an
- * automatic reshuffle of a real plan) that the user later undid. The revert rate over material
- * rolls is shrunk toward {@link HYSTERESIS_PRIOR_REVERT_RATE} with the shared seam
- * ({@link shrinkScalar}, `n` = material-roll count, `κ` = {@link CALIBRATE_KAPPA}), then mapped
- * monotonically to a single stiffness factor applied to BOTH knobs - one signal identifies one
- * degree of freedom, so we scale margin and cost together rather than pretend to separate them.
+/** Calibrate the hysteresis knobs from the user's roll-undo history. The signal is churn
+ *  regret: a `material` roll the user later undid. The revert rate is shrunk toward the prior
+ *  and mapped to a single stiffness factor applied to BOTH knobs - one signal identifies one
+ *  degree of freedom, so scaling them together beats pretending to separate them.
  *
- * Only `material` rolls count: `initial` (the first plan can't be regretted) and `anchor` (a
- * day-advance, not a reshuffle) are excluded. NO-REGRET is structural: no material rolls ⇒ `n = 0`
- * ⇒ `shrinkScalar` returns the prior ⇒ factor `= 1` ⇒ the exact `STABILITY_MARGIN`/`CHURN_COST`
- * constants, byte-for-byte. Reverts BELOW the prior rate clamp to the floor (`1.0`), so an
- * accepting user never loosens the tuned anti-thrash floor; reverts above it stiffen, bounded at
- * {@link HYSTERESIS_MAX_FACTOR}.
- */
+ *  Only material rolls count: `initial` can't be regretted and `anchor` is a day advance, not
+ *  a reshuffle. No material rolls means the prior, so the constants stand byte-for-byte.
+ *  Reverts below the prior rate clamp to 1.0, so an accepting user never loosens the
+ *  anti-thrash floor; reverts above it stiffen, bounded at HYSTERESIS_MAX_FACTOR. */
 export function calibrateHysteresis(
   rolls: readonly Pick<PlanRoll, "kind" | "revertedAt">[],
 ): CalibratedHysteresis {
@@ -332,7 +290,7 @@ export function calibrateHysteresis(
   };
 }
 
-// --- The roll cycle (§4) ----------------------------------------------------
+// --- The roll cycle ----------------------------------------------------
 
 /** Why the roll landed where it did - observability now, the seed of S3c-3's
  *  plain-language "why your plan changed" narration later. */
@@ -346,7 +304,6 @@ export type RollReason =
 export interface RollContext {
   /** The plan currently being followed, or null (first commit / schema-invalidated). */
   committed: CommittedPlan | null;
-  /** Fresh canonical order over the CURRENT task set (`buildGlobalPlan(...).order`). */
   canonicalOrder: EffectiveOrderEntry[];
   /** Fresh candidate arrangement (the `gatedReorder` display order) + its priced odds. */
   candidate: { order: EffectiveOrderEntry[]; allOnTime: number };
@@ -360,19 +317,16 @@ export interface RollContext {
   scoreJ: (order: EffectiveOrderEntry[]) => number;
   /** Day capacities for churn bucketing - must match what the arranger buckets by. */
   capacities: DayCapacity[];
-  /** Arrange options (window profile / comfort cap / thin buffer / horizon / weights) - 
+  /** Arrange options (window profile / comfort cap / thin buffer / horizon / weights) -
    *  the churn bucketing reads the comfort cap + horizon from here. */
   arrangeOpts?: ArrangeOrderOptions;
-  /** Client-captured local "now" (S3c-4). Refines the churn near-weight so the imminent part
+  /** Client-captured local "now". Refines the churn near-weight so the imminent part
    *  of TODAY stays frozen while the later part re-plans as the day slips. Absent (or its date
    *  ≠ `anchor`, or no day-0 capacity) ⇒ date-granular churn, byte-identical to S3c-1. Enters
    *  ONLY the churn weight - never odds, the persisted plan, or the client re-solve. */
   localNow?: LocalNow;
-  /** Odds slack before feasibility overrides stability (default ROLL_ODDS_EPSILON). */
   oddsEpsilon?: number;
-  /** Flat hysteresis margin (default STABILITY_MARGIN). */
   stabilityMargin?: number;
-  /** Churn penalty weight (default CHURN_COST). */
   churnCost?: number;
   /** Commit timestamp for the persisted plan (injected so the decision is deterministic in
    *  tests). Defaults to now. */
@@ -389,7 +343,7 @@ export interface RollDecisionResult {
   sticky: boolean;
   reason: RollReason;
   /** The winner as a plan to persist. The WRITE path upserts it iff `shouldPersist`; the
-   *  READ path ignores both fields (reads persist nothing - §Decisions #6). */
+   *  READ path ignores both fields - reads persist nothing. */
   toPersist: CommittedPlan;
   /** Whether the winner differs from the stored row enough to warrant a write (no row /
    *  order changed / anchor advanced / fingerprint moved). */
@@ -404,16 +358,13 @@ function sameIds(a: EffectiveOrderEntry[], b: EffectiveOrderEntry[]): boolean {
   return true;
 }
 
-/**
- * Run one roll of the receding horizon (§4). Returns which arrangement to follow now (sticky
- * committed vs. fresh candidate) and - for the write path - the plan to persist and whether a
- * write is warranted. The read path calls this to DECIDE WHAT TO SHOW and ignores the persist
- * fields (§Decisions #6: reads stay pure). Pure given its injected pricers.
+/** Run one roll of the receding horizon. Returns which arrangement to follow now and, for the
+ *  write path, what to persist. Read paths call this to decide what to SHOW and ignore the
+ *  persist fields. Pure given its injected pricers.
  *
- * The ordering of the checks IS the robustness contract: no-regret (1) and staleness (2) bypass
- * everything; feasibility/odds (4) dominate the soft stability gate (5); stickiness is only ever
- * reached once the committed plan is proven odds-competitive under the current situation.
- */
+ *  The order of the checks IS the contract: no-regret and staleness bypass everything;
+ *  feasibility/odds dominate the soft stability gate; stickiness is only reached once the
+ *  committed plan is proven odds-competitive. */
 export function rollDecision(ctx: RollContext): RollDecisionResult {
   const eps = ctx.oddsEpsilon ?? ROLL_ODDS_EPSILON;
   const nowISO = ctx.nowISO ?? new Date().toISOString();
@@ -494,24 +445,16 @@ export function rollDecision(ctx: RollContext): RollDecisionResult {
   };
 }
 
-// --- Roll-history classification (S3c-2 persist-on-roll) ----------------------
+// --- Roll-history classification ----------------------
 
-/**
- * Which history row (if any) a completed roll should append (design/s3c2-passive-roll-
- * history.md §3). A pure derivation from the decision plus the plan it superseded, so the
- * store's write path stays a thin persist and the classification is unit-testable next to
- * the roll cycle. Returns `null` for the STAY-PUT paths - a decision that persisted nothing,
- * or a sticky freshen (fingerprint / kept-task field refresh) that did NOT advance the
- * frozen-zone day - so the timeline records genuine plan changes, not every reload.
+/** Which history row a completed roll should append, derived purely from the decision plus
+ *  the plan it superseded, so the store's write path stays a thin persist. Null for the
+ *  stay-put paths - a decision that persisted nothing, or a sticky freshen that didn't advance
+ *  the frozen-zone day - so the timeline records real changes, not every reload.
  *
- *   `initial` - the first-ever commit; no prior arrangement to diff, so `prevJ` is null.
- *   `material` - adopted a fresh candidate over an existing plan (odds- or gate-driven, or
- *                a fully-stale reconcile); `prevJ` is the superseded plan's soft score.
- *   `anchor` - stayed sticky but the anchor advanced and the near part re-froze.
- *
- * `prior` is the committed plan as it was BEFORE this roll (the `ctx.committed` passed to
- * {@link rollDecision}).
- */
+ *    initial  - first-ever commit, no prior arrangement, so prevJ is null
+ *    material - adopted a fresh candidate over an existing plan
+ *    anchor   - stayed sticky but the anchor advanced and the near part re-froze */
 export function planRollKind(
   result: RollDecisionResult,
   prior: CommittedPlan | null,
@@ -533,7 +476,7 @@ export function planRollKind(
   return null;
 }
 
-// --- Roll-undo decision (S3c-2 §4) ------------------------------------------
+// --- Roll-undo decision ------------------------------------------
 
 export interface UndoRollContext {
   /** The arrangement the undone roll superseded - the immediately-prior roll's order, or,
@@ -551,7 +494,6 @@ export interface UndoRollContext {
   repriceAllOnTime: (order: EffectiveOrderEntry[]) => number;
   /** Score an order's soft `J` under the current arrange options (`arrangementScore`). */
   scoreJ: (order: EffectiveOrderEntry[]) => number;
-  /** Odds slack before feasibility overrides the restore (default ROLL_ODDS_EPSILON). */
   oddsEpsilon?: number;
 }
 
@@ -566,19 +508,12 @@ export interface UndoRollResult {
   restored: boolean;
 }
 
-/**
- * Decide what a roll-undo re-commits (design/s3c2-passive-roll-history.md §4). Undo takes the
- * arrangement a roll superseded and restores it, but only as a PREFERENCE SEED fed back through
- * the S3c-1 read path: `reconcileCommitted` against the current task set (dropping
- * completed/deleted tasks - never resurrecting them, the §7 robustness bar - and folding in new
- * work) then re-price. Odds/feasibility dominate exactly as {@link rollDecision}: the restore
- * holds against the SOFT stability gate - deliberately NOT re-running it, because the very gain
- * that caused the roll still holds and would instantly re-adopt the candidate, making undo a
- * no-op - but it CANNOT override the odds gate. A reconciled restore that is more than ε below
- * the fresh candidate's odds (or reconciles to nothing) yields to that candidate. Pure given its
- * injected pricers, so the whole decision is unit-testable with fakes; the store wraps it with
- * the real pricers + the reverted-guard (idempotency) + the re-commit.
- */
+/** Decide what a roll-undo re-commits. Undo takes the arrangement a roll superseded and
+ *  restores it, but only as a PREFERENCE SEED fed back through reconcileCommitted (dropping
+ *  completed/deleted tasks, never resurrecting them) and re-priced. It deliberately does NOT
+ *  re-run the soft stability gate - the gain that caused the roll still holds and would
+ *  instantly re-adopt the candidate, making undo a no-op - but it cannot override the odds
+ *  gate: a restore more than eps below the candidate's odds yields to it. */
 export function undoRollDecision(ctx: UndoRollContext): UndoRollResult {
   const eps = ctx.oddsEpsilon ?? ROLL_ODDS_EPSILON;
   const { order: reconciled } = reconcileCommitted(
@@ -601,15 +536,14 @@ export function undoRollDecision(ctx: UndoRollContext): UndoRollResult {
   };
 }
 
-// --- Drag-to-reorder honor + accrual (S3c-5 §6) -----------------------------
+// --- Drag-to-reorder honor + accrual -----------------------------
 
 /** A revealed-preference pair `userOrder ≻ appOrder` worth teaching the arranger's weights
- *  (design/s3c5-shared-calibration-brain.md §4b) - the shape persisted as a {@link PlanReorder}
+ *  (design/s3c5-shared-calibration-brain.md) - the shape persisted as a {@link PlanReorder}
  *  and later fed to `calibrateArrangeWeights` (S4). Only accrued for an odds-NEUTRAL drag. */
 export interface ReorderPair {
   /** The order the arranger showed the user (what they dragged away from) - the `φ(a*)` side. */
   appOrder: EffectiveOrderEntry[];
-  /** The user's honored order (what they now follow) - the `φ(u)` side. */
   userOrder: EffectiveOrderEntry[];
 }
 
@@ -620,7 +554,6 @@ export interface ReorderContext {
   /** The followed order's already-priced odds (`rollDecision.allOnTime`) - the neutrality
    *  baseline, so honoring a drag costs no extra Monte-Carlo for the "before". */
   followedOdds: number;
-  /** The user's dragged TODAY sequence (task ids, top-first) - from the client drop. */
   orderedTaskIds: string[];
   /** Fresh canonical order over the CURRENT task set (`buildGlobalPlan(...).order`) - the
    *  reconcile basis, so a completed/deleted-since task drops instead of resurrecting. */
@@ -630,12 +563,11 @@ export interface ReorderContext {
   repriceAllOnTime: (order: EffectiveOrderEntry[]) => number;
   /** Score an order's soft `J` under the current arrange options (`arrangementScore`). */
   scoreJ: (order: EffectiveOrderEntry[]) => number;
-  /** Odds slack that still counts as "neutral" both ways (default ROLL_ODDS_EPSILON). */
   oddsEpsilon?: number;
 }
 
 export interface ReorderResult {
-  /** The honored order to commit - the reconciled dragged order (design §9.1: a drag is ALWAYS
+  /** The honored order to commit - the reconciled dragged order (design: a drag is ALWAYS
    *  honored, even one that costs odds; only the accrual and the warning are odds-gated). */
   order: EffectiveOrderEntry[];
   /** Its soft `J` (for the re-committed plan). */
@@ -648,13 +580,9 @@ export interface ReorderResult {
   record: ReorderPair | null;
 }
 
-/**
- * Splice the user's dragged TODAY sequence into the followed cross-project order (S3c-5 §6): the
- * dragged tasks first, in the user's order, then the rest of the plan (the upcoming-days tail) in
- * place. Because the arranger packs greedily in order, today's tasks are a prefix of `followed`,
- * so this yields exactly "[today, user-ordered] ++ [upcoming, unchanged]". Ids no longer present
- * are skipped; tasks not in the dragged set keep their relative order. Pure.
- */
+/** Splice the dragged TODAY sequence into the followed cross-project order: the dragged tasks
+ *  first in the user's order, then the rest of the plan in place. The arranger packs greedily
+ *  in order, so today's tasks are a prefix of `followed`. Missing ids are skipped. */
 export function applyTodayReorder(
   followed: EffectiveOrderEntry[],
   orderedTaskIds: string[],
@@ -672,20 +600,13 @@ export function applyTodayReorder(
   return [...today, ...rest];
 }
 
-/**
- * Decide what a drag-to-reorder commits and whether it teaches the arrangement weights
- * (design/s3c5-shared-calibration-brain.md §6). The user's dragged order is a PREFERENCE SEED fed
- * through the same reconcile the roll-undo uses ({@link reconcileCommitted}) - dropping a
- * completed/deleted task, folding in new work - then re-priced and committed under the current
- * fingerprint (the store wraps this). Unlike {@link undoRollDecision}, the honor NEVER yields on
- * odds: a deliberate drag is always honored (design decision §9.1), even one that costs odds; the
- * odds comparison only sets a "this costs some odds" warning and gates the calibration accrual.
+/** Decide what a drag commits and whether it teaches the arrangement weights. The dragged
+ *  order is a preference seed fed through the same reconcile as roll-undo, then re-priced and
+ *  committed. Unlike an undo it NEVER yields on odds: a deliberate drag is always honored even
+ *  if it costs some, and the odds comparison only sets a warning.
  *
- * An observation is accrued ONLY when the honored order is odds-NEUTRAL vs the followed order
- * (`|Δodds| ≤ ε`) AND actually resequenced it - so calibration learns pure soft preference, never
- * an odds tradeoff (design §4b / §9.1). Pure given its injected pricers, so the whole decision is
- * unit-testable with fakes.
- */
+ *  An observation is accrued only when the honored order is odds-neutral AND actually
+ *  resequenced something, so calibration learns pure soft preference, never an odds tradeoff. */
 export function reorderDecision(ctx: ReorderContext): ReorderResult {
   const eps = ctx.oddsEpsilon ?? ROLL_ODDS_EPSILON;
   const seed = applyTodayReorder(ctx.followedOrder, ctx.orderedTaskIds);
@@ -706,14 +627,10 @@ export function reorderDecision(ctx: ReorderContext): ReorderResult {
   };
 }
 
-// --- Roll-cause diagnosis (S3c-3: "why your plan changed") -------------------
+// --- Roll-cause diagnosis -------------------
 
-/**
- * Why a roll reshaped the plan - the single salient cause a timeline row narrates. A pure
- * derivation from the roll's `kind` plus a diff of its order against the order it superseded
- * (the immediately-prior roll). Deterministic-first; an optional LLM narrator (S3c-3c) would
- * consume this same union later (design/s3c3-roll-cause-diagnosis.md §2/§3).
- */
+/** Why a roll reshaped the plan - the one salient cause a timeline row narrates. Derived from
+ *  the roll's `kind` plus a diff against the order it superseded. */
 export type RollCause =
   | { kind: "initial" } // first-ever commit - no prior arrangement to diff
   | { kind: "day-roll" } // the anchor advanced; the sticky near part re-froze
@@ -729,7 +646,7 @@ export interface RollDiagnosis {
 }
 
 /** The deterministic narration for a diagnosed cause. Kept beside {@link diagnoseRoll} so the
- *  whole diagnosis is one pure unit; an LLM variant (§6) would swap only this string layer. */
+ *  whole diagnosis is one pure unit; an LLM variant would swap only this string layer. */
 function rollSummary(cause: RollCause): string {
   switch (cause.kind) {
     case "initial":
@@ -751,20 +668,16 @@ function rollSummary(cause: RollCause): string {
   }
 }
 
-/**
- * Classify WHY a roll reshaped the plan. Pure: reads the roll's `kind` and diffs its arrangement
- * against the one it superseded (`prior` = the immediately-prior roll's order, null for the
- * first-ever commit). Fixed precedence, one salient cause per roll (the `diagnoseCause`
- * discipline) under the coarse `kind` gate:
+/** Classify why a roll reshaped the plan. Reads the roll's `kind` and diffs its arrangement
+ *  against the one it superseded. Fixed precedence, one cause per roll:
  *
- *   initial / anchor  → short-circuit (the trigger is known: first commit / date advance).
- *   material          → deadline-in > new-work > completed > reprioritized.
+ *    initial / anchor -> short-circuit, the trigger is already known
+ *    material         -> deadline-in > new-work > completed > reprioritized
  *
- * The deadline signal is the stored order's own `pulledAhead` + `projectName` (`allocate.ts`):
- * an EXISTING task not pulled ahead before and pulled now was leapfrogged by deadline pressure
- * (`deadline-in`). A BRAND-NEW pulled task is `new-work` - the cause is the addition, not a
- * deadline move - so the two never mis-fire into each other. Authors no odds.
- */
+ *  The deadline signal is the stored order's own `pulledAhead`: an EXISTING task not pulled
+ *  before and pulled now was leapfrogged by deadline pressure. A brand-new pulled task is
+ *  new-work instead - the cause is the addition, not a deadline move - so the two can't
+ *  mis-fire into each other. */
 function rollCause(
   roll: Pick<PlanRoll, "kind" | "order">,
   prior: Pick<PlanRoll, "order"> | null,
@@ -810,17 +723,13 @@ function rollCause(
   if (dropped.length > 0) return { kind: "completed", count: dropped.length };
 
   // Same task set, only resequenced - the honest generic. Model / value / capacity triggers
-  // that move neither the membership nor the pull-state land here; §6 defers naming them.
+  // that move neither the membership nor the pull-state land here; defers naming them.
   return { kind: "reprioritized" };
 }
 
-/**
- * Diagnose why a roll reshaped the plan (design/s3c3-roll-cause-diagnosis.md) - a structural
- * {@link RollCause} plus the plain-language line the timeline shows. Pure and client-safe;
- * authors no odds (it changes no arrangement, only narrates one). `prior` is the arrangement
- * this roll superseded (the immediately-prior roll's order), or null when `roll` was the
- * first-ever commit.
- */
+/** Diagnose why a roll reshaped the plan: a structural RollCause plus the plain-language line
+ *  the timeline shows. `prior` is the arrangement this roll superseded, or null when `roll` was
+ *  the first-ever commit. */
 export function diagnoseRoll(
   roll: Pick<PlanRoll, "kind" | "order">,
   prior: Pick<PlanRoll, "order"> | null,

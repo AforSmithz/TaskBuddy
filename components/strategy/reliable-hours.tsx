@@ -4,16 +4,14 @@ import { WINDOW_HOURS, WINDOW_LABELS } from "@/lib/velocity";
 import { Card, CardHeader } from "@/components/ui/card";
 import { cn } from "@/lib/cn";
 
-// "Your reliable hours" (OVERHAUL S2 slice C) - a read-only surface that shows how
-// work runs vs. your estimates by time-of-day window, derived from accruing work
-// sessions. Pure (no "use client") - server-rendered, no interaction. The
-// strategist consumes the same window read to temper its cause diagnosis, so it
-// lives on the Strategy page next to that reasoning.
+// "Your reliable hours" - a read-only surface showing how work runs vs your estimates by
+// time-of-day window, derived from accruing work sessions. Server-rendered, no interaction. The
+// strategist consumes the same window read to temper its cause diagnosis, so this lives on the
+// Strategy page next to that reasoning.
 //
-// Honest under sparse data: each window's multiplier is the SHRUNK value
-// (`exp(μ_s)`, already pulled toward your global norm), never a raw mean, so a thin
-// window can't over-state itself; thin windows are visually de-emphasized and the
-// whole surface falls back to a "still learning" state until any window has signal.
+// Honest under sparse data: each window's multiplier is the SHRUNK value, already pulled toward
+// your global norm, never a raw mean - so a thin window can't over-state itself. Thin windows are
+// de-emphasized and the whole surface falls back to "still learning" until something has signal.
 
 /** A window needs at least this many sessions to render as a confident bar. */
 const MIN_WINDOW_SAMPLES = 3;
@@ -87,11 +85,8 @@ function WindowRow({ w }: { w: EnergyWindow }) {
   );
 }
 
-/**
- * The "your reliable hours" card. Render only when there's at least one session
- * (the page guards `totalSessions > 0`); below any confident window it shows the
- * still-learning state rather than dressing up noise.
- */
+/** The reliable-hours card. Rendered only when there's at least one session; below any confident
+ *  window it shows the still-learning state rather than dressing up noise. */
 export function ReliableHours({ windows }: { windows: EnergyWindow[] }) {
   const hasSignal = windows.some((w) => w.sampleSize >= MIN_WINDOW_SAMPLES);
   // Only windows you've actually worked in - an unobserved window is just the

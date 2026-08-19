@@ -3,26 +3,21 @@
  *
  *   npx tsx aws/harness/offline.ts
  *
- * This exists because the AWS account is not yet activated, so the usual
- * discipline - offline harness, then a live Playwright pass, then commit -
- * cannot reach its second step. Everything below is a claim made somewhere in
- * this migration that would otherwise be asserted only in prose, and that fails
- * SILENTLY rather than loudly if it is wrong.
+ * Exists because the AWS account isn't activated yet, so the usual offline-then-live-then-commit
+ * discipline can't reach its second step. Everything below is a claim made somewhere in this
+ * migration that would otherwise only be asserted in prose, and that fails SILENTLY if wrong.
  *
- * It deliberately does NOT test the parts a live pass must cover: IAM auth
- * against Aurora, the Cognito migration trigger, and a real Bedrock call. Those
- * are listed in aws/SPEC.md as the live checklist.
+ * Deliberately does NOT cover the parts a live pass must: IAM auth against Aurora, the Cognito
+ * migration trigger, and a real Bedrock call. Those are the live checklist in aws/SPEC.md.
  */
 import Module from "module";
 import path from "path";
 
 // --- shim `server-only` before anything imports it --------------------------
-// Same trick the Azure harnesses used: `server-only` is resolved by Next's own
-// build alias and is not an installed package, so plain Node cannot load any
-// module under lib/ without this.
-// `__dirname`, not import.meta.url: tsx compiles this repo's .ts as CommonJS
-// (there is no "type": "module" in package.json), so import.meta is unavailable
-// and top-level await is a transform error. Hence the async main() below too.
+// Same trick the Azure harnesses used: server-only is resolved by Next's build alias and isn't
+// an installed package, so plain Node can't load anything under lib/ without this. __dirname
+// rather than import.meta.url, because tsx compiles this repo as CommonJS - hence the async
+// main() below too.
 const shimPath = path.join(__dirname, "..", "lambda", "shims", "server-only.js");
 const originalResolve = (
   Module as unknown as { _resolveFilename: (r: string, ...a: unknown[]) => string }
@@ -60,27 +55,26 @@ function checkThat(name: string, predicate: boolean, detail: string): void {
 }
 
 async function main(): Promise<void> {
-  const { splitMessages } = await import("../../lib/bedrock");
+  const { splitMessages } = await import("@/lib/bedrock");
   const { bedrockEffort, isLLMConfigured, modelChain } = await import(
-    "../../lib/bedrock-config"
+    "@/lib/bedrock-config"
   );
-  const { runAsUser, ambientUserId } = await import("../../lib/db/context");
+  const { runAsUser, ambientUserId } = await import("@/lib/db/context");
   const { attemptOf, isFinalAttempt, parse } = await import(
-    "../lambda/llm-worker/index"
+    "@/aws/lambda/llm-worker/index"
   );
   const { JOB_STALE_MS, isJobAbandoned, isTerminalJobStatus } = await import(
-    "../../lib/types"
+    "@/lib/types"
   );
   const { WORKER_MAX_RECEIVE_COUNT, WORKER_TIMEOUT_SECONDS, WORKER_VISIBILITY_TIMEOUT_SECONDS } =
-    await import("../infra/lib/config");
+    await import("@/aws/infra/lib/config");
 
   // ===========================================================================
   console.log("\nsplitMessages - system prompts must not become user turns");
-  // ===========================================================================
-  // THE HIGHEST-VALUE ASSERTION IN THIS FILE. Every one of the eleven call sites
-  // builds [{role:"system"}, {role:"user"}]. Converse takes system prompts in a
-  // separate array; passing them through as messages still produces an answer,
-  // just one where the instructions were content. There is no error to notice.
+  // The highest-value assertion in this file. All eleven call sites build
+  // [{role:"system"}, {role:"user"}], and Converse takes system prompts in a separate array.
+  // Passing them through as messages still produces an answer, just one where the instructions
+  // were content. There's no error to notice.
   {
     const { system, turns } = splitMessages([
       { role: "system", content: "SYS" },
@@ -178,11 +172,9 @@ async function main(): Promise<void> {
 
   // ===========================================================================
   console.log("\nrunAsUser - tenant isolation across a reused execution environment");
-  // ===========================================================================
-  // THE OTHER ASSERTION THAT MATTERS. A Lambda execution environment is reused,
-  // so an ambient user held in a module-scope variable would survive from one job
-  // to the next and job B would run as job A's user - writing one account's data
-  // into another's. These check the ALS actually scopes.
+  // The other assertion that matters. A Lambda execution environment is reused, so an ambient
+  // user in a module-scope variable would survive between jobs and job B would run as job A's
+  // user, writing one account's data into another's. These check the ALS actually scopes.
   {
     check("no ambient user outside runAsUser", ambientUserId(), null);
 
@@ -285,11 +277,9 @@ async function main(): Promise<void> {
 
   // ===========================================================================
   console.log("\nretry accounting - a transient failure must not read as final");
-  // ===========================================================================
-  // The worker writes 'retrying' or 'failed' on the row the browser is watching,
-  // and only the receive count tells the two apart. An off-by-one here shows the
-  // user a permanent failure while SQS is still retrying - or leaves a job that
-  // already reached the DLQ spinning on the page forever.
+  // The worker writes 'retrying' or 'failed' on the row the browser is watching, and only the
+  // receive count tells them apart. An off-by-one shows a permanent failure while SQS is still
+  // retrying, or leaves a DLQ'd job spinning on the page forever.
   {
     const rec = (attributes?: Record<string, string>) =>
       ({ body: "{}", messageId: "m1", attributes }) as unknown as Parameters<
@@ -335,11 +325,9 @@ async function main(): Promise<void> {
     check("succeeded is terminal", isTerminalJobStatus("succeeded"), true);
     check("retrying is NOT terminal", isTerminalJobStatus("retrying"), false);
 
-    // THE CROSS-FILE ASSERTION THAT MATTERS. A failed delivery does not come
-    // back immediately - it reappears when the visibility timeout expires - so
-    // if the UI gives up sooner than the queue gives up, it declares dead a job
-    // SQS is still going to run, and the retry button pays for the same model
-    // call twice.
+    // A failed delivery doesn't come back immediately, it reappears when the visibility timeout
+    // expires - so if the UI gives up sooner than the queue does, it declares dead a job SQS is
+    // still going to run, and the retry button pays for the same model call twice.
     const queueWorstCaseMs =
       WORKER_MAX_RECEIVE_COUNT * WORKER_VISIBILITY_TIMEOUT_SECONDS * 1000;
     checkThat(
@@ -358,14 +346,12 @@ async function main(): Promise<void> {
 
   // ===========================================================================
   console.log("\nquery builder - IS NULL is not reachable through .eq()");
-  // ===========================================================================
-  // The portfolio-wide job has no subject, so its lookup is `subject_id IS
-  // NULL`. Written as `.eq("subject_id", null)` that binds a parameter and
-  // becomes `subject_id = NULL`, which is never true - the query returns
-  // nothing, no error, and the page shows an idle button beside a job that is
-  // still running.
+  // The portfolio-wide job has no subject, so its lookup is `subject_id IS NULL`. Written as
+  // .eq("subject_id", null) that binds a parameter and becomes `subject_id = NULL`, which is
+  // never true - the query returns nothing, no error, and the page shows an idle button beside a
+  // job that's still running.
   {
-    const { QueryBuilder } = await import("../../lib/db/query");
+    const { QueryBuilder } = await import("@/lib/db/query");
     const sql = new QueryBuilder("job_runs", null)
       .select("id")
       .eq("type", "strategy.refresh.requested")
@@ -385,11 +371,9 @@ async function main(): Promise<void> {
 
   // ===========================================================================
   console.log("\nschema - job_runs is RLS-protected on both loops");
-  // ===========================================================================
-  // 01_schema.sql enables RLS from one array of table names and creates the
-  // owner policies from another. A table in the first but not the second has
-  // RLS on with NO policy, which denies everything - and the worker's first
-  // status write then fails with an error that names no policy at all.
+  // 01_schema.sql enables RLS from one array of table names and creates the owner policies from
+  // another. A table in the first but not the second has RLS on with NO policy, which denies
+  // everything - and the worker's first status write then fails naming no policy at all.
   {
     const fs = await import("fs");
     const sql = fs.readFileSync(path.join(__dirname, "..", "sql", "01_schema.sql"), "utf8");

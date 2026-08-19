@@ -30,41 +30,29 @@ export interface WebStackProps extends StackProps {
   readonly jobQueue: sqs.Queue;
 }
 
-/** Where aws/scripts/build-web.sh assembles the deployable bundle. */
 const WEB_BUNDLE = "../.build/web";
 const STATIC_BUNDLE = "../.build/static";
 
 /**
  * The synchronous web tier: Next.js on Lambda, fronted by CloudFront.
  *
- * ---------------------------------------------------------------------------
- * WHY THE REAL `next start`, NOT OPENNEXT
- * ---------------------------------------------------------------------------
- * The installed Next 16.2.6 documentation
- * (node_modules/next/dist/docs/01-app/02-guides/deploying-to-platforms.md) is
- * unusually blunt about this: "To run Next.js, your platform needs a Node.js
- * server. That's it. A single `next start` process handles every Next.js
- * feature correctly." The AWS Lambda Web Adapter runs that process unmodified,
- * so Server Actions, `proxy.ts`, `after()` and PPR work by construction rather
- * than by an adapter re-implementing them. OpenNext still targets Next 15.
+ * The real `next start`, not OpenNext. The installed Next 16.2.6 docs are blunt about it: "To
+ * run Next.js, your platform needs a Node.js server. That's it. A single next start process
+ * handles every Next.js feature correctly." The Lambda Web Adapter runs that process unmodified,
+ * so Server Actions, proxy.ts, after() and PPR work by construction rather than by an adapter
+ * re-implementing them. OpenNext still targets Next 15.
  *
- * ---------------------------------------------------------------------------
- * WHY A FUNCTION URL AND NOT API GATEWAY
- * ---------------------------------------------------------------------------
- * From the same feature matrix: Server Actions are "POST requests with
- * streaming response" and are marked Streaming: Required. API Gateway HTTP API
- * buffers the response and hard-caps at 30 seconds, which cannot be raised. A
- * Function URL in RESPONSE_STREAM mode streams and inherits the function's own
- * timeout instead. This is a correctness constraint, not a performance
- * preference: buffered Server Actions are a broken app, not a slow one.
+ * A Function URL, not API Gateway. Server Actions are POST requests with streaming responses and
+ * are marked Streaming: Required; API Gateway HTTP API buffers the response and hard-caps at 30
+ * seconds, which can't be raised. A Function URL in RESPONSE_STREAM mode streams and inherits
+ * the function's own timeout. This is a correctness constraint, not a performance preference
+ * buffered Server Actions are a broken app, not a slow one.
  *
- * The URL is `authType: NONE` and is kept private by a secret header that only
- * CloudFront sends, NOT by Origin Access Control. OAC was the original design
- * and had to be abandoned: it signs the request body, Lambda refuses unsigned
- * payloads, and a browser cannot compute the `x-amz-content-sha256` that would
- * satisfy it - so every Server Action POST returned a signature mismatch while
- * GETs sailed through. See ORIGIN_SECRET_HEADER in config.ts for the full
- * measurement and for what this control does and does not buy.
+ * The URL is authType NONE and kept private by a secret header only CloudFront sends, not by
+ * Origin Access Control. OAC was the original design and had to be abandoned: it signs the
+ * request body, Lambda refuses unsigned payloads, and a browser can't compute the
+ * x-amz-content-sha256 that would satisfy it, so every Server Action POST returned a signature
+ * mismatch while GETs sailed through. See ORIGIN_SECRET_HEADER in config.ts.
  */
 export class WebStack extends Stack {
   readonly distribution: cloudfront.Distribution;
@@ -72,16 +60,13 @@ export class WebStack extends Stack {
   constructor(scope: Construct, id: string, props: WebStackProps) {
     super(scope, id, props);
 
-    // Supplied at deploy time, like TASKBUDDY_ALERT_EMAIL, and required rather
-    // than defaulted. A generated-on-synth value would change on every deploy
-    // and a hardcoded one would be in git; an absent one must fail here, because
-    // the failure mode otherwise is an origin that accepts anything.
+    // Supplied at deploy time and required rather than defaulted: a generated-on-synth value
+    // would change every deploy and a hardcoded one would be in git, while an absent one must
+    // fail here because the alternative is an origin that accepts anything.
     //
-    // It does land in the CloudFormation template and in the function's
-    // environment, so it is readable by anyone with CloudFormation or Lambda
-    // read access to this account. That is the accepted limit of this control:
-    // CloudFront custom headers are template literals, and CloudFront cannot
-    // read Secrets Manager.
+    // It does land in the template and the function's environment, so anyone with CloudFormation
+    // or Lambda read access can read it. That's the accepted limit of this control - CloudFront
+    // custom headers are template literals and CloudFront can't read Secrets Manager.
     const originSecret = process.env.TASKBUDDY_ORIGIN_SECRET;
     if (!originSecret) {
       throw new Error(
@@ -162,10 +147,9 @@ export class WebStack extends Stack {
     // See auth-stack.ts for why this is grantConnect and not a literal ARN.
     props.cluster.grantConnect(web, DB_APP_ROLE);
 
-    // Admin* rather than the public sign-up/sign-in APIs, because
-    // `selfSignUpEnabled` is false and the migration trigger requires
-    // ADMIN_USER_PASSWORD_AUTH. DescribeUserPoolClient is what lets the client
-    // secret stay in Cognito instead of being copied into an env var.
+    // Admin* rather than the public sign-up/sign-in APIs, because selfSignUpEnabled is false and
+    // the migration trigger requires ADMIN_USER_PASSWORD_AUTH. DescribeUserPoolClient is what
+    // lets the client secret stay in Cognito instead of an env var.
     web.addToRolePolicy(
       new iam.PolicyStatement({
         actions: [
@@ -185,10 +169,9 @@ export class WebStack extends Stack {
     props.jobQueue.grantSendMessages(web);
 
     const fnUrl = web.addFunctionUrl({
-      // NONE, not AWS_IAM, and ORIGIN_SECRET_HEADER is what replaces it.
-      // See config.ts for the measurement that forced this: OAC + AWS_IAM
-      // signs the request body, and a browser cannot produce the payload hash
-      // Lambda then demands, so every Server Action POST 403s.
+    // NONE, not AWS_IAM - ORIGIN_SECRET_HEADER replaces it. See config.ts: OAC + AWS_IAM signs
+    // the request body and a browser can't produce the payload hash Lambda then demands, so
+    // every Server Action POST 403s.
       authType: lambda.FunctionUrlAuthType.NONE,
       invokeMode: lambda.InvokeMode.RESPONSE_STREAM,
     });
@@ -220,10 +203,9 @@ export class WebStack extends Stack {
       // Not `withOriginAccessControl`. OAC would sign these requests, and a
       // signed body is exactly what browsers cannot supply - see config.ts.
       customHeaders: { [ORIGIN_SECRET_HEADER]: originSecret },
-      // The origin ceiling that actually bites. CloudFront gives up on the
-      // origin after this many seconds regardless of the Lambda timeout, so it
-      // is the real budget for a server render - and the reason 43-second LLM
-      // work has to live on the queue rather than in a Server Action.
+      // The origin ceiling that actually bites. CloudFront gives up after() this many seconds
+      // regardless of the Lambda timeout, so it's the real budget for a server render - and why
+      // 43-second LLM work lives on the queue.
       readTimeout: Duration.seconds(60),
       keepaliveTimeout: Duration.seconds(60),
     });
@@ -261,10 +243,9 @@ export class WebStack extends Stack {
       enableLogging: false,
     });
 
-    // Uploaded from the SAME build that produced the Lambda bundle. Next.js
-    // content-hashes these filenames per build, so a static upload from one
-    // build against a server from another yields 404s on every chunk - a
-    // failure that looks like a CloudFront misconfiguration and is not.
+    // Uploaded from the SAME build that produced the Lambda bundle. Next content-hashes these
+    // filenames per build, so static from one build against a server from another 404s on every
+    // chunk - a failure that looks like a CloudFront misconfiguration and isn't.
     new s3deploy.BucketDeployment(this, "StaticAssets", {
       sources: [s3deploy.Source.asset(STATIC_BUNDLE)],
       destinationBucket: assets,

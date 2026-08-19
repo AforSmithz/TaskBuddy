@@ -7,12 +7,9 @@ import * as logs from "aws-cdk-lib/aws-logs";
 import type { Construct } from "constructs";
 import { LOG_RETENTION_DAYS } from "./config";
 
-/**
- * The repository root, from aws/infra (where cdk.json lives and therefore where
- * the CLI runs). Every handler imports application code out of lib/, so esbuild
- * has to be told the project is the whole repo - otherwise NodejsFunction
- * refuses the entry with PathNotUnderRoot.
- */
+/** The repository root, from aws/infra (where cdk.json lives and therefore where the CLI runs).
+ *  Every handler imports application code out of lib/, so esbuild has to be told the project is
+ *  the whole repo, or NodejsFunction refuses the entry with PathNotUnderRoot. */
 const REPO_ROOT = path.resolve(process.cwd(), "..", "..");
 
 export interface NodeFunctionProps {
@@ -28,19 +25,14 @@ export interface NodeFunctionProps {
   readonly reservedConcurrentExecutions?: number;
 }
 
-/**
- * One place for every default a Lambda in this stack should have, so that
- * "which functions have tracing on?" is not a question anyone has to answer by
- * reading five files.
+/** One place for every default a Lambda in this stack should have, so "which functions have
+ *  tracing on?" isn't a question you answer by reading five files.
  *
- * arm64 throughout - ~34% better price-performance, and nothing in the
- * dependency set is architecture-specific.
- *
- * `AWS_NODEJS_CONNECTION_REUSE_ENABLED` is set on every function deliberately.
- * Without it the AWS SDK opens a new TCP+TLS connection per API call, which on
- * a warm Lambda making repeated Bedrock or Cognito calls is a measurable share
- * of the latency and, because Lambda bills wall-clock, of the cost.
- */
+ *  arm64 throughout - ~34% better price-performance, and nothing in the dep set cares.
+ *  AWS_NODEJS_CONNECTION_REUSE_ENABLED is set on every function deliberately: without it the SDK
+ *  opens a new TCP+TLS connection per API call, which on a warm Lambda making repeated Bedrock or
+ *  Cognito calls is a measurable share of the latency and, since Lambda bills wall-clock, of the
+ *  cost. */
 export function nodeFunction(
   scope: Construct,
   id: string,
@@ -82,14 +74,12 @@ export function nodeFunction(
       target: "node22",
       minify: true,
       sourceMap: true,
-      // The v3 SDK is present in the managed runtime, but bundling it pins the
-      // version rather than inheriting whatever AWS ships that week. Bedrock
-      // and Cognito shapes both move; an unpinned SDK is a silent upgrade on
-      // someone else's schedule.
-      // `pg-native` is an optional peer that node-postgres requires lazily and
-      // guards in a try/catch. esbuild resolves it statically and fails the
-      // build; marking it external leaves the guarded require in place, where
-      // pg handles the miss exactly as it is designed to.
+      // The v3 SDK is in the managed runtime, but bundling it pins the version rather than
+      // inheriting whatever AWS ships that week. Bedrock and Cognito shapes both move, and an
+      // unpinned SDK is a silent upgrade on someone else's schedule.
+      // pg-native is an optional peer node-postgres requires lazily inside a try/catch. esbuild
+      // resolves it statically and fails the build; marking it external leaves the guarded
+      // require in place, where pg handles the miss as designed.
       externalModules: props.bundlingExternalModules ?? ["pg-native"],
       esbuildArgs: {
         // Lets a Lambda bundle import anything under lib/. See the shim.

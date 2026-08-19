@@ -1,29 +1,21 @@
-// The velocity model - substrate S2 (OVERHAUL §5a), the learning-loop layer that
-// turns the one global estimation bias into a DIFFERENTIATED-BUT-GRACEFUL per-
-// segment `(meanLog, sigma)`. It is what makes vision §5 real (per-domain
-// multipliers - "focused practice runs 1.4×", "Work runs over") without the
-// overfitting naïve hard segmentation would cause under sparse history.
+// The velocity model - turns the one global estimation bias into a differentiated-but-graceful
+// per-segment (meanLog, sigma). This is what makes per-domain multipliers real ("focused
+// practice runs 1.4x", "Work runs over") without the overfitting naive hard segmentation would
+// cause under sparse history.
 //
-// Pure + deterministic, types-only imports (no DB, no `server-only`) - the
-// calibration/solver side of §0's propose/dispose, NEVER the LLM. It authors no
-// probability: it only sharpens the per-task *inputs* the `forecast.ts` Monte
-// Carlo already consumes. Mirrors `lib/buffer.ts` / `lib/grounding.ts`; unit-
-// testable via the compiled-to-`/tmp` node harness. See
-// `design/s2-context-tags-and-shrinkage.md`.
+// Pure and deterministic, types-only imports. It authors no probability - it only sharpens the
+// per-task INPUTS the forecast Monte Carlo already consumes. See
+// design/s2-context-tags-and-shrinkage.md.
 //
-// The crux is one blend, in log space (where the residuals are ~Normal - the same
-// reason `estimationModel` works there):
+// The crux is one blend, in log space (where residuals are ~Normal):
 //
-//     μ_s = μ₀ + B_s·(x̄_s − μ₀),   B_s = n_s / (n_s + κ)
+//     mu_s = mu0 + B_s*(xbar_s - mu0),   B_s = n_s / (n_s + kappa)
 //
-// where μ₀/σ are the GLOBAL pooled prior (`estimationModel`), x̄_s/n_s are a
-// segment's own residual mean + count, and κ is the shrinkage strength. This is
-// empirical-Bayes / James - Stein partial pooling. No-regret:
-//   • n_s = 0   → B = 0 → μ_s = μ₀   (a segment with no history is EXACTLY today's number)
-//   • n_s = κ   → B = 0.5            (κ = "own samples needed to earn half weight")
-//   • n_s → ∞   → B → 1 → μ_s = x̄_s (the fully differentiated model the vision promises)
-// With a single segment, x̄_s IS the global mean, so every μ_s = μ₀ ⇒ bit-
-// identical to today. It can only sharpen, never start worse than the prior.
+// mu0/sigma are the global pooled prior, xbar_s/n_s a segment's own residual mean and count,
+// kappa the shrinkage strength. Empirical-Bayes partial pooling, so: n_s = 0 gives B = 0 and
+// exactly today's number; n_s = kappa gives B = 0.5 ("own samples needed for half weight");
+// n_s -> inf gives the fully differentiated model. With a single segment xbar_s IS the global
+// mean, so it can only sharpen, never start worse than the prior.
 
 import type {
   EstimationModel,
@@ -31,19 +23,15 @@ import type {
   Task,
   TimeWindow,
   WorkSession,
-} from "./types";
-import { MIN_ESTIMATION_SAMPLES } from "./types";
+} from "@/lib/types";
+import { MIN_ESTIMATION_SAMPLES } from "@/lib/types";
 
 // `TimeWindow` lives in types.ts (the `WorkSession` row uses it too); re-exported
 // here so velocity's consumers keep a single import surface for the segment axes.
-export type { TimeWindow } from "./types";
+export type { TimeWindow } from "@/lib/types";
 
-/**
- * One residual observation `log(actual / estimated)` on a completed unit of work,
- * tagged with the context we might key a segment by. Slice A populates
- * `residualLog` + `domain` only; `weekday`/`window` await session-clock capture
- * (Slice B/C) and are never read while we key by `domain`.
- */
+/** One residual observation log(actual / estimated) on a completed unit of work, tagged with
+ *  the context we might key a segment by. */
 export interface ResidualSample {
   /** `log(actual / estimated)` - exactly `estimationModel`'s per-task ingredient. */
   residualLog: number;
@@ -55,12 +43,9 @@ export interface ResidualSample {
   window: TimeWindow;
 }
 
-/**
- * A fitted, shrunk velocity model over one segment axis. `forSegment(key)` is the
- * per-task `(meanLog, sigma)` the forecast samples with; an unknown/empty key (a
- * brand-new domain, or any key before the loop has data) returns the global prior
- * verbatim - so it forecasts identically to today.
- */
+/** A fitted, shrunk velocity model over one segment axis. forSegment(key) is the per-task
+ *  (meanLog, sigma) the forecast samples with; an unknown or empty key returns the global prior
+ *  verbatim, so it forecasts identically to today. */
 export interface VelocityModel {
   /** The pool - today's global `estimationModel`. The prior every segment shrinks toward. */
   global: EstimationModel;
@@ -68,29 +53,18 @@ export interface VelocityModel {
   forSegment(key: string): EstimationModel;
 }
 
-/**
- * Default shrinkage strength κ - "how many of its own samples a segment needs to
- * earn half its weight" (`B_s = n_s/(n_s+κ)`; at `n_s = κ`, `B = 0.5`). Deliberately
- * prior-favoring: ~8 own completions for half weight, ~24 for 75%, so a domain has
- * to CLEARLY and REPEATEDLY diverge before it overrides the pooled bias. The
- * empirical-Bayes estimate `κ̂ = σ²/τ̂²` is the named follow-on (design decision 2),
- * calibrated by S2's own loop once cross-segment data is dense.
- */
+/** Shrinkage strength kappa - how many of its own samples a segment needs to earn half its
+ *  weight. Deliberately prior-favoring: ~8 own completions for half, ~24 for 75%, so a domain
+ *  has to clearly and repeatedly diverge before it overrides the pooled bias. */
 export const SHRINKAGE_STRENGTH = 8;
 
-/**
- * Fit a velocity model: shrink each segment's residual mean toward the global
- * prior. Segment-key-AGNOSTIC - `keyOf` picks the axis (`s => s.domain` for Slice
- * A; `s => s.window` / `s => s.weekday` for Slice C), so the same core serves
- * every axis.
+/** Fit a velocity model by shrinking each segment's residual mean toward the global prior.
+ *  Segment-key agnostic - `keyOf` picks the axis, so the same core serves every one.
  *
- * Global trust gate (no double-counting the threshold): if the GLOBAL pool is
- * below `MIN_ESTIMATION_SAMPLES`, `estimationModel` already returned the unbiased
- * default and every shrunk segment would only pull back to it - so we skip
- * segmentation entirely and hand back the prior for every key. Per-segment
- * sparsity is handled by the shrinkage itself, not a second hard cutoff. As
- * `κ → ∞`, likewise everything → global. Either way: identical to today.
- */
+ *  Global trust gate: if the GLOBAL pool is below MIN_ESTIMATION_SAMPLES, estimationModel
+ *  already returned the unbiased default and every shrunk segment would only pull back to it, so
+ *  skip segmentation entirely. Per-segment sparsity is handled by the shrinkage itself, not a
+ *  second hard cutoff. */
 export function fitVelocityModel(
   samples: ResidualSample[],
   keyOf: (s: ResidualSample) => string,
@@ -129,14 +103,10 @@ export function fitVelocityModel(
   };
 }
 
-/**
- * Build domain-keyed residual samples from completed tasks - the Slice A source.
- * The gate MUST match `estimationModel` exactly (`done` + estimate > 0 + actual >
- * 0), so the segment residuals are precisely the pool the global prior averages
- * over: that exact correspondence is what makes a single domain reduce to the
- * global number. `weekday`/`window` are inert here (no session clock yet - Slice
- * B/C); keyed by `domain`, they're never read.
- */
+/** Build domain-keyed residual samples from completed tasks. The gate MUST match
+ *  estimationModel exactly (done + estimate > 0 + actual > 0) so the segment residuals are
+ *  precisely the pool the global prior averages over - that correspondence is what makes a
+ *  single domain reduce to the global number. */
 export function taskResidualSamples(tasks: Task[]): ResidualSample[] {
   const out: ResidualSample[] = [];
   for (const t of tasks) {
@@ -152,18 +122,13 @@ export function taskResidualSamples(tasks: Task[]): ResidualSample[] {
   return out;
 }
 
-/** The forecast-facing slice of a fitted segment model (drops `sampleSize`). */
 export function toSegmentModel(m: EstimationModel): SegmentModel {
   return { meanLog: m.meanLog, sigma: m.sigma };
 }
 
-/**
- * The local time-of-day bucket for an hour 0 - 23 (OVERHAUL S2 window axis). Fixed
- * boundaries - early 05 - 09 · morning 09 - 12 · afternoon 12 - 17 · evening 17 - 22 ·
- * night 22 - 05. Call with the user's LOCAL hour (`new Date().getHours()` on the
- * client) so the window is in the user's own timezone, never re-derived from a UTC
- * instant. Used by `localSessionStamp` (slice B capture) and the slice-C energy reads.
- */
+/** Local time-of-day bucket for an hour 0-23: early 05-09, morning 09-12, afternoon 12-17,
+ *  evening 17-22, night 22-05. Call with the user's LOCAL hour so the window is in their own
+ *  timezone, never re-derived from a UTC instant. */
 export function windowOf(localHour: number): TimeWindow {
   if (localHour >= 5 && localHour < 9) return "early";
   if (localHour >= 9 && localHour < 12) return "morning";
@@ -199,11 +164,8 @@ export const WINDOW_HOURS: Record<TimeWindow, string> = {
   night: "22–05",
 };
 
-/**
- * One time-of-day window's learned velocity (OVERHAUL S2 slice C). The READ the
- * "your reliable hours" surface renders and the S3b arrangement layer will consume
- * to place hard work in good hours.
- */
+/** One time-of-day window's learned velocity - the read behind "your reliable hours" and the
+ *  arrangement layer's hard-work placement. */
 export interface EnergyWindow {
   window: TimeWindow;
   /** `exp(meanLog)` - work runs this × your estimate here. >1 = slower, <1 = faster. */
@@ -212,13 +174,10 @@ export interface EnergyWindow {
   sampleSize: number;
 }
 
-/**
- * The per-window velocity multipliers - the same shrinkage core (`fitVelocityModel`)
- * keyed by `window`, exposed as a stable, all-windows read. A window with no
- * sessions reports `sampleSize: 0` and the global multiplier (`exp(μ₀)`), so a
- * consumer can de-emphasize it; a thin window is already shrunk toward the global
- * prior, so its multiplier never over-states sparse evidence. Pure - no DB.
- */
+/** Per-window velocity multipliers: the same shrinkage core keyed by window, exposed as a
+ *  stable all-windows read. A window with no sessions reports sampleSize 0 and the global
+ *  multiplier so a consumer can de-emphasize it; a thin window is already shrunk toward the
+ *  prior, so it never over-states sparse evidence. */
 export function energyWindows(
   samples: ResidualSample[],
   prior: EstimationModel,
@@ -233,14 +192,10 @@ export function energyWindows(
   }));
 }
 
-/**
- * Join `work_sessions` (the local when-signal, slice B) to their tasks to produce
- * window/weekday-tagged residuals - the slice-C source for `energyWindows` and the
- * `diagnoseCause` placement tempering. Only TASK sessions yield a residual (a
- * routine session has no estimate); the same gate as `taskResidualSamples`
- * (estimate > 0, actual > 0) so the residual means the same thing across axes.
- * `tasksById` is the caller's task lookup (it already holds the rows).
- */
+/** Join work_sessions to their tasks to produce window/weekday-tagged residuals - the source
+ *  for energyWindows and the placement tempering. Only TASK sessions yield a residual (a routine
+ *  session has no estimate), under the same gate as taskResidualSamples so a residual means the
+ *  same thing across axes. */
 export function workSessionResidualSamples(
   sessions: WorkSession[],
   tasksById: Map<string, Task>,

@@ -16,7 +16,6 @@ function projectHue(id: string): number {
   return h;
 }
 
-/** The task-id sequence of the draggable (real-task) blocks, in render order. */
 function taskOrder(blocks: ScheduledBlock[]): string[] {
   return blocks
     .filter((b) => b.task_id !== null)
@@ -24,12 +23,12 @@ function taskOrder(blocks: ScheduledBlock[]): string[] {
 }
 
 /**
- * Today's plan, reorderable by drag (OVERHAUL §5a substrate S3c-5 §6). Native HTML5 DnD over the
+ * Today's plan, reorderable by drag. Native HTML5 DnD over the
  * real-task blocks only (buffers stay put - they're computed slack, not user-orderable), mirroring
  * the kanban's drag pattern with no new dependency. A drop optimistically resequences the list and
  * calls `reorderTodayAction`, which honors the order as a preference seed and - when it's
  * odds-neutral - teaches the arrangement weights. The client computes NO odds: it records an order,
- * the server re-prices and gates (Hard Rule §2.8 / design invariant 3). Upcoming days stay
+ * the server re-prices and gates. Upcoming days stay
  * display-only (`ScheduleTimeline`); v1 reorders today only.
  */
 export function TodayReorder({

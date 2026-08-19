@@ -1,31 +1,19 @@
 import { CognitoJwtVerifier } from "aws-jwt-verify";
 
-// The session: a verified Cognito ID token, and the cookies it rides in.
+// The session: a verified Cognito ID token and the cookies it rides in.
 //
-// This is the ONLY auth module `proxy.ts` is allowed to import. No `pg`, no
-// database client: the proxy runs on every route including prefetches, and a
-// connection per invocation would hold the Aurora cluster awake around the
-// clock as well as burning connections.
+// The ONLY auth module proxy.ts may import. No pg, no database client - the proxy runs on every
+// route including prefetches, and a connection per invocation would hold the Aurora cluster
+// awake around the clock as well as burning connections.
 //
-// ===========================================================================
-// WHAT REPLACED WHAT
-// ===========================================================================
-// The old session was a JWT this app signed itself with `jose` and a 32-byte
-// SESSION_SECRET. That worked, and it had two properties worth being explicit
-// about losing and gaining:
+// This replaced a JWT the app signed itself with jose and a 32-byte SESSION_SECRET. Two things
+// changed by that: there's no signing key left to store, rotate or leak (verification is
+// against Cognito's public JWKS, fetched once and cached), and we gained revocation - the old
+// design's only break-glass was rotating the secret, which signs out everyone at once, while
+// Cognito refresh tokens are revocable per user (see globalSignOut in lib/cognito.ts).
 //
-//   GONE: SESSION_SECRET. There is no signing key to store, rotate, or leak.
-//   Verification is against Cognito's public JWKS, fetched once and cached.
-//
-//   GAINED: revocation. The old design noted that a token "stays valid until it
-//   expires even if the user row is deleted", and that the only break-glass was
-//   rotating the secret - which signs out every user at once. Cognito refresh
-//   tokens are revocable per user; see globalSignOut in lib/cognito.ts.
-//
-//   UNCHANGED, AND THE POINT: no database round trip to answer "who is this?".
-//   The user id rides in the token as `custom:app_uid`, exactly as it used to
-//   ride in `sub`, so `app/(app)/layout.tsx` still renders email and name with
-//   no query behind them.
+// Unchanged, and the point: no database round trip to answer "who is this?". The user id rides
+// in the token as custom:app_uid, exactly as it used to ride in `sub`.
 
 const MAX_AGE_SECONDS = 60 * 60 * 24 * 7; // 7 days, matching the refresh token
 
@@ -54,14 +42,10 @@ export const ID_COOKIE = `${PREFIX}tb_id`;
 /** The long-lived credential. Only ever sent to Cognito. */
 export const REFRESH_COOKIE = `${PREFIX}tb_rt`;
 
-/**
- * Two cookies rather than one blob, and not for tidiness.
- *
- * A Cognito ID token is 1-2 KB and a refresh token is another 1-2 KB. Browsers
- * cap a single cookie at about 4 KB, so a combined cookie would work for a user
- * with a short email and silently fail to be stored for one with a long name -
- * a bug that appears per account and never in testing.
- */
+/** Two cookies rather than one blob, and not for tidiness. An ID token is 1-2 KB and a refresh
+ *  token another 1-2 KB, while browsers cap a single cookie around 4 KB - so a combined cookie
+ *  would work for a short email and silently fail to store for a long name. That's a bug that
+ *  appears per account and never in testing. */
 export const COOKIE_OPTS = {
   httpOnly: true,
   secure: process.env.NODE_ENV === "production",
@@ -76,13 +60,10 @@ export const COOKIE_OPTS = {
   maxAge: MAX_AGE_SECONDS,
 } as const;
 
-// MODULE SCOPE. The verifier caches the pool's JWKS after its first fetch, so
-// every later verification is a local signature check with no network call.
-// Building it per request would fetch the key set per request and put an
-// outbound HTTP call in front of every page render.
-//
-// Keyed on the pool + client so a late-binding environment variable cannot be
-// cached as a miss - the same reasoning the Azure credential helper used.
+// Module scope. The verifier caches the pool's JWKS after its first fetch, so every later
+// verification is a local signature check. Building it per request would put an outbound HTTP
+// call in front of every page render. Keyed on pool + client so a late-binding env var can't be
+// cached as a miss.
 let cached:
   | { key: string; verifier: ReturnType<typeof CognitoJwtVerifier.create> }
   | null = null;
@@ -108,15 +89,11 @@ function verifier() {
   return v;
 }
 
-/**
- * Verify an ID token and return its claims, or null if it is missing, expired,
- * tampered with, or issued by a different pool.
- *
- * The library pins the algorithm to the pool's published RS256 keys, which is
- * what rejects `alg: none` and algorithm-confusion attacks. Do not replace this
- * with a manual decode: `jwt.decode` without verification is the single most
- * common way an app like this becomes trivially impersonatable.
- */
+/** Verify an ID token and return its claims, or null if missing, expired, tampered with, or
+ *  issued by a different pool. The library pins the algorithm to the pool's published RS256
+ *  keys, which is what rejects `alg: none` and algorithm confusion. Don't replace this with a
+ *  manual decode - jwt.decode without verification is the classic way an app like this becomes
+ *  trivially impersonatable. */
 export async function verifySession(
   token: string | undefined | null,
 ): Promise<SessionClaims | null> {
@@ -148,13 +125,9 @@ export async function verifySession(
   }
 }
 
-/**
- * True once the ID token is close enough to expiry to be worth refreshing.
- *
- * Two minutes of slack, not zero. A token that passes verification at the start
- * of a render can expire during it, and the refresh happens in the proxy before
- * any of the page's own work runs.
- */
+/** True once the ID token is close enough to expiry to be worth refreshing. Two minutes of
+ *  slack, not zero: a token that passes verification at the start of a render can expire during
+ *  it, and the refresh happens in the proxy before any of the page's own work runs. */
 export function shouldRefresh(exp: number): boolean {
   return exp - Date.now() / 1000 < 120;
 }
@@ -174,20 +147,14 @@ export function setSessionCookies(
   }
 }
 
-/**
- * Clear the session. Use this everywhere; never `store.delete(name)`.
+/** Clear the session. Use this everywhere, never store.delete(name).
  *
- * Next's `delete()` compiles to `set({ ...options, value: "", expires: new Date(0) })`
- * with **no options passed**, and its cookie serialiser emits `Secure` only when
- * the cookie object says so. Next has no `__Host-` awareness at all. So
- * `delete()` on a `__Host-` cookie emits a Set-Cookie with neither Secure nor
- * Path - which browsers are required to reject. The cookie survives, and the
- * proxy bounces the user straight back in.
- *
- * That failure only appears where `secure: true`, i.e. production. Dev works
- * fine, because dev uses the unprefixed name. Setting an empty value with
- * `Max-Age=0` and the full option set serialises correctly in both.
- */
+ *  Next's delete() compiles to set({ ...options, value: "", expires: new Date(0) }) with NO
+ *  options passed, and its serialiser emits Secure only when the cookie object says so. Next has
+ *  no __Host- awareness at all, so delete() on a __Host- cookie emits a Set-Cookie with neither
+ *  Secure nor Path, which browsers must reject. The cookie survives and the proxy bounces the
+ *  user straight back in. Only shows up where secure: true, i.e. production - dev is fine
+ *  because it uses the unprefixed name. */
 export function clearSessionCookie(store: CookieWriter): void {
   store.set(ID_COOKIE, "", { ...COOKIE_OPTS, maxAge: 0 });
   store.set(REFRESH_COOKIE, "", { ...COOKIE_OPTS, maxAge: 0 });

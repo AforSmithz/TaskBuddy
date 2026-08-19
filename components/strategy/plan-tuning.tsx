@@ -3,19 +3,15 @@ import type { PlanTuning } from "@/lib/types";
 import { Card, CardHeader } from "@/components/ui/card";
 import { cn } from "@/lib/cn";
 
-// "How your plan is tuned to you" (OVERHAUL S3c-5, design §7 / S5) - a read-only
-// surface that shows how the calibration seam has adjusted the plan's SOFT knobs to
-// the user's own behaviour: the arrangement dials it learns from drag-to-reorder, the
-// plan stickiness it learns from roll-undos, and the recovery taste it learns from the
-// moves you keep vs decline. Pure (no "use client") - every value is computed
-// server-side and shipped whole; this renders, computing nothing (Hard Rule §2.8 /
-// invariant 3). Mirrors `reliable-hours.tsx` (the same S2/S3c "here's what the app
-// learned about you" pattern), so it sits beside it on the Strategy page.
+// "How your plan is tuned to you" - a read-only surface showing how the calibration seam has
+// adjusted the plan's soft knobs to the user's behaviour: the arrangement dials learned from
+// drag-to-reorder, the stickiness learned from roll-undos, and the recovery taste learned from
+// the moves you keep vs decline. No "use client" - every value is computed server-side and
+// shipped whole, and this just renders. Sits beside reliable-hours.tsx, same pattern.
 //
-// Honest under sparse data: both tiers start at their documented default and only move
-// off it on real, repeated evidence (the κ=12 shrinkage), so most dials read "default"
-// until a habit is clear. The copy says the dials "settle in over time" rather than
-// dressing up a barely-moved weight as a strong reading.
+// Honest under sparse data: both tiers start at their default and only move off it on real,
+// repeated evidence, so most dials read "default" until a habit is clear. The copy says the dials
+// settle in over time rather than dressing up a barely-moved weight as a strong reading.
 
 /** A weight within this of 1.0 reads as "default" rather than noise as signal. */
 const DEFAULT_BAND = 0.02;
@@ -49,7 +45,7 @@ const DIALS: Record<
   },
 };
 
-/** The two 🟠-tier tiebreak nudges. Both scale the SAME sub-epsilon tie, so "more" for one
+/** The two recovery-taste tiebreak nudges. Both scale the SAME sub-epsilon tie, so "more" for one
  *  is only meaningful against the other - the copy says which voice gets the casting vote. */
 const STYLE_DIAL = {
   up: "your saved style settles more close calls",
@@ -90,11 +86,8 @@ function DialRow({
   );
 }
 
-/**
- * The "how your plan is tuned to you" card. The page guards it on there being at least
- * one signal (a drag or a material roll); each section still shows its own still-learning
- * state when only the other tier has evidence.
- */
+/** The tuning card. The page guards it on there being at least one signal; each section still
+ *  shows its own still-learning state when only the other tier has evidence. */
 export function PlanTuningCard({ tuning }: { tuning: PlanTuning }) {
   const { arrange, stability, movePrefs } = tuning;
   // The stickiness stiffness factor: both knobs scale by one factor off the same defaults,

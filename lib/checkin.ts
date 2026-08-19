@@ -14,28 +14,25 @@ import type {
   StrategyMove,
   StrategyMovePayload,
   SuggestedTask,
-} from "./types";
-import type { ChatMessage } from "./bedrock";
-import type { DependencyEdge } from "./schedule";
+} from "@/lib/types";
+import type { ChatMessage } from "@/lib/bedrock";
+import type { DependencyEdge } from "@/lib/schedule";
 
-// §5.6 stage A - interpret a free-form activity report into ungrounded, quoted,
-// register-tagged intents (design/s5.6-nl-checkin-loop.md). Shaped exactly like
-// `lib/extraction.ts`: a Bedrock call when configured, else an offline heuristic
-// parser, so the loop is fully usable with no API key. The LLM stays on natural
-// language - it may echo a candidate HANDLE but never a DB id; the deterministic
-// stage B (resolveCheckin) does the binding (§0 firewall).
+// Stage A - interpret a free-form activity report into ungrounded, quoted, register-tagged
+// intents. Shaped like lib/extraction.ts: a Bedrock call when configured, else an offline
+// heuristic parser, so the loop works with no API key. The LLM stays on natural language - it
+// may echo a candidate HANDLE but never a DB id; the deterministic stage B does the binding.
 //
-// Divergence from extraction: an EMPTY `intents` array is VALID, not a failure - 
-// a pure vent ("ugh, rough day") legitimately yields zero moves. So `validate`
-// checks the *presence* of the array, never its length, and there is no retry-on-
-// empty loop.
+// Unlike extraction, an EMPTY intents array is VALID: a pure vent ("ugh, rough day")
+// legitimately yields zero moves. So validate checks the array's presence, never its length,
+// and there's no retry-on-empty loop.
 
 // Re-exported rather than redefined: lib/skill-links.ts imports the gate from
 // here while nine other modules import the identical one from lib/extraction.ts.
 // They used to be two separate copies of the same env read, which is exactly how
 // half the app ends up thinking the LLM is live while the other half does not.
-export { isLLMConfigured } from "./bedrock-config";
-import { isLLMConfigured } from "./bedrock-config";
+export { isLLMConfigured } from "@/lib/bedrock-config";
+import { isLLMConfigured } from "@/lib/bedrock-config";
 
 /** Cap the intents a single report may yield. Every Family-A intent costs its own
  *  solver call in stage C, so a rambling 30-clause check-in is ~31 joint forecasts. */
@@ -113,13 +110,10 @@ interface CheckinInterpretationWire {
   intents: CheckinIntent[];
 }
 
-/**
- * Built per request so `handle` is a closed set drawn from the candidates actually
- * shipped. That makes a fabricated handle structurally impossible and demotes the strip
- * in `normalize()` from a safety mechanism to an assertion. The enums for `kind` and
- * `register` come from the consts above, so there is one source of truth rather than the
- * three there used to be (types.ts, these arrays, and the prompt's shape block).
- */
+/** Built per request so `handle` is a closed set drawn from the candidates actually shipped,
+ *  which makes a fabricated handle structurally impossible and demotes the strip in normalize()
+ *  to an assertion. The kind/register enums come from the consts above, so there's one source
+ *  of truth instead of three. */
 function checkinSchema(candidates: CheckinCandidate[]) {
   const handles = candidates.map((c) => c.handle);
   return {
@@ -181,12 +175,9 @@ function formatCandidates(candidates: CheckinCandidate[]): string {
   return `\n\nCandidate entities you may reference by handle (open work only):\n${lines}`;
 }
 
-/**
- * Interpret a check-in report into ungrounded intents. `candidates` is the capped
- * prompt set the model may reference by handle; stage B resolves against the full
- * set. Falls back to the offline heuristic parser when no key is configured or the
- * model fails - both paths feed the identical deterministic stages B + C.
- */
+/** Interpret a report into ungrounded intents. `candidates` is the capped prompt set the model
+ *  may reference by handle; stage B resolves against the full set. Falls back to the offline
+ *  parser with no key or on failure - both paths feed the identical stages B and C. */
 export async function interpretCheckin(
   rawReport: string,
   candidates: CheckinCandidate[] = [],
@@ -200,7 +191,7 @@ export async function interpretCheckin(
     return { result: heuristicInterpret(report), source: "heuristic" };
   }
 
-  const { callBedrockJSON } = await import("./bedrock");
+  const { callBedrockJSON } = await import("@/lib/bedrock");
   const messages: ChatMessage[] = [
     { role: "system", content: SYSTEM_PROMPT },
     {
@@ -233,15 +224,14 @@ export async function interpretCheckin(
 const VALID_HANDLES = (candidates: CheckinCandidate[]) =>
   new Set(candidates.map((c) => c.handle));
 
-/** Defensive normalisation: drop malformed intents, clamp enums, and - the safety
- *  property - strip any `handle` the model invented that isn't in the candidate set
- *  (so stage B can never bind to a fabricated handle; it falls back to the phrase).
+/** Defensive normalisation: drop malformed intents, clamp enums, and strip any `handle` the
+ *  model invented that isn't in the candidate set, so stage B can never bind to a fabricated
+ *  one (it falls back to the phrase).
  *
- *  The enum clamps and the handle strip are redundant under the strict schema and its
- *  per-request handle enum; they stay as cheap defence for the heuristic path. The
- *  VERBATIM-QUOTE check is not redundant and never was: `quote` is the provenance every
- *  downstream move traces to, the schema cannot express "substring of the input", and
- *  until now nothing verified it at all. */
+ *  The enum clamps and handle strip are redundant under the strict schema; they stay as cheap
+ *  defence for the heuristic path. The verbatim-quote check is not redundant - `quote` is the
+ *  provenance every downstream move traces to, and the schema can't express "substring of the
+ *  input". */
 function normalize(
   r: CheckinInterpretationWire,
   rawReport: string,
@@ -296,11 +286,10 @@ function defaultRegister(kind: CheckinIntentKind): CheckinRegister {
 
 // --- Offline heuristic parser ----------------------------------------------
 //
-// A weak verb/keyword parser so the loop works with no API key and so the Tier-2
-// contract tests run an always-green path in CI. It never produces a handle (it
-// can't match the candidate set reliably) - it leans on `entityPhrase`, which
-// stage B fuzzy-resolves. Deliberately conservative: prefer a `vent`/`idea` chip
-// over a wrong `completed`.
+// A weak verb/keyword parser so the loop works with no API key and the contract tests have an
+// always-green path. It never produces a handle (it can't match the candidate set reliably),
+// so it leans on entityPhrase which stage B fuzzy-resolves. Deliberately conservative: prefer
+// a vent/idea chip over a wrong `completed`.
 
 const COMPLETED_RE = /\b(finished|completed|wrapped up|wrapped|done with|did the|got through|shipped)\b/i;
 const RESCHEDULE_RE = /\b(push(?:ing)?|postpon\w*|defer\w*|moving|move|reschedul\w*|bumping|put off)\b/i;
@@ -386,17 +375,15 @@ function heuristicInterpret(rawReport: string): CheckinInterpretation {
   return { intents, rawReport };
 }
 
-// --- §5.6 stage B - resolveCheckin() (deterministic, zero LLM) ---------------
+// --- Stage B - resolveCheckin() (deterministic, no LLM) --------------------
 //
-// Fuzzy-bind each ungrounded intent's handle/phrase to the LIVE candidate set →
-// resolved | ambiguous | unresolved. The firewall against "marked the wrong task
-// done": this module only ever emits ids that exist in the candidate set; an
-// uncertain reference surfaces as ambiguous/unresolved for the user, never a
-// silent mutation. Pure → the bulk of the Tier-1 golden tests live here.
+// Fuzzy-bind each intent's handle/phrase to the LIVE candidate set: resolved | ambiguous |
+// unresolved. The firewall against "marked the wrong task done" - this only ever emits ids
+// that exist in the candidate set, and an uncertain reference surfaces for the user rather
+// than becoming a silent mutation. Pure, so most of the golden tests live here.
 //
-// `attain_skill`-bound intents (skill_gained) resolve against the *unlocked
-// skill-node frontier*; the cross-goal spillover detector (slice 4) runs on top
-// of these resolutions, not inside them.
+// skill_gained intents resolve against the unlocked skill-node frontier; the cross-goal
+// spillover detector runs on top of these resolutions, not inside them.
 
 /** Which candidate entity types each intent kind may bind to. Kinds that create
  *  NEW work or no entity (add_task, idea, vent) need no resolution → they pass
@@ -405,7 +392,7 @@ const ALLOWED_TYPES: Record<CheckinIntentKind, CheckinCandidate["type"][]> = {
   completed: ["task"],
   reschedule: ["task", "activity"],
   // A resolution binds to a task (the blocker OR a plain dependent); stage C picks
-  // the move - resolve_blocker vs unblock - from the bound task's DAG role (§5.6 6b).
+  // the move - resolve_blocker vs unblock - from the bound task's DAG role.
   resolved: ["task"],
   time_logged: ["task"],
   skill_gained: ["skill_node"],
@@ -467,11 +454,9 @@ function tokensMatch(a: string, b: string): boolean {
   return editDistance(a, b) <= Math.max(1, tol);
 }
 
-/**
- * How well the user's phrase is covered by a candidate title: the share of the
- * phrase's content tokens that appear (exact or typo-close) in the title. 1.0 =
- * every word the user used is in the title ("the auth flow" ⊆ "Auth flow setup").
- */
+/** How well the user's phrase is covered by a candidate title: the share of the phrase's
+ *  content tokens appearing (exact or typo-close) in the title. 1.0 means every word the user
+ *  used is in the title ("the auth flow" in "Auth flow setup"). */
 function coverage(phrase: string, title: string): number {
   const pt = tokenize(phrase);
   const tt = tokenize(title);
@@ -488,12 +473,9 @@ function resolved(
   return { intent, status: "resolved", match, candidates };
 }
 
-/**
- * Resolve one intent against the full candidate set. Handle-exact bind wins; else
- * fuzzy phrase coverage decides. Two near-tied matches ⇒ `ambiguous` (the top is
- * shown but proposed unchecked, all ties offered for disambiguation), never an
- * auto-pick. No match ⇒ `unresolved` (a non-actionable chip).
- */
+/** Resolve one intent against the full candidate set. An exact handle bind wins, else fuzzy
+ *  phrase coverage. Two near-tied matches give `ambiguous` (top shown but proposed unchecked,
+ *  all ties offered), never an auto-pick. No match gives `unresolved`. */
 function resolveOne(
   intent: CheckinIntent,
   candidates: CheckinCandidate[],
@@ -507,7 +489,7 @@ function resolveOne(
   const pool = candidates.filter((c) => allowed.includes(c.type));
 
   // 1. Exact handle bind - the model echoed a candidate handle (already validated
-  //    against the prompt set in normalize; the prompt set ⊆ this full set).
+  //    against the prompt set in normalize(); the prompt set ⊆ this full set).
   if (intent.handle) {
     const hit = pool.find((c) => c.handle === intent.handle);
     if (hit) return resolved(intent, hit, [hit]);
@@ -546,19 +528,14 @@ export function resolveCheckin(
   return interpretation.intents.map((intent) => resolveOne(intent, candidates));
 }
 
-// --- §5.6 stage C - proposeFromCheckin() (deterministic) --------------------
+// --- Stage C - proposeFromCheckin() (deterministic) ------------------------
 //
-// Resolved intents → reviewable proposals. Family A (forecast-affecting) become
-// `StrategyMove`s that ride S1's review/commit/undo, with odds re-solved through
-// the SAME `jointOddsWithMoves` the strategy card uses (so the previewed number ==
-// a direct call - the S1 parity gate). Family B (odds-silent) become
-// `CheckinActionIntent`s rendered as confirmable but number-less rows. Everything
-// that resolved to nothing actionable (unresolved references, vents) becomes a
-// chip. Pure: the scoring context is injected, so the whole stage is fixture-testable.
-//
-// skill_gained → `attain_skill` is the one new move kind and lands in SLICE 4 with
-// its forecast arm + persist spec; until then a resolved skill_gained intent is
-// surfaced as an inert chip, never silently dropped.
+// Resolved intents become reviewable proposals. Family A (forecast-affecting) become
+// StrategyMoves riding the existing review/commit/undo, with odds re-solved through the SAME
+// jointOddsWithMoves the strategy card uses, so the previewed number equals a direct call.
+// Family B (odds-silent) become number-less confirmable rows. Anything that resolved to
+// nothing actionable becomes a chip. Pure - the scoring context is injected, so the whole
+// stage is fixture-testable.
 
 /** The minimal slice of `JointScorer` (lib/store.ts) stage C needs - injected so
  *  the stage stays pure/testable. `cumulative` IS `jointOddsWithMoves` at full
@@ -567,11 +544,11 @@ export interface CheckinProposeContext {
   today: string;
   baseAllOnTime: number;
   cumulative(ordered: StrategyMove[]): { afterEach: number[]; combined: number };
-  /** Set when the check-in is scoped to a goal (§5.6 slice 6a) - an `add_task`
+  /** Set when the check-in is scoped to a goal - an `add_task`
    *  intent then becomes a Family-A `add_tasks` move on this goal instead of a
    *  standalone Family-B capture. Absent for the global capture bar. */
   scope?: CheckinScope;
-  /** The live structural dependency DAG (§5.6 slice 6b) - stage C reads it to pick a
+  /** The live structural dependency DAG - stage C reads it to pick a
    *  resolved/completed intent's move by the bound task's DAG role (blocker →
    *  resolve_blocker + cascade; plain dependent → unblock). Empty when unavailable. */
   deps?: DependencyEdge[];
@@ -582,13 +559,9 @@ export interface CheckinProposeContext {
    *  by id; membership here is also the open/unattained gate (the set is built from the
    *  forecast's open work, so a done task or attained node simply isn't in it). */
   candidates?: CheckinCandidate[];
-  /**
-   * The unlocked skill frontier across every learning goal - unattained nodes whose
-   * prerequisites are all attained (`skillProgress().unlocked`). **Only these may be
-   * attained by INFERENCE** (either spillover tier), because inference walks the
-   * prerequisite graph one node at a time; a stated `skill_gained` is an assertion and
-   * jumps freely. Omitted ⇒ no gate (pure callers/tests); production always supplies it.
-   */
+  /** The unlocked skill frontier across every learning goal. ONLY these may be attained by
+   *  INFERENCE, because inference walks the prerequisite graph one node at a time; a stated
+   *  skill_gained is an assertion and jumps freely. Omitted means no gate (tests only). */
   unlockedNodeIds?: ReadonlySet<string>;
 }
 
@@ -642,13 +615,12 @@ const NEUTRAL_FACTORS = {
   confidence: 3,
 } as const;
 
-// --- §5.6 slice 6b - DAG-role move selection --------------------------------
+// --- DAG-role move selection -----------------------------------------------
 //
-// A resolution's move is chosen from the bound task's position in the STRUCTURAL
-// `task_dependencies` DAG, never from the model (decision #7): a blocker (a task
-// others depend on) cascades via `resolve_blocker`; a plain dependent uses the
-// existing single-task `unblock`. This is what keeps the LLM off the "which edges
-// to cut" decision - deterministic code reads the graph.
+// A resolution's move comes from the bound task's position in the structural dependency DAG,
+// never from the model: a blocker (something others depend on) cascades via resolve_blocker, a
+// plain dependent uses the single-task unblock. This is what keeps the LLM off the "which
+// edges to cut" decision.
 
 /** A task is a structural BLOCKER iff some edge names it as a prereq
  *  (`depends_on_task_id === id`) - i.e. it has ≥1 direct dependent. */
@@ -663,7 +635,7 @@ function directDependents(taskId: string, deps: DependencyEdge[]): string[] {
 
 /** Normalize a stated method clause into display provenance ("using a template" →
  *  "Used a template"); null when none was given. Derived from a verbatim span, never
- *  authored - display/audit only, so §0 holds (the LLM never writes an id or a number). */
+ *  authored - display/audit only, so holds (the LLM never writes an id or a number). */
 function methodProvenance(detail: string | null): string | null {
   if (!detail) return null;
   const cleaned = detail
@@ -674,7 +646,7 @@ function methodProvenance(detail: string | null): string | null {
 }
 
 /** Build the Family-A `resolve_blocker` move for a resolved blocker: mark it done +
- *  cascade one-hop edge removal + stamp provenance (§5.6 6b). Confidence is always
+ *  cascade one-hop edge removal + stamp provenance. Confidence is always
  *  `self_assessed` (a check-in resolution - the invariant). `freedTaskIds` are the
  *  direct dependents at generation time (advisory; persist re-derives from the live DAG). */
 function resolveBlockerMove(
@@ -689,7 +661,7 @@ function resolveBlockerMove(
     kind: "resolve_blocker",
     projectId: match.goalId,
     projectName: match.goalName,
-    // Odds filled in by the cumulative re-solve in proposeFromCheckin; seed at base.
+    // Odds filled in by the cumulative re-solve in proposeFromCheckin(); seed at base.
     probabilityAfter: 0,
     portfolioProbabilityAfter: 0,
     rationale: `Cleared "${match.title}" — frees ${n} task${n === 1 ? "" : "s"}${
@@ -708,8 +680,8 @@ function resolveBlockerMove(
 
 /** Build the Family-A `StrategyMove` for a resolved intent, or null when the kind
  *  has no forecast-affecting move (an unscoped add_task → Family-B capture) or no
- *  valid target. `scope` is set for a task-scoped check-in (§5.6 slice 6a); `deps`
- *  is the live DAG that decides a completed/resolved intent's move (§5.6 slice 6b). */
+ *  valid target. `scope` is set for a task-scoped check-in; `deps`
+ *  is the live DAG that decides a completed/resolved intent's move. */
 function moveForIntent(
   r: ResolvedCheckinIntent,
   today: string,
@@ -718,13 +690,11 @@ function moveForIntent(
 ): StrategyMove | null {
   const { intent, match } = r;
 
-  // §5.6 slice 6a - a SCOPED `add_task` ("I also need to do Y") becomes a real
-  // Family-A `add_tasks` move on the scope goal: forecast-affecting (it injects a
-  // synthetic task, so the live re-solve honestly shows the added load) and undoable
-  // through the same PlanVersion. Its "entity" is the source quote, so it needs no
-  // resolved match - this is the one Family-A kind that precedes the match guard.
-  // Unscoped, it returns null and falls through to the Family-B standalone capture
-  // (`actionForIntent`), exactly as the global bar does today.
+  // A SCOPED add_task ("I also need to do Y") becomes a real Family-A add_tasks move on the
+  // scope goal: forecast-affecting, so the live re-solve honestly shows the added load, and
+  // undoable through the same PlanVersion. Its entity is the source quote, so it needs no
+  // resolved match - the one Family-A kind that precedes the match guard. Unscoped it returns
+  // null and falls through to the Family-B standalone capture.
   if (intent.kind === "add_task") {
     if (!scope) return null;
     const task = suggestedTaskFromIntent(intent, scope.area);
@@ -755,13 +725,13 @@ function moveForIntent(
 
   switch (intent.kind) {
     case "completed":
-      // §5.6 6b - a completion reported on a structural BLOCKER auto-promotes to a
+         // 6b - a completion reported on a structural BLOCKER auto-promotes to a
       // cascade that frees its direct dependents, regardless of the verb used
-      // (decision #7); a non-blocker stays a plain mark_done. The DAG decides.
+      // ; a non-blocker stays a plain mark_done. The DAG decides.
       if (match.type === "task" && isBlocker(match.id, deps)) {
         return resolveBlockerMove(match, intent.detail, deps);
       }
-      // §5.6 invariant: a check-in completion is self_assessed (the user said it),
+      // invariant: a check-in completion is self_assessed (the user said it),
       // never inferred - the provenance rides on the payload.
       payload = {
         kind: "mark_done",
@@ -772,7 +742,7 @@ function moveForIntent(
       rationale = `You said you finished "${match.title}".`;
       break;
     case "resolved":
-      // §5.6 6b - pick by the bound task's DAG role: a blocker cascades; a plain
+         // 6b - pick by the bound task's DAG role: a blocker cascades; a plain
       // dependent uses the existing single-task unblock (no provenance - keeps the
       // strategist's own unblock path untouched, zero regression risk).
       if (match.type !== "task") return null;
@@ -824,14 +794,10 @@ function moveForIntent(
  *  purpose: an over-eager cross-goal attainment is worse than a missed one. */
 const SPILLOVER_COVERAGE = 0.85;
 
-/**
- * Spillover v1 (§5.4 deferred): when the user attains a skill node, infer the
- * attainment of an overlapping node in a DIFFERENT goal (cross-goal node ↔ node,
- * computed - no schema). Each spillover move is `attain_skill` at `inferred`
- * confidence with `viaSpilloverFrom` provenance. Pure. `allSkillNodes` is the
- * global UNATTAINED skill-node candidate set; node → project-task spillover is
- * deferred (no checkpoint edge exists).
- */
+/** Spillover v1: when the user attains a skill node, infer the attainment of an overlapping
+ *  node in a DIFFERENT goal (node <-> node, computed, no schema). Each move is attain_skill at
+ *  `inferred` confidence with viaSpilloverFrom provenance. `allSkillNodes` is the global
+ *  unattained candidate set. Node -> project-task spillover is deferred, no edge exists. */
 export function detectSpilloverMoves(
   resolved: ResolvedCheckinIntent[],
   allSkillNodes: CheckinCandidate[],
@@ -899,23 +865,19 @@ function claimedIds(
   return claimed;
 }
 
-/**
- * Spillover, full tier: credit the FAR side of a confirmed `skill_task_links` edge.
+/** Spillover, full tier: credit the FAR side of a confirmed skill_task_links edge.
  *
- * Unlike v1 (which infers node↔node overlap from title similarity), this reads an
- * explicit, user-confirmed edge - so it is a lookup, not a guess. That is precisely
- * what licenses the riskier direction: closing a real task off an inferred signal is
- * only defensible because a human already asserted the two are the same work.
+ *  Unlike v1, which infers node<->node overlap from title similarity, this reads an explicit
+ *  user-confirmed edge - a lookup, not a guess. That's exactly what licenses the riskier
+ *  direction: closing a real task off an inferred signal is only defensible because a human
+ *  already asserted the two are the same work.
  *
- * Both directions, symmetric:
- *   task completed  → attain the linked skill node   (`attain_skill`)
- *   skill attained  → close the linked task          (`mark_done` + `resolved_by`)
+ *    task completed -> attain the linked skill node
+ *    skill attained -> close the linked task
  *
- * Every move is `inferred` and proposed UNCHECKED by the caller (an opt-in, never a
- * silent write). Membership in `candidates` gates both sides: that set is built from
- * the forecast's OPEN work, so an already-done task or attained node is absent and
- * cannot be re-proposed. Pure.
- */
+ *  Every move is `inferred` and proposed UNCHECKED - an opt-in, never a silent write.
+ *  Membership in `candidates` gates both sides; that set is built from open work, so an
+ *  already-done task or attained node can't be re-proposed. */
 export function detectLinkedSpillover(
   resolved: ResolvedCheckinIntent[],
   links: SkillTaskLink[],
@@ -1003,7 +965,6 @@ export function detectLinkedSpillover(
   return out;
 }
 
-/** Build the Family-B odds-silent action for a resolved intent, or null. */
 function actionForIntent(r: ResolvedCheckinIntent): CheckinActionIntent | null {
   const { intent, match } = r;
   switch (intent.kind) {
@@ -1018,21 +979,17 @@ function actionForIntent(r: ResolvedCheckinIntent): CheckinActionIntent | null {
       // An UNSCOPED add (the global bar) or any `idea` has no project context, so
       // it's captured as a standalone item (quick errand) - odds-silent. A SCOPED
       // `add_task` is intercepted earlier by `moveForIntent` and never reaches here
-      // (it becomes a Family-A `add_tasks` move on the goal - §5.6 slice 6a).
+      // (it becomes a Family-A `add_tasks` move on the goal - slice 6a).
       return { kind: "capture_idea", text: intent.detail ?? intent.quote, quote: intent.quote };
     default:
       return null;
   }
 }
 
-/**
- * Stage C: turn resolved intents into the review surface. Family-A moves are
- * scored together through one `cumulative` call so each row shows the contention-
- * correct portfolio odds AFTER it (and every move before it) - the exact number the
- * client live re-solve will reproduce. When `ctx.scope` is set (a task-scoped
- * check-in, §5.6 slice 6a), an `add_task` intent joins Family A as an `add_tasks`
- * move on the scope goal; unscoped, captures stay in Family B.
- */
+/** Stage C: turn resolved intents into the review surface. Family-A moves are scored together
+ *  through one cumulative call so each row shows the contention-correct odds after it and every
+ *  move before it - the exact number the client re-solve reproduces. With ctx.scope set, an
+ *  add_task intent joins Family A as an add_tasks move on that goal. */
 export function proposeFromCheckin(
   resolved: ResolvedCheckinIntent[],
   ctx: CheckinProposeContext,
@@ -1067,11 +1024,10 @@ export function proposeFromCheckin(
     chips.push(r);
   }
 
-  // Spillover, both tiers. v1 (slice 4) infers cross-goal node↔node overlap from title
-  // similarity; the full tier reads confirmed `skill_task_links` edges in BOTH
-  // directions. v1 runs first and its targets are claimed, so an edge can't re-propose
-  // a node v1 already took. Inferred ⇒ always proposed UNCHECKED (an opt-in, not a
-  // silent write) regardless of the source intent's confidence.
+  // Spillover, both tiers. v1 infers cross-goal node overlap from title similarity; the full
+  // tier reads confirmed skill_task_links edges both ways. v1 runs first and claims its
+  // targets, so an edge can't re-propose a node v1 already took. Inferred moves are always
+  // proposed UNCHECKED regardless of the source intent's confidence.
   const v1Spillover = detectSpilloverMoves(resolved, allSkillNodes, ctx.unlockedNodeIds);
   const claimed = claimedIds(
     resolved,
@@ -1130,7 +1086,7 @@ export function proposeFromCheckin(
 }
 
 /** Synthesize a SuggestedTask from a captured add-task intent - the payload of a
- *  scoped `add_tasks` move (§5.6 slice 6a). Neutral factors so it scores plausibly
+ *  scoped `add_tasks` move. Neutral factors so it scores plausibly
  *  through `computePriority` without the interpreter authoring a priority. */
 export function suggestedTaskFromIntent(intent: CheckinIntent, area: string): SuggestedTask {
   return {

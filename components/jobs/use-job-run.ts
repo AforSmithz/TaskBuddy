@@ -14,34 +14,25 @@ import {
 /**
  * Watch one queue-backed job and tell the page when it lands.
  *
- * The three slow LLM actions publish an event and return, so the component that
- * started the work no longer receives its result. This hook is the other half:
- * it polls the job row until the job settles, then refreshes the route so the
- * server re-renders with whatever the worker wrote.
+ * The three slow LLM actions publish an event and return, so the component that started the work
+ * no longer receives its result. This hook is the other half: poll the job row until it settles,
+ * then refresh the route so the server re-renders with whatever the worker wrote.
  *
- * ---------------------------------------------------------------------------
- * WHY THE POLL IS SO CAREFULLY BOUNDED
- * ---------------------------------------------------------------------------
- * Each tick is a Lambda invocation and a database round trip. A tab left open
- * on a finished page would otherwise poll ~43,000 times a day, and - far worse
- * than the invocations - it would keep touching Aurora forever. The cluster's
- * whole cost model is scale-to-zero after 15 idle minutes; a background poll
- * that never stops is the exact failure the `taskbuddy-db-not-pausing` alarm
- * exists to catch, and it takes the bill from ~$10/mo to ~$50/mo.
+ * The poll is carefully bounded because each tick is a Lambda invocation and a database round
+ * trip. A tab left open on a finished page would otherwise poll ~43,000 times a day and - far
+ * worse than the invocations - keep touching Aurora forever. The cluster's whole cost model is
+ * scale-to-zero after 15 idle minutes, so a background poll that never stops is exactly what the
+ * db-not-pausing alarm exists to catch, and it takes the bill from ~$10/mo to ~$50/mo.
  *
- * So the loop has FOUR independent stops, because each one covers a case the
- * others do not:
+ * So there are FOUR independent stops, each covering a case the others don't:
+ *   1. a terminal status         - the normal ending
+ *   2. the abandonment window    - the worker died without settling the row
+ *   3. a wall-clock deadline     - nothing is coming back at all
+ *   4. consecutive poll failures - the POLL is broken rather than the job
  *
- *   1. a terminal status          - the normal ending;
- *   2. the abandonment window     - the worker died without settling the row;
- *   3. a wall-clock deadline      - nothing is coming back at all;
- *   4. consecutive poll failures  - the POLL is broken rather than the job.
- *
- * (3) and (4) are not redundant with (2). A poll that keeps REJECTING - an
- * expired session, a 500, a redeploy that invalidated the action id, a closed
- * laptop lid - never updates state, so nothing re-renders, so an abandonment
- * check that only runs on a successful response would never be reached and the
- * loop would spin for as long as the tab is open.
+ * (3) and (4) aren't redundant with (2): a poll that keeps REJECTING (expired session, a 500, a
+ * redeploy that invalidated the action id, a closed laptop lid) never updates state, so nothing
+ * re-renders, so an abandonment check that only runs on a successful response is never reached.
  */
 
 /** Poll cadence: tight while a fast job might still land, slack afterwards. */
@@ -58,13 +49,11 @@ function intervalFor(startedAt: number): number {
 }
 
 export interface JobWatch {
-  /** The job being watched, or null when there has never been one. */
   run: JobRun | null;
   /** True while the work is still expected to land. Drives every spinner. */
   pending: boolean;
   /** Terminal failure, or a job that stopped reporting. Drives the retry copy. */
   failed: boolean;
-  /** The failure message worth showing the user, or null. */
   error: string | null;
   /** Whatever the job returned, e.g. `{ created: 4 }` from the link proposer. */
   result: Record<string, unknown> | null;
@@ -72,7 +61,6 @@ export interface JobWatch {
   start: (action: () => Promise<JobHandle>) => void;
 }
 
-/** The run a just-returned handle describes, before any poll has happened. */
 function runFromHandle(handle: JobHandle): JobRun {
   const now = new Date().toISOString();
   return {
@@ -90,12 +78,9 @@ function runFromHandle(handle: JobHandle): JobRun {
   };
 }
 
-/**
- * @param initial the live run the server found for this subject, or null.
- *   Already filtered by `activeJobRun`, so a value here means "genuinely still
- *   in flight" - which is what lets a page reload keep showing the pending
- *   state instead of an idle button beside work that is still running.
- */
+/** @param initial the live run the server found for this subject, or null. Already filtered by
+ *   activeJobRun, so a value here means genuinely still in flight - which is what lets a reload
+ *   keep showing the pending state instead of an idle button beside running work. */
 export function useJobRun(initial: JobRun | null = null): JobWatch {
   const router = useRouter();
   const [run, setRun] = useState<JobRun | null>(initial);
@@ -106,16 +91,13 @@ export function useJobRun(initial: JobRun | null = null): JobWatch {
   /** Set when we stop watching for a reason the row itself cannot express. */
   const [gaveUp, setGaveUp] = useState<string | null>(null);
 
-  // Adopt a job the SERVER reports, but only when it is really reporting one.
-  //
-  // Deliberately not symmetric: `activeJobRun` returns null the moment a job
-  // settles, and this hook calls `router.refresh()` exactly then - so treating
-  // "server says null" as authoritative would wipe the finished run, along with
-  // the result the card was about to render and the error message explaining
-  // why it failed, on every single completion.
-  // State rather than a ref, because this runs DURING render: React's own
-  // "adjust state when a prop changes" pattern. A ref read here is both a lint
-  // error and a real hazard, since a ref mutation schedules no re-render.
+  // Adopt a job the SERVER reports, but only when it's really reporting one. Deliberately not
+  // symmetric: activeJobRun returns null the moment a job settles and this hook calls
+  // router.refresh() exactly then, so treating "server says null" as authoritative would wipe the
+  // finished run - along with the result the card was about to render - on every completion.
+  // State rather than a ref because this runs DURING render (React's adjust-state-on-prop-change
+  // pattern); a ref read here is both a lint error and a real hazard, since mutating one
+  // schedules no re-render.
   const [adopted, setAdopted] = useState(initial?.id ?? null);
   if (initial && initial.id !== adopted) {
     setAdopted(initial.id);

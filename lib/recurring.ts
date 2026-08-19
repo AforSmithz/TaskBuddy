@@ -7,18 +7,17 @@ import type {
   RecurringState,
   RecurringStatus,
   Task,
-} from "./types";
-import type { AllocTask } from "./allocate";
-import { computePriority } from "./priority";
+} from "@/lib/types";
+import type { AllocTask } from "@/lib/allocate";
+import { computePriority } from "@/lib/priority";
 
-// Pure cadence/streak/miss detection for recurring activities (routines & goals).
-// No I/O - every read is derived from the completion log, mirroring the
-// "derive on read, never persist derived state" style of forecast.ts/allocate.ts.
+// Pure cadence/streak/miss detection for recurring activities. No I/O - every read is derived
+// from the completion log, same "derive on read, never persist derived state" style as
+// forecast.ts and allocate.ts.
 //
-// A routine is a daily, streak-based activity (`period: "day"`); a goal is a
-// weekly session target (`period: "week"`). A COMPLETION credits the period; a
-// SKIP (a completion row with `skipped: true`) resolves the period's obligation
-// - it stops the drain and the nagging - without crediting a streak.
+// A routine is daily and streak-based; a goal is a weekly session target. A completion credits
+// the period; a SKIP resolves the period's obligation - stopping the drain and the nagging
+// without crediting a streak.
 
 /** The synthetic project lane recurring instances ride into the global queue on. */
 export const RECURRING_LANE_ID = "__recurring__";
@@ -48,7 +47,6 @@ function weekdayOf(iso: string): number {
   return parseISO(iso).getUTCDay();
 }
 
-/** Monday (ISO-week start) of the week containing `iso`. */
 function weekStart(iso: string): string {
   const wd = weekdayOf(iso); // 0=Sun..6=Sat
   const sinceMonday = (wd + 6) % 7; // Mon→0, Tue→1, … Sun→6
@@ -255,7 +253,6 @@ function coldWeekly(
   return true;
 }
 
-/** Fraction of the current week elapsed, inclusive of today (1/7 .. 1). */
 function weekElapsedFraction(today: string): number {
   const start = weekStart(today);
   const dayIndex = Math.round(
@@ -280,7 +277,7 @@ export function status(
     return lapsedRecently(activity, completions, today) ? "missed" : "due";
   }
 
-  // Weekly goal. "Cold" only when there's been no activity recently AT ALL - 
+   // Weekly goal. "Cold" only when there's been no activity recently AT ALL -
   // a session already logged this week means it's alive, just behind or on pace.
   if (done === 0 && coldWeekly(activity, completions, today)) return "cold";
   const expectedByNow = Math.floor(
@@ -327,13 +324,9 @@ function activityFactors(activity: RecurringActivity): FactorScores {
   };
 }
 
-/**
- * The dates (one per owed session) an activity still owes across the horizon.
- * Daily: every eligible, unresolved day. Weekly: the remaining sessions of each
- * week window placed on its earliest eligible days at/after today. `droppedIds`
- * lets a strategist "skip" probe pretend an activity owes nothing (it drops out
- * of the drain entirely). Used both for capacity drain and the skip-move scorer.
- */
+/** The dates (one per owed session) an activity still owes across the horizon. Daily: every
+ *  eligible unresolved day. Weekly: the remaining sessions of each week placed on its earliest
+ *  eligible days. `droppedIds` lets a skip probe pretend an activity owes nothing. */
 export function owedInstanceDates(
   activity: RecurringActivity,
   completions: ActivityCompletion[],
@@ -380,12 +373,9 @@ export function owedInstanceDates(
   return out;
 }
 
-/**
- * The owed instance dates of an activity within the CURRENT week (today through
- * this week's end). Skipping these is what a strategist "skip this week" move
- * frees - and exactly what the apply persists, so the probe and the action move
- * the same hours. Empty when nothing's owed this week (e.g. already done/skipped).
- */
+/** The owed instance dates within the CURRENT week. Skipping these is what a "skip this week"
+ *  move frees, and exactly what the apply persists, so the probe and the action move the same
+ *  hours. Empty when nothing's owed. */
 export function currentWeekOwedDates(
   activity: RecurringActivity,
   completions: ActivityCompletion[],
@@ -398,14 +388,10 @@ export function currentWeekOwedDates(
   );
 }
 
-/**
- * Recurring activities as synthetic commitments draining the shared budget,
- * `estimated_minutes` per owed session on the day it's expected. Folded into the
- * real commitment set in `getTimeBudget`, so `dayCapacities`/`deployableMinutes`
- * see the eaten time everywhere - the single source of truth for recurring
- * capacity cost (the agenda's synthetic task is display-only, never re-counted).
- * `droppedIds` excludes activities a strategist skip-move is probing.
- */
+/** Recurring activities as synthetic commitments draining the shared budget, estimated_minutes
+ *  per owed session on the day it's expected. Folded into the real commitment set in
+ *  getTimeBudget, so every capacity consumer sees the eaten time - the single source of truth
+ *  for recurring cost. The agenda's synthetic task is display-only and never re-counted. */
 export function activityDrainCommitments(
   activities: RecurringActivity[],
   completions: ActivityCompletion[],
@@ -436,13 +422,9 @@ export function activityDrainCommitments(
 
 // --- Synthetic queue tasks (today's due instances) ---------------------------
 
-/**
- * One synthetic `AllocTask` per activity with an instance due today - the rows
- * that surface routines/goals in the Now/Next agenda. These ride the reserved
- * `RECURRING_LANE_ID` lane and are DISPLAY/ORDER-ONLY: their minutes are already
- * drained via `activityDrainCommitments`, so they must be kept out of the
- * forecast's capacity math (locked invariant #1).
- */
+/** One synthetic AllocTask per activity due today - the rows that surface routines and goals in
+ *  the agenda. They ride the reserved RECURRING_LANE_ID and are display/order-only: their minutes
+ *  are already drained via activityDrainCommitments, so they must stay out of the capacity math. */
 export function recurringAllocTasksForToday(
   activities: RecurringActivity[],
   completions: ActivityCompletion[],
@@ -468,24 +450,22 @@ export function recurringAllocTasksForToday(
   return out;
 }
 
-/**
- * Weave today's due recurring instances into the order the user is actually following
- * (OVERHAUL S3c-7). Two authorities, on orthogonal axes:
+/** Weave today's due recurring instances into the order the user is actually following. Two
+ *  authorities on orthogonal axes:
  *
- *   - `union` (the canonical plan over real work + today's routines, routines ranked by an
- *     ordering-only `today` deadline) decides **where a routine sits** - its ordinal position
- *     among real work. A routine with `k` real tasks ahead of it stays the `k+1`-th thing.
- *   - `followed` (the arranged, comfort-capped, odds-gated, roll-sticky order over real work
- *     alone) decides **how real work is sequenced**. Its sequence is reproduced EXACTLY, so the
- *     agenda and the plan card can never disagree about what to do next.
+ *    `union` (the canonical plan over real work plus today's routines, routines ranked by an
+ *      ordering-only `today` deadline) decides WHERE a routine sits - a routine with k real tasks
+ *      ahead of it stays the k+1-th thing.
+ *    `followed` (the arranged, capped, gated, roll-sticky order over real work alone) decides
+ *      HOW real work is sequenced. Its sequence is reproduced exactly, so the agenda and the plan
+ *      card can never disagree about what's next.
  *
- * Ranks are renumbered by position: `arrangeOrder` permutes entries but carries each one's
- * canonical `rank` verbatim, and the agenda sorts by `rank`, so a splice that didn't renumber
- * would silently discard the arrangement.
+ *  Ranks are renumbered by position: arrangeOrder permutes entries but carries each one's
+ *  canonical rank verbatim, and the agenda sorts by rank, so a splice that didn't renumber would
+ *  silently discard the arrangement.
  *
- * Routine minutes are already drained into capacity, so they never enter `followed`, the
- * schedule, or the forecast (locked invariant #1) - this is a display overlay, not a re-plan.
- */
+ *  Routine minutes are already drained into capacity, so they never enter `followed`, the
+ *  schedule, or the forecast - this is a display overlay, not a re-plan. */
 export function spliceRecurringIntoOrder(
   followed: EffectiveOrderEntry[],
   union: EffectiveOrderEntry[],
@@ -518,24 +498,18 @@ export function spliceRecurringIntoOrder(
   return out;
 }
 
-/** Extract the activity id from a synthetic recurring task id, or null. */
 export function activityIdFromTaskId(taskId: string): string | null {
   if (!taskId.startsWith("recurring:")) return null;
   return taskId.split(":")[1] ?? null;
 }
 
-/** Whether a task id belongs to a synthetic recurring instance. */
 export function isRecurringTaskId(taskId: string): boolean {
   return taskId.startsWith("recurring:");
 }
 
-/**
- * A synthetic `Task`-shaped row for an activity due today - the object the Today
- * agenda renders interleaved with real tasks. Its id matches the agenda-order
- * entry from `recurringAllocTasksForToday`; `due_date` is today so it buckets
- * under "Due today". Carries no `entry_id` (it has no entry) - the agenda routes
- * its actions to the activity, not the task table.
- */
+/** A synthetic Task-shaped row for an activity due today - what the agenda renders interleaved
+ *  with real tasks. Its id matches the agenda-order entry; due_date is today so it buckets under
+ *  "Due today". Carries no entry_id, so the agenda routes its actions to the activity. */
 export function recurringAgendaTask(
   activity: RecurringActivity,
   today: string,

@@ -10,23 +10,18 @@ import {
   type AuthenticationResultType,
 } from "@aws-sdk/client-cognito-identity-provider";
 
-// The Cognito admin surface. Everything the app does to a user pool goes
-// through here.
+// The Cognito admin surface. Everything the app does to a user pool goes through here.
 //
-// ADMIN APIS, NOT THE PUBLIC ONES, and that is deliberate on both ends:
+// Admin APIs rather than the public ones, deliberately on both ends. The pool has
+// selfSignUpEnabled false, so the public SignUp API is closed and account creation runs through
+// signupAction, which checks SIGNUP_CODE first - leaving public sign-up open would reintroduce
+// exactly the unauthenticated account-creation endpoint SIGNUP_CODE exists to shut. And
+// ADMIN_USER_PASSWORD_AUTH hands Cognito the plaintext password, which is what the
+// USER_MIGRATION trigger needs to verify a legacy bcrypt hash; SRP never exposes the password
+// so it can't support migration. Once every legacy account has signed in once this could move
+// to SRP.
 //
-//   - The pool has `selfSignUpEnabled: false`, so the public SignUp API is
-//     closed. Account creation runs through `signupAction`, which checks
-//     SIGNUP_CODE first. Leaving public sign-up open would reintroduce exactly
-//     the unauthenticated account-creation endpoint SIGNUP_CODE exists to shut.
-//   - `ADMIN_USER_PASSWORD_AUTH` hands Cognito the plaintext password, which is
-//     what the USER_MIGRATION trigger needs in order to verify a legacy bcrypt
-//     hash. SRP never exposes the password, so it cannot support migration.
-//     Once every legacy account has signed in once, this could move to SRP.
-//
-// Both are safe here only because this code runs in Lambda and never in a
-// browser. Calling an Admin API from client-side code would hand out powers no
-// end user should have.
+// Both are only safe because this runs in Lambda and never in a browser.
 
 const REGION =
   process.env.AWS_REGION_NAME ?? process.env.AWS_REGION ?? "ap-southeast-1";
@@ -63,18 +58,11 @@ export function isAuthConfigured(): boolean {
   return Boolean(process.env.COGNITO_USER_POOL_ID && process.env.COGNITO_CLIENT_ID);
 }
 
-// ---------------------------------------------------------------------------
-// The client secret.
-// ---------------------------------------------------------------------------
-// FETCHED, NOT CONFIGURED. The obvious design is a Lambda environment variable
-// holding the secret, which is how the Foundry API key used to live on Vercel.
-// The app client's secret is readable through DescribeUserPoolClient by any
-// principal already allowed to call AdminInitiateAuth on that pool - which this
-// function must be able to do regardless - so copying it into an env var adds a
-// second place for it to exist and leak without adding a single control.
-//
-// Cached at module scope because it is fetched once per execution environment
-// and never changes for the life of the app client.
+// The client secret is FETCHED, not configured. The obvious design is a Lambda env var, but the
+// app client's secret is readable through DescribeUserPoolClient by any principal already
+// allowed to call AdminInitiateAuth on that pool - which this function must be able to do
+// anyway - so copying it into an env var adds a second place for it to leak without adding a
+// single control. Cached at module scope: fetched once per execution environment, never changes.
 let cachedSecret: string | null | undefined;
 
 async function clientSecret(): Promise<string | null> {
@@ -89,13 +77,10 @@ async function clientSecret(): Promise<string | null> {
   return cachedSecret;
 }
 
-/**
- * `SECRET_HASH`, required on every auth call for a client that has a secret.
- *
- * HMAC over username + clientId, NOT over the password. Getting the operand
- * order wrong yields `NotAuthorizedException: Unable to verify secret hash`,
- * which reads exactly like a wrong password.
- */
+/** SECRET_HASH, required on every auth call for a client that has a secret. HMAC over username
+ *  + clientId, NOT over the password. Getting the operand order wrong yields
+ *  "NotAuthorizedException: Unable to verify secret hash", which reads exactly like a wrong
+ *  password. */
 async function secretHash(username: string): Promise<Record<string, string>> {
   const secret = await clientSecret();
   if (!secret) return {};
@@ -132,17 +117,11 @@ export class AuthFailed extends Error {
   }
 }
 
-/**
- * Sign in with email and password.
- *
- * ONE FAILURE MODE, ALWAYS. The pool sets `preventUserExistenceErrors: true`,
- * so Cognito already answers UserNotFound and NotAuthorized identically, and
- * this collapses everything else onto the same message. That property is what
- * lib/password.ts's DUMMY_HASH used to buy at the cost of a real ~290ms bcrypt
- * on every miss - including every unauthenticated request an attacker chose to
- * send. Cognito gives it for free, and that CPU cost is now gone from the login
- * path entirely.
- */
+/** Sign in with email and password. One failure mode, always: the pool sets
+ *  preventUserExistenceErrors, so Cognito already answers UserNotFound and NotAuthorized
+ *  identically, and this collapses everything else onto the same message. That's what
+ *  password.ts's DUMMY_HASH used to buy at the cost of a real ~290ms bcrypt on every miss,
+ *  including every unauthenticated request an attacker chose to send. */
 export async function signIn(email: string, password: string): Promise<Tokens> {
   try {
     const res = await idp().send(
@@ -169,13 +148,9 @@ export async function signIn(email: string, password: string): Promise<Tokens> {
   }
 }
 
-/**
- * Exchange a refresh token for a fresh ID token.
- *
- * SECRET_HASH is keyed on the Cognito `sub`, not the email, on this flow only -
- * the refresh flow has no USERNAME parameter and Cognito computes the hash
- * against the subject. Passing the email here fails for every user.
- */
+/** Exchange a refresh token for a fresh ID token. SECRET_HASH is keyed on the Cognito `sub`,
+ *  not the email, on this flow only - the refresh flow has no USERNAME parameter and Cognito
+ *  computes the hash against the subject. Passing the email fails for every user. */
 export async function refresh(
   refreshToken: string,
   cognitoSub: string,
@@ -213,17 +188,11 @@ export async function refresh(
   }
 }
 
-/**
- * Create a confirmed account, then sign it in.
- *
- * `appUid` is generated by the caller and written to Postgres FIRST, so the
- * `users` row exists before any token can carry its id. The reverse order would
- * leave a signed-in user whose foreign key target does not exist, and every
- * query they made would fail a constraint rather than an auth check.
- *
- * MessageAction SUPPRESS because there is no email provider on this deployment;
- * without it Cognito tries to send an invitation and the create fails.
- */
+/** Create a confirmed account, then sign it in. `appUid` is generated by the caller and written
+ *  to Postgres FIRST so the users row exists before any token can carry its id; the reverse
+ *  order leaves a signed-in user whose foreign key target doesn't exist, and every query fails a
+ *  constraint rather than an auth check. MessageAction SUPPRESS because there's no email
+ *  provider here - without it Cognito tries to send an invitation and the create fails. */
 export async function createAccount(params: {
   email: string;
   password: string;
@@ -262,20 +231,12 @@ export async function createAccount(params: {
   return signIn(params.email, params.password);
 }
 
-/**
- * Revoke every token for a user.
- *
- * THIS IS THE CAPABILITY THE OLD SESSION DID NOT HAVE. lib/auth.ts used to say
- * plainly that sessions were stateless, so "a token stays valid until it
- * expires even if the user row is deleted", and that the only revocation was
- * rotating SESSION_SECRET - which signs every user out at once. Global sign-out
- * revokes one user's refresh tokens server-side, so logout is real rather than
- * cosmetic, and it makes the cookie-clearing race in proxy.ts benign: even if a
- * stale cookie survived the response, its refresh token is already dead.
- *
- * Best-effort: a failed revoke must not stop the cookie being cleared, or the
- * user would appear to still be signed in.
- */
+/** Revoke every token for a user - the capability the old session didn't have. Sessions used to
+ *  be stateless, so a token stayed valid until expiry even if the user row was deleted, and the
+ *  only revocation was rotating SESSION_SECRET, which signs everyone out at once. This revokes
+ *  one user's refresh tokens server-side, so logout is real rather than cosmetic, and it makes
+ *  the cookie-clearing race in proxy.ts benign: even a surviving stale cookie has a dead refresh
+ *  token. Best-effort - a failed revoke must not stop the cookie being cleared. */
 export async function globalSignOut(email: string): Promise<void> {
   try {
     await idp().send(

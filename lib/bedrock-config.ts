@@ -1,38 +1,25 @@
-// Bedrock configuration predicates. Deliberately NOT `server-only`, unlike
-// lib/bedrock.ts which holds the client and the invocation.
-//
-// This split is carried over from lib/foundry-config.ts and exists for the same
-// reason: `isLLMConfigured()` gates the entire LLM layer and is imported from
-// places that must stay loadable outside the Next server runtime.
-// lib/checkin.ts and lib/skill-links.ts both keep their pure halves importable
-// from a plain-Node tsx harness, and re-exporting the gate from a server-only
-// module quietly broke that. Nothing secret lives here - and on Bedrock there
-// is no secret to live anywhere.
+// Bedrock configuration predicates. Deliberately NOT server-only, unlike lib/bedrock.ts which
+// holds the client and the invocation: isLLMConfigured() gates the entire LLM layer and is
+// imported from places that must stay loadable outside the Next server runtime. checkin.ts and
+// skill-links.ts both keep their pure halves importable from a plain-Node tsx harness, and
+// re-exporting the gate from a server-only module quietly broke that. Nothing secret here.
 
-/**
- * Inference profile ids, not bare model ids. Claude 4.5 and newer refuse
- * on-demand invocation with a bare model id and answer with an error naming a
- * profile you have not configured, which reads like a permissions problem.
- */
+/** Inference profile ids, not bare model ids. Claude 4.5+ refuses on-demand invocation with a
+ *  bare id and answers with an error naming a profile you haven't configured, which reads like a
+ *  permissions problem. */
 const DEFAULT_MODEL = "global.anthropic.claude-haiku-4-5-20251001-v1:0";
 const DEFAULT_FALLBACK_MODEL = "global.anthropic.claude-sonnet-4-6";
 
-/**
- * True when the LLM layer is usable. The single gate for the whole layer -
- * lib/extraction.ts and lib/checkin.ts re-export it, and app/(app)/layout.tsx
- * uses it to decide demo mode.
+/** True when the LLM layer is usable - the single gate for the whole layer.
  *
- * THIS IS THE ONE PREDICATE THE MIGRATION SIMPLIFIED RATHER THAN TRANSLATED.
- * On Foundry it had to answer "is there an API key, OR a federated identity?",
- * because getting either wrong dropped the whole deployment into demo mode with
- * heuristic output and no error anywhere. Bedrock has no key and no endpoint:
- * authentication is the execution role, which is either present or the process
- * is not running on AWS at all. So the question collapses to "are we on AWS,
- * and has someone opted out?".
+ *  The one predicate the migration simplified rather than translated. On Foundry it had to
+ *  answer "is there an API key, OR a federated identity?", because getting either wrong dropped
+ *  the deployment into demo mode with heuristic output and no error anywhere. Bedrock has no key
+ *  and no endpoint - auth is the execution role, which is either present or we're not on AWS at
+ *  all - so the question collapses to "are we on AWS, and has someone opted out?".
  *
- * `TASKBUDDY_NO_LLM=1` is the explicit opt-out, for running the app locally
- * against the offline heuristic extractor without unsetting credentials.
- */
+ *  TASKBUDDY_NO_LLM=1 is the explicit opt-out, for running locally against the offline
+ *  extractor without unsetting credentials. */
 export function isLLMConfigured(): boolean {
   if (process.env.TASKBUDDY_NO_LLM === "1") return false;
   // Set by the Lambda runtime; also set by `aws configure`-style sessions via
@@ -62,42 +49,26 @@ export function bedrockRegion(): string {
   );
 }
 
-/**
- * The app's four effort levels, mapped onto Bedrock's five.
+/** The app's four effort levels mapped onto Bedrock's five. Bedrock's floor is "low", so the
+ *  app's "minimal" maps down to it. "xhigh" and "max" need extended thinking and are
+ *  deliberately not exposed - nothing here has ever needed more than "medium", and those two are
+ *  where reasoning cost stops being rounding error. */
+/** Whether to send outputConfig.effort at all.
  *
- * Bedrock's floor is "low"; the app's "minimal" (used only by the one-shot
- * prose call in lib/generate.ts) has no exact counterpart and maps down to it.
- * "xhigh" and "max" are reachable only with extended thinking enabled and are
- * deliberately not exposed - no call site in this app has ever needed more than
- * "medium", and the two highest levels are where reasoning cost stops being
- * rounding error.
- */
-/**
- * Whether to send `outputConfig.effort` at all.
+ *  OFF, because Bedrock rejects it. The design assumed effort and textFormat compose in one
+ *  outputConfig - on the API shape they do - but the models this app calls refuse the field:
  *
- * OFF, because Bedrock rejects it. The design assumed `effort` and
- * `textFormat` compose in one `outputConfig` - and on the API shape they do -
- * but the models this app actually calls refuse the field outright:
+ *    ValidationException (400): This model doesn't support the effort field.
  *
- *   ValidationException (400): This model doesn't support the effort field.
- *                              Remove effort and try again.
+ *  Observed live 2026-08-19 from the llm-worker for BOTH the primary and the fallback, so the
+ *  chain exhausted itself and every LLM call in the app failed. The failure is quiet in exactly
+ *  the way that matters: callers degrade to their offline heuristics, the job row still settles
+ *  `succeeded`, and the dashboard shows its deterministic draft. Nothing surfaces as broken, the
+ *  app just silently stops being the thing it's for. The only evidence is CloudWatch.
  *
- * Observed live on 2026-08-19 from the llm-worker, for BOTH
- * `global.anthropic.claude-haiku-4-5-20251001-v1:0` and
- * `global.anthropic.claude-sonnet-4-6`, which is to say for the primary and the
- * fallback - so the chain exhausted itself and every LLM call in the app failed.
- *
- * The failure is quiet in exactly the way that matters: callers degrade to their
- * offline heuristics, the job row still settles `succeeded`, and the dashboard
- * shows its deterministic "Strategy draft" instead of an AI synthesis. Nothing
- * surfaces as broken; the app just silently stops being the thing it is for. The
- * only evidence is the worker's CloudWatch logs.
- *
- * Kept as a flag rather than deleted because `bedrockEffort` still maps the
- * app's four levels correctly and the field is documented on Converse - so this
- * is very likely a per-model gap that a future model version closes. Flip to
- * true and re-run one real call per model to check.
- */
+ *  Kept as a flag rather than deleted because bedrockEffort still maps the levels correctly and
+ *  the field is documented on Converse, so this is likely a per-model gap a future version
+ *  closes. Flip to true and re-run one real call per model to check. */
 export const SEND_EFFORT = false;
 
 export function bedrockEffort(effort: string | undefined): string {

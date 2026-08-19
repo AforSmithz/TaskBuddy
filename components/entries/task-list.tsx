@@ -28,7 +28,7 @@ export function TaskList({ tasks }: { tasks: Task[] }) {
   function changeStatus(id: string, status: TaskStatus) {
     startTransition(async () => {
       setOptimistic({ id, status });
-      // Local stamp → a status change to done accrues a work session (S2 slice B);
+      // Local stamp → a status change to done accrues a work session;
       // ignored for any other transition.
       await updateTaskStatusAction(id, status, undefined, localSessionStamp());
     });

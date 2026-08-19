@@ -5,7 +5,7 @@ import { useEffect } from "react";
 /**
  * Stamps the browser's LOCAL "now" (calendar day + minutes since local midnight) into the
  * `tb_local_now` cookie so the server's rolling-horizon read/roll paths can sharpen the intra-day
- * frozen zone (S3c-4). This is the S2 timezone-gotcha resolution: the client knows its own offset,
+ * frozen zone. This is the S2 timezone-gotcha resolution: the client knows its own offset,
  * so it captures local time here rather than letting the server re-derive it from a UTC instant
  * (which would be wrong by the user's offset). Renders nothing.
  *

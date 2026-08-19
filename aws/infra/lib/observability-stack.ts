@@ -18,14 +18,9 @@ export interface ObservabilityStackProps extends StackProps {
   readonly worker: lambda.Function;
 }
 
-/**
- * Signals. Written at the same time as the rest of the stack, deliberately.
- *
- * The Azure migration shipped with excellent prose and no telemetry, so every
- * invariant had to be re-verified by a human reading comments. The alarms below
- * are the ones that watch a specific claim made elsewhere in this repo; each is
- * annotated with the claim it is guarding.
- */
+/** Signals. Written at the same time as the rest of the stack, deliberately - the Azure migration
+ *  shipped with excellent prose and no telemetry, so every invariant had to be re-verified by a
+ *  human reading comments. Each alarm below is annotated with the claim it guards. */
 export class ObservabilityStack extends Stack {
   readonly alerts: sns.Topic;
 
@@ -59,19 +54,13 @@ export class ObservabilityStack extends Stack {
         period: Duration.minutes(5),
       });
 
-    // ---------------------------------------------------------------------
-    // THE ALARM THAT MATTERS MOST HERE.
-    // ---------------------------------------------------------------------
-    // On Azure the equivalent was `cpu_credits_remaining`, because B-series
-    // credit exhaustion presents as "everything is slow and every health check
-    // is green". The Aurora analogue is not performance, it is spend: capacity
-    // that never returns to zero is the single failure mode that converts this
-    // cluster from ~$10/mo to ~$50/mo, and nothing about it looks like an
-    // outage. A held connection - one leaked transaction, one pool with a long
-    // idle timeout, one forgotten psql session - is enough.
-    //
-    // Sustained for an hour, because a genuine working session legitimately
-    // holds capacity for minutes at a time.
+      // The alarm that matters most here. On Azure the equivalent was cpu_credits_remaining,
+      // because B-series credit exhaustion presents as "everything is slow and every health check
+      // is green". The Aurora analogue isn't performance, it's spend: capacity that never returns
+      // to zero is the single failure mode that takes this cluster from ~$10/mo to ~$50/mo, and
+      // nothing about it looks like an outage. One leaked transaction or one forgotten psql session
+      // is enough. Sustained for an hour, because a real working session legitimately holds
+      // capacity for minutes at a time.
     alarm("CapacityNeverPauses", rdsMetric("ServerlessDatabaseCapacity", "Minimum"), {
       alarmName: `${APP}-db-not-pausing`,
       alarmDescription:
@@ -109,13 +98,9 @@ export class ObservabilityStack extends Stack {
       treatMissingData: cw.TreatMissingData.NOT_BREACHING,
     });
 
-    // ---------------------------------------------------------------------
-    // A message in the DLQ is never routine.
-    // ---------------------------------------------------------------------
-    // This is the alarm that replaces a console.error nobody reads. It is the
-    // whole reason `filterVerified`'s fail-closed behaviour becomes safe on a
-    // queue: a dropped judgement now has somewhere to land and something
-    // watching where it landed.
+    // A message in the DLQ is never routine. This is the alarm that replaces a console.error
+    // nobody reads, and it's the whole reason filterVerified's fail-closed behaviour becomes safe
+    // on a queue: a dropped judgement now has somewhere to land and something watching it.
     alarm(
       "DlqNotEmpty",
       props.dlq.metricApproximateNumberOfMessagesVisible({
@@ -183,11 +168,8 @@ export class ObservabilityStack extends Stack {
       },
     );
 
-    // -----------------------------------------------------------------------
-    // Budget. $10, matching azure/observability.sh, and for the same reason:
-    // the stack should sit near $13-17/mo, so a threshold set at the credit
-    // allowance would only speak long after something had gone wrong.
-    // -----------------------------------------------------------------------
+    // Budget. $10: the stack should sit near $13-17/mo, so a threshold at the credit allowance
+    // would only speak long after something had gone wrong.
     new budgets.CfnBudget(this, "MonthlyBudget", {
       budget: {
         budgetName: `${APP}-monthly`,
@@ -227,9 +209,9 @@ export class ObservabilityStack extends Stack {
       ],
     });
 
-    // -----------------------------------------------------------------------
+       // -----------------------------------------------------------------------
     // Dashboard.
-    // -----------------------------------------------------------------------
+       // -----------------------------------------------------------------------
     const dashboard = new cw.Dashboard(this, "Dashboard", {
       dashboardName: `${APP}`,
       defaultInterval: Duration.days(7),

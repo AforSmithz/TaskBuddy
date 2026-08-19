@@ -33,7 +33,6 @@ import { TaskActions } from "@/components/tasks/task-actions";
 import { formatDate, formatMinutes, isOverdue } from "@/lib/format";
 import { cn } from "@/lib/cn";
 
-/** A linked row in the dependency cards - the prerequisite or downstream task. */
 function DepRow({ task, reason }: { task: Task; reason: string | null }) {
   return (
     <li className="flex items-start gap-2.5 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2">

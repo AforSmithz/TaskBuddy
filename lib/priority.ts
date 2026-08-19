@@ -1,4 +1,4 @@
-import type { FactorScores, PriorityLabel } from "./types";
+import type { FactorScores, PriorityLabel } from "@/lib/types";
 
 // Deterministic priority engine.
 // The LLM (or heuristic extractor) supplies 1-5 factor ratings; this module
@@ -13,7 +13,6 @@ export const PRIORITY_WEIGHTS = {
   effort: -0.1, // effort is subtracted: harder tasks are slightly penalised
 } as const;
 
-/** Clamp a factor rating into the valid 1-5 range. */
 function clampFactor(n: number): number {
   if (!Number.isFinite(n)) return 3;
   return Math.min(5, Math.max(1, Math.round(n)));

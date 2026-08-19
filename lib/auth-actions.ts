@@ -4,28 +4,23 @@ import { createHash, randomUUID, timingSafeEqual } from "crypto";
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
-import { EmailTakenError, createUser, normalizeEmail } from "./db/auth-queries";
-import { AuthFailed, createAccount, globalSignOut, isAuthConfigured, signIn } from "./cognito";
-import { isRateLimited } from "./rate-limit";
-import { clearSessionCookie, setSessionCookies, ID_COOKIE, verifySession } from "./session";
-import { isDbConfigured } from "./db/pool";
-import type { AuthState } from "./types";
+import { EmailTakenError, createUser, normalizeEmail } from "@/lib/db/auth-queries";
+import { AuthFailed, createAccount, globalSignOut, isAuthConfigured, signIn } from "@/lib/cognito";
+import { isRateLimited } from "@/lib/rate-limit";
+import { clearSessionCookie, setSessionCookies, ID_COOKIE, verifySession } from "@/lib/session";
+import { isDbConfigured } from "@/lib/db/pool";
+import type { AuthState } from "@/lib/types";
 
-// Server Actions backing the login, signup and logout flows.
+// Server Actions backing login, signup and logout.
 //
-// Exports and signatures are unchanged from the Azure versions, so
-// `components/auth/auth-form.tsx` (useActionState) and the logout <form> in
-// `components/layout/sidebar.tsx` keep working untouched. THAT IS THE WHOLE
-// POINT OF THIS SHAPE: Cognito's hosted UI would have replaced these pages with
-// a redirect flow, and the app's own login screen would have been discarded for
-// no gain that matters at two users. Cognito is the credential store; the
-// interface stays ours.
+// Exports and signatures are unchanged from the Azure versions, so auth-form.tsx and the logout
+// form keep working untouched. That's the point of this shape: Cognito's hosted UI would have
+// replaced these pages with a redirect flow and discarded the app's own login screen for no gain
+// that matters at two users. Cognito is the credential store; the interface stays ours.
 //
-// CSRF is already handled and needs no token here. Next 16 gives Server Actions
-// three layers: POST-only invocation, an Origin-vs-Host comparison that aborts on
-// mismatch, and `SameSite=Lax` keeping the cookie off cross-site POSTs. Do not
-// add `experimental.serverActions.allowedOrigins` - that option only *widens* the
-// accepted origin set.
+// CSRF is already handled and needs no token here - Next 16 gives Server Actions POST-only
+// invocation, an Origin-vs-Host comparison that aborts on mismatch, and SameSite=Lax keeping the
+// cookie off cross-site POSTs. Don't add allowedOrigins; that option only WIDENS the accepted set.
 
 function readCredentials(formData: FormData) {
   return {
@@ -58,17 +53,13 @@ export async function loginAction(
     return { error: "No user pool is configured on this deployment." };
   }
 
-  // Still in front of the call, though it now guards a different cost.
+  // Still in front of the call, but guarding a different cost now. On Azure this existed because
+  // loginAction ran a deliberate cost-12 bcrypt on every request including misses, burning ~290ms
+  // of billable CPU per hit. Cognito's preventUserExistenceErrors provides that
+  // indistinguishability itself, so the bcrypt and the CPU sink are gone.
   //
-  // On Azure this existed because `loginAction` ran a deliberate cost-12 bcrypt
-  // on EVERY request including misses - lib/password.ts DUMMY_HASH - so an
-  // unauthenticated endpoint burned ~290ms of billable CPU per hit. Cognito's
-  // `preventUserExistenceErrors` provides that indistinguishability itself, so
-  // the bcrypt is gone from this path and with it the CPU sink.
-  //
-  // What remains worth throttling is the AdminInitiateAuth call: it is a
-  // network round trip per attempt, it is billed, and Cognito's own throttles
-  // are account-wide - so an unthrottled password-spray against one account
+  // What's left worth throttling is AdminInitiateAuth: a billed network round trip per attempt,
+  // and Cognito's own throttles are account-wide, so an unthrottled spray against one account
   // would degrade sign-in for the other. Ten a minute is far above any human.
   if (await isRateLimited("login", 10)) {
     return { error: "Too many attempts. Wait a minute and try again." };
@@ -86,7 +77,7 @@ export async function loginAction(
     return { error: "Could not sign you in. Please try again." };
   }
 
-  // OUTSIDE every try/catch: redirect() works by throwing, so a catch block
+   // OUTSIDE every try/catch: redirect() works by throwing, so a catch block
   // above would swallow it and the user would sit on the login page having
   // successfully logged in. This is the single most likely way this file breaks.
   redirect("/");
@@ -126,15 +117,11 @@ export async function signupAction(
     return { error: "That invite code is not valid." };
   }
 
-  // POSTGRES FIRST, COGNITO SECOND, and the order is load-bearing. `appUid` is
-  // a foreign key target for 24 tables; creating the Cognito user first would
-  // open a window where a valid token carries a `custom:app_uid` that no row
-  // matches, and every query that user made would fail a constraint rather
-  // than an auth check.
-  //
-  // The reverse failure - a `users` row with no Cognito account - is harmless
-  // and self-correcting: nobody can sign in as it, and retrying signup with the
-  // same email hits EmailTakenError from the unique index.
+  // Postgres first, Cognito second, and the order is load-bearing. appUid is a foreign key target
+  // for 24 tables, so creating the Cognito user first opens a window where a valid token carries
+  // a custom:app_uid no row matches, and every query fails a constraint rather than an auth check.
+  // The reverse failure - a users row with no Cognito account - is harmless and self-correcting:
+  // nobody can sign in as it, and retrying signup with the same email hits EmailTakenError.
   const appUid = randomUUID();
   try {
     await createUser({ id: appUid, email, fullName: name });
@@ -166,7 +153,7 @@ export async function logoutAction(): Promise<void> {
   const claims = await verifySession(store.get(ID_COOKIE)?.value);
   if (claims?.email) await globalSignOut(claims.email);
 
-  // `clearSessionCookie`, never `store.delete()`. Next's delete() emits a
+   // `clearSessionCookie`, never `store.delete()`. Next's delete() emits a
   // Set-Cookie with neither Secure nor Path, which a browser must reject for a
   // `__Host-` prefixed cookie - so logout would be a silent no-op in production
   // and work fine in dev. See lib/session.ts.

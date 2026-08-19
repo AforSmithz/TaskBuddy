@@ -8,7 +8,7 @@ import type {
   SkillNode,
   SkillPathRescheduleMove,
   SkillRecoveryMove,
-} from "./types";
+} from "@/lib/types";
 import {
   flowFinishOffsets,
   flowFinishOffsetsComfort,
@@ -17,20 +17,13 @@ import {
   type DayCapacity,
   type FlowLane,
   type WindowCapacity,
-} from "./schedule";
+} from "@/lib/schedule";
 
-// The forecast engine - TaskBuddy's "will I make it, and how sure?" number.
-//
-// Two independent halves, both pure and deterministic:
-//   1. deployableMinutes(): how much time you actually have before a deadline,
-//      from the weekly availability template, per-day overrides, and the
-//      commitments that consume it.
-//   2. forecast(): a Monte Carlo over how long the remaining tasks really take
-//      (estimates are uncertain), giving the probability that the work fits in
-//      the deployable time.
-//
-// The Monte Carlo is seeded from its inputs, so identical inputs always yield
-// the same probability - the number is stable across renders, not jittery.
+// The forecast() engine - the "will I make it, and how sure?" number. Two pure halves:
+// deployableMinutes() works out how much time you actually have before a deadline, and
+// forecast() runs a Monte Carlo over how long the remaining tasks really take. The MC is
+// seeded from its inputs, so identical inputs always give the same probability - the number
+// is stable across renders, not jittery.
 
 const MINUTES_PER_HOUR = 60;
 const DEFAULT_ITERATIONS = 5000;
@@ -59,18 +52,13 @@ export interface DeployableInput {
   deadline: string | null;
   /** Weekly template: baseline hours per weekday (0=Sun .. 6=Sat). */
   availability: Availability[];
-  /** Per-day overrides of the template. */
   overrides: AvailabilityOverride[];
   /** Events that consume hours on a date. */
   commitments: Pick<Commitment, "date" | "hours">[];
 }
 
-/**
- * Total deployable minutes from today through the deadline (both inclusive).
- *
- * For each day: deployable = max(0, (override ?? template) − commitments).
- * Returns 0 when there is no deadline or the deadline is already past.
- */
+/** Total deployable minutes from today through the deadline, inclusive. Per day that's
+ *  max(0, (override ?? template) - commitments). 0 with no deadline or a past one. */
 export function deployableMinutes(input: DeployableInput): number {
   if (!input.deadline) return 0;
 
@@ -134,52 +122,32 @@ function seedFrom(estimates: number[], deployable: number): number {
   return h >>> 0;
 }
 
-// --- 2. Monte Carlo forecast ------------------------------------------------
+// --- 2. Monte Carlo forecast() ------------------------------------------------
 
 export interface ForecastOptions {
   iterations?: number;
   sigma?: number;
-  /**
-   * Mean of `log(factor)` - the learned estimation bias. Omitted ⇒ `-sigma²/2`,
-   * which makes `E[factor] = 1` (estimates unbiased on average). A positive
-   * value shifts the whole distribution up: the user typically runs over.
-   */
+  /** Mean of log(factor) - the learned bias. Omitted gives -sigma²/2, which makes E[factor]
+   *  = 1 (unbiased on average). Positive means the user typically runs over. */
   meanLog?: number;
-  /**
-   * OVERHAUL S3b Pillar 2 - per-window capacity segments for the JOINT flow. When
-   * present, `globalForecastJoint` flows the sampled durations across these instead
-   * of whole-day capacities, charging each fraction of a task at the net velocity
-   * multiplier of the window it occupies (window-spanning, so work in a learned-fast
-   * window genuinely shrinks and a task that spills into a slower one is priced part
-   * fast, part slow). The
-   * deadline check stays day-granular (each segment carries its day). Absent - or a
-   * flat/unlearned split (all `netMultiplier === 1`) - is byte-identical to the
-   * day-granular forecast. Built by `arrange.ts windowCapacities`; the seed/total are
-   * still taken from `capacities`, so determinism is unchanged.
-   */
+  /** Per-window capacity segments for the joint flow. When present the durations flow across
+   *  these instead of whole days, charging each fraction of a task at the net multiplier of the
+   *  window it occupies - so work in a learned-fast window genuinely shrinks and a task that
+   *  spills into a slower one is priced part fast, part slow. The deadline check stays
+   *  day-granular. A flat or unlearned split is byte-identical to the day-granular forecast(). */
   windowCapacities?: WindowCapacity[];
-  /**
-   * OVERHAUL S3b Phase 3 - comfort-capped load smoothing. When set, `globalForecastJoint`
-   * flows the sampled durations through `flowFinishOffsetsComfort`: each day's HARD minutes
-   * (`task.difficulty × sampled duration`) are metered against this soft daily ceiling, so
-   * deep work spreads across days (finishing later - the honestly-priced cost of a humaner
-   * pace). Absent is byte-identical to today; takes precedence over `windowCapacities` this
-   * phase (comfort + window composition is a later refinement). The deadline check stays
-   * day-granular, so the result is comparable to the canonical (uncapped) forecast.
-   */
+  /** Comfort-capped load smoothing. When set, each day's HARD minutes (difficulty × sampled
+   *  duration) are metered against this soft ceiling so deep work spreads across days,
+   *  finishing later - the honestly-priced cost of a humaner pace. The deadline check stays
+   *  day-granular, so the result stays comparable to the uncapped forecast(). */
   comfortCapMinutes?: number;
 }
 
-/**
- * Probability that the remaining work fits in the deployable time.
- *
- * Each task's true duration is modelled as `estimate × factor`, where
- * `log(factor)` is normal with mean `meanLog` and std dev `sigma`. By default
- * `meanLog = -sigma²/2`, so `E[factor] = 1` (estimates unbiased on average,
- * spread either way). Passing a fitted `meanLog` tilts it toward the user's
- * real history. We sample the whole set many times and count how often the
- * total lands within budget.
- */
+/** Probability that the remaining work fits in the deployable time. Each task's true duration
+ *  is `estimate × factor`, where log(factor) is normal with mean `meanLog` and sd `sigma`. By
+ *  default meanLog = -sigma²/2 so estimates are unbiased on average; a fitted meanLog tilts it
+ *  toward the user's real history. Sample the whole set many times, count how often the total
+ *  lands within budget. */
 export function forecast(
   estimates: number[],
   deployable: number,
@@ -206,11 +174,9 @@ export function forecast(
   const meanLog = options.meanLog ?? -(sigma * sigma) / 2;
   const rng = mulberry32(seedFrom(open, deployable));
 
-  // Sample the total remaining work many times: the pass-rate is the
-  // probability, and the spread of the sampled totals is an honest effort
-  // interval (p10 - p90) around the point estimate - the same uncertainty the
-  // odds price, expressed in hours. We compute the interval even when over
-  // budget (it's a property of the work, not the deadline).
+  // The pass-rate is the probability, and the spread of sampled totals is an honest effort
+  // interval around the point estimate. Computed even when over budget - it's a property of
+  // the work, not the deadline.
   const totals = new Array<number>(iterations);
   let made = 0;
   for (let i = 0; i < iterations; i++) {
@@ -245,9 +211,8 @@ function percentile(sorted: number[], p: number): number {
   return sorted[lo] + (sorted[hi] - sorted[lo]) * (idx - lo);
 }
 
-// --- Global (contention-aware) forecast -------------------------------------
+// --- Global (contention-aware) forecast() -------------------------------------
 
-/** Whole days from ISO date `a` to ISO date `b` (UTC, b − a). */
 function daysBetweenISO(a: string, b: string): number {
   const da = Date.parse(`${a.slice(0, 10)}T00:00:00Z`);
   const db = Date.parse(`${b.slice(0, 10)}T00:00:00Z`);
@@ -259,44 +224,26 @@ export interface GlobalForecastTask {
   taskId: string;
   estimatedMinutes: number;
   projectId: string;
-  /**
-   * Per-task velocity model (OVERHAUL S2): this task's own segment-shrunk
-   * `(meanLog, sigma)`. When present the sampler biases THIS task by its own
-   * domain velocity instead of the one global scalar; absent ⇒ the scalar
-   * `options.meanLog`/`sigma` (identical to before S2). Riding the bias on the
-   * task - not a forecast-wide option - is what lets domains differentiate within
-   * one joint run. See `lib/velocity.ts`.
-   */
+  /** This task's own segment-shrunk (meanLog, sigma). When present the sampler biases THIS
+   *  task by its own domain velocity instead of the global scalar. Riding the bias on the task
+   *  rather than on the forecast() options is what lets domains differentiate within one run. */
   model?: SegmentModel;
-  /**
-   * Cognitive-load weight in `[0,1]` (OVERHAUL S3b Phase 3). When `options.comfortCap‑
-   * Minutes` is set, the joint flow meters each day's hard minutes (`difficulty × sampled
-   * duration`) against the cap, spreading deep work across days. Absent ⇒ unmetered (0).
-   */
+  /** Cognitive load in [0,1]. With comfortCapMinutes set, the joint flow meters each day's
+   *  hard minutes against the cap. Absent means unmetered. */
   difficulty?: number;
 }
 
-/**
- * Contention-aware completion odds for every deadlined project, from ONE seeded
- * joint Monte Carlo over the global order. This is `forecast()` generalised to
- * the whole timeline: instead of asking per project "does my work fit in my
- * budget?", each iteration samples every open task's true duration, walks the
- * single global order across the real day-by-day capacities (so projects compete
- * for the same hours), and records for each project whether its last task lands
- * on or before its deadline. One run answers all projects from the *same* sampled
- * future, so the odds are mutually coherent and capture the cascade where a
- * shared early overrun pushes every downstream project later.
+/** Contention-aware odds for every deadlined project, from ONE seeded joint Monte Carlo over
+ *  the global order. forecast() generalised to the whole timeline: instead of asking per
+ *  project "does my work fit my budget?", each iteration samples every open task's duration,
+ *  walks the single global order across the real day-by-day capacities so projects compete for
+ *  the same hours, and records whether each project's last task lands by its deadline. One run
+ *  answers everything from the SAME sampled future, so the odds are mutually coherent and
+ *  capture the cascade where one shared early overrun pushes everything downstream later.
  *
- * Same seeded RNG + log-normal estimation model as `forecast()` - the Monte
- * Carlo still owns the odds; contention only changes which work competes and how
- * much time is left before each deadline. With a single project (no competing
- * work) the flow check reduces to `forecast()`'s sum-vs-deployable, so the number
- * matches it up to sampling noise; the honest drop appears only when projects
- * actually share hours.
- *
- * Returns `projectId → probability` for every project in `deadlineByProject` that
- * has a deadline. A deadlined project with no open work scores 1.
- */
+ *  With a single project the flow check reduces to forecast()'s sum-vs-deployable, so the
+ *  numbers match up to sampling noise; the honest drop only appears when projects share hours.
+ *  A deadlined project with no open work scores 1. */
 export function globalForecast(
   order: GlobalForecastTask[],
   capacities: DayCapacity[],
@@ -308,16 +255,11 @@ export function globalForecast(
     .byProject;
 }
 
-/**
- * The full joint read: per-project odds (`byProject`, identical to what
- * `globalForecast` returns) PLUS `allOnTime` - the fraction of the SAME sampled
- * futures in which *every* deadlined project's last task lands on or before its
- * deadline. `allOnTime` is the honest portfolio conjunction "do this and
- * everything lands," not the product of independent per-project odds (the
- * projects share one sampled future, so their finishes are correlated through
- * contention). A deadlined project with no open work counts as on time, so it
- * never breaks the conjunction; with no deadlined work at all, `allOnTime` is 1.
- */
+/** The full joint read: per-project odds plus `allOnTime`, the fraction of the SAME sampled
+ *  futures in which EVERY deadlined project lands on time. That's the honest portfolio
+ *  conjunction, not the product of independent per-project odds - the projects share one
+ *  sampled future, so their finishes are correlated through contention. A deadlined project
+ *  with no open work counts as on time; with no deadlined work at all, allOnTime is 1. */
 export function globalForecastJoint(
   order: GlobalForecastTask[],
   capacities: DayCapacity[],
@@ -358,12 +300,10 @@ export function globalForecastJoint(
   const meanLog = options.meanLog ?? -(sigma * sigma) / 2;
   const rng = mulberry32(seedFrom(estimates, deployableSum));
 
-  // OVERHAUL S3b Pillar 2: when window segments are supplied, flow across them
-  // (each task scaled by the multiplier of the window it starts in) instead of
-  // whole days. Built ONCE - the lanes are static across iterations; only the
-  // sampled durations change. A flat/unlearned split returns the same finish DAY,
-  // so this is byte-identical to the day-granular flow until window velocity is
-  // earned. `deployableSum`/the seed stay from `capacities`, so determinism holds.
+  // When window segments are supplied, flow across them (each task scaled by the multiplier of
+  // the window it starts in) instead of whole days. Built ONCE - the lanes are static across
+  // iterations, only the sampled durations change. A flat split returns the same finish DAY,
+  // so this is byte-identical until window velocity is earned.
   const windowLanes: FlowLane[] | null = options.windowCapacities
     ? options.windowCapacities.map((w) => ({
         capacityMinutes: w.capacityMinutes,
@@ -372,13 +312,10 @@ export function globalForecastJoint(
       }))
     : null;
 
-  // OVERHAUL S3b Phase 3 - comfort-capped smoothing: meter each day's HARD minutes
-  // (a task's difficulty × its sampled duration) against a soft ceiling, spreading deep
-  // work across days. The difficulty weights are static (read once); the hard vector is
-  // refilled per iteration from the sampled durations. When window lanes are ALSO present
-  // the two COMPOSE (Phase 4): work flows across windows priced by velocity while hard work
-  // still spreads across days (`flowFinishOffsetsComfortLanes`). Absent ⇒ the exact
-  // day-granular / windowed path.
+    // Comfort-capped smoothing: meter each day's hard minutes against a soft ceiling so deep
+    // work spreads across days. Difficulty weights are static; the hard vector is refilled per
+    // iteration from the sampled durations. With window lanes also present the two compose
+    // work flows across windows priced by velocity while hard work still spreads across days.
   const comfortCap = options.comfortCapMinutes;
   const difficulties = comfortCap != null ? order.map((t) => t.difficulty ?? 0) : null;
   const hard = comfortCap != null ? new Array<number>(order.length).fill(0) : null;
@@ -393,7 +330,7 @@ export function globalForecastJoint(
       const est = estimates[k];
       // Each task biased by its OWN velocity model when it carries one (OVERHAUL
       // S2), else the global scalar. The per-task bias is applied in-loop, not in
-      // the seed, so determinism + the RNG stream stay identical to `forecast()`.
+           // the seed, so determinism + the RNG stream stay identical to `forecast()`.
       const m = order[k].model;
       durations[k] =
         est > 0
@@ -437,13 +374,9 @@ export interface CandidateTask {
   priority_score: number | null;
 }
 
-/**
- * Recommend which task to defer past the deadline to recover probability.
- *
- * Tries deferring lowest-priority tasks first (cheapest to the plan), recomputes
- * the probability without each, and returns the moves that actually help - 
- * best improvement first.
- */
+/** Which task to defer past the deadline to recover probability. Tries lowest-priority tasks
+ *  first (cheapest to the plan), recomputes without each, returns the ones that actually help,
+ *  best improvement first. */
 export function recoveryMoves(
   tasks: CandidateTask[],
   deployable: number,
@@ -484,23 +417,15 @@ export function recoveryMoves(
     .slice(0, limit);
 }
 
-/**
- * The non-checkpoint leaf skill nodes of a goal that can be parked without
- * abandoning it - the sheddability rule shared by `skillRecoveryMoves` (the
- * per-goal `defer_skill` move) and the pit-wall's cross-project skill triage,
- * so both paths agree on what is safe to park. A node qualifies only if:
- *  - **the goal has more than one open node** - a single remaining node is the
- *    whole goal, and parking it is abandonment, not recovery;
- *  - **it is not a checkpoint** - a checkpoint is a milestone; parking one
- *    abandons the goal's demonstrable bar (the "never shed the goal's bar" twin
- *    of the pit-wall "never shed a project's last task" invariant);
- *  - **nothing still-open depends on it** - parking a prerequisite would strand
- *    its dependents, so only leaves of the open frontier qualify.
+/** The non-checkpoint leaf skill nodes that can be parked without abandoning the goal - the
+ *  sheddability rule shared by the per-goal defer_skill move and the pit wall's cross-project
+ *  skill triage, so both agree on what's safe. A node qualifies only if the goal has more than
+ *  one open node (a single remaining node IS the goal, so parking it is abandonment), it isn't
+ *  a checkpoint (that's the goal's demonstrable bar), and nothing still-open depends on it
+ *  (parking a prerequisite would strand its dependents).
  *
- * `deferred`/`attained` nodes are already out of the plan and ignored. Returned
- * unsorted - each caller imposes its own shed order (ascending effort for
- * `skillRecoveryMoves`, value density for the pit wall). Pure.
- */
+ *  Deferred/attained nodes are already out of the plan. Returned unsorted - each caller
+ *  imposes its own shed order. */
 export function sheddableSkillNodes(nodes: SkillNode[]): SkillNode[] {
   const open = nodes.filter((n) => !n.attained && !n.deferred);
   if (open.length <= 1) return [];
@@ -509,18 +434,12 @@ export function sheddableSkillNodes(nodes: SkillNode[]): SkillNode[] {
   return open.filter((n) => !n.is_checkpoint && !hasOpenDependent(n.id));
 }
 
-/**
- * Per-skill recovery for a learning goal: which non-checkpoint skill nodes, if
- * parked out of the current push, recover probability. The learning-goal analogue
- * of `recoveryMoves`.
+/** Per-skill recovery for a learning goal: which non-checkpoint nodes, parked out of the
+ *  current push, recover probability. The learning-goal analogue of recoveryMoves.
  *
- * The forecast reasons over BOTH the goal's real tasks and its unattained skill
- * effort, so a node is measured by removing its estimate from that combined pool.
- * Only `sheddableSkillNodes` are offered (never a checkpoint, never a node
- * something still-open depends on, never the goal's last node).
- *
- * Best improvement first; each kept move actually lifts the odds (> current + 0.01).
- */
+ *  The forecast() reasons over both real tasks and unattained skill effort, so a node is measured
+ *  by removing its estimate from that combined pool. Only sheddableSkillNodes are offered.
+ *  Best improvement first; each kept move actually lifts the odds. */
 export function skillRecoveryMoves(
   nodes: SkillNode[],
   realEstimates: number[],
@@ -566,26 +485,16 @@ export function skillRecoveryMoves(
     .slice(0, limit);
 }
 
-/**
- * For each *descopable frontier milestone*, the strand-free set of open nodes that
- * become dead weight if that milestone slides out of the current push - the unit a
- * `reschedule_skill` move parks. The set-level generalization of
- * {@link sheddableSkillNodes}: where that offers a single non-checkpoint leaf, this
- * offers a whole checkpoint chain.
+/** For each descopable frontier milestone, the strand-free set of open nodes that become dead
+ *  weight if it slides out of the current push - the unit a reschedule_skill move parks. The
+ *  set-level generalization of sheddableSkillNodes: that offers a single leaf, this offers a
+ *  whole checkpoint chain.
  *
- * A checkpoint `C` is a **descope candidate** iff no OTHER open checkpoint
- * transitively depends on it - it is on the milestone frontier, so nothing kept
- * needs it. Descoping `C` means parking the connected component of `C` in the graph
- * of open nodes *with every prerequisite of a kept checkpoint removed*: that
- * component is exactly `C` plus the prep that leads only to `C` (and any node that
- * can't be reached without `C`), and it is provably strand-free - no kept node can
- * depend on a parked one, because a kept node's prerequisites are all "needed by a
- * kept checkpoint" and therefore excluded from every component but their own.
- *
- * Only `open` (unattained, non-deferred) nodes are considered - attained/parked
- * nodes are already out of the push. Pure. Returns the checkpoint with its park-set
- * (which includes the checkpoint); each caller imposes its own order/gate.
- */
+ *  A checkpoint C is a candidate iff no OTHER open checkpoint transitively depends on it, so
+ *  nothing kept needs it. Descoping C parks the connected component of C in the graph of open
+ *  nodes with every prerequisite of a kept checkpoint removed - exactly C plus the prep that
+ *  leads only to C. That's provably strand-free: a kept node's prereqs are all "needed by a
+ *  kept checkpoint" and therefore excluded from every component but their own. */
 export function descopableMilestoneParkSets(
   nodes: SkillNode[],
 ): { checkpoint: SkillNode; nodes: SkillNode[] }[] {
@@ -653,19 +562,11 @@ export function descopableMilestoneParkSets(
   return out;
 }
 
-/**
- * Per-path recovery for a learning goal: which frontier milestone chains, if
- * re-phased out of the current push, recover probability. The learning-goal analogue
- * of a scoped reschedule - it slides a whole checkpoint chain rather than shedding a
- * single leaf ({@link skillRecoveryMoves}) or moving the whole goal date.
- *
- * Each candidate is a {@link descopableMilestoneParkSets} set, measured by removing
- * its whole park-set's effort from the combined real-work + skill-effort pool. A set
- * that would park the goal down to nothing (its component is the entire open graph)
- * is skipped - that is abandonment, not recovery.
- *
- * Best improvement first; each kept move actually lifts the odds (> current + 0.01).
- */
+/** Per-path recovery: which frontier milestone chains, re-phased out of the current push,
+ *  recover probability. Slides a whole checkpoint chain rather than shedding a single leaf or
+ *  moving the whole goal date. Each candidate is measured by removing its entire park-set's
+ *  effort from the combined pool. A set that would park the goal down to nothing is skipped -
+ *  that's abandonment, not recovery. Best improvement first. */
 export function skillPathRescheduleMoves(
   nodes: SkillNode[],
   realEstimates: number[],
@@ -714,16 +615,10 @@ export function skillPathRescheduleMoves(
 
 // --- Re-dating (the answer for a blown / at-risk deadline) ------------------
 
-/**
- * The earliest deadline at which the remaining work clears `target` probability.
- *
- * Returns the honest "you can't make May 29, but May 31 → 80%" answer, or null
- * if no date within `maxDays` reaches the target (not enough hours to deploy).
- *
- * Probability is non-decreasing in the deadline - a later date can only add
- * deployable time, never remove it - so we binary-search the earliest day that
- * clears the target rather than scanning all `maxDays` (≈8 forecasts, not 180).
- */
+/** The earliest deadline at which the remaining work clears `target`. The honest "you can't
+ *  make May 29, but May 31 gets you 80%" answer, or null if nothing within maxDays reaches it.
+ *  Probability is non-decreasing in the deadline - a later date can only add time - so we
+ *  binary-search rather than scan (about 8 forecasts, not 180). */
 export function earliestAchievableDeadline(
   estimates: number[],
   budget: Omit<DeployableInput, "deadline">,

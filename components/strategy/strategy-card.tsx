@@ -56,7 +56,6 @@ function toneText(p: number): string {
       : "text-[var(--color-status-done)]";
 }
 
-/** Icon per move kind - mirrors the visual language of the recovery callout. */
 const MOVE_ICON: Record<StrategyMoveKind, typeof ArrowRight> = {
   defer: ArrowRight,
   reschedule_deadline: CalendarClock,
@@ -155,12 +154,9 @@ function ChangeGroup({
   );
 }
 
-/**
- * One move row: rationale + its own odds (`→`) and the running portfolio
- * conjunction (`all`), the inline Apply, and - when the move sheds/replaces real
- * work - an expandable disclosure listing EVERY task it changes (deferred and
- * net-new), so the full trade-off is inspectable before applying.
- */
+/** One move row: rationale plus its own odds and the running portfolio conjunction, the inline
+ *  Apply, and - when the move sheds or replaces real work - an expandable list of every task it
+ *  changes, so the trade-off is inspectable before applying. */
 function MoveRow({
   move,
   busy,
@@ -183,7 +179,7 @@ function MoveRow({
   /** Is this move part of the staged "apply" set (drives the live odds + the dim). */
   included: boolean;
   onToggleInclude: () => void;
-  /** The LIVE cumulative portfolio odds after this move within the included set - 
+  /** The LIVE cumulative portfolio odds after this move within the included set -
    *  overrides the baked `portfolioProbabilityAfter` once the user has toggled. */
   liveJoint?: number;
 }) {
@@ -299,14 +295,10 @@ function MoveRow({
   );
 }
 
-/**
- * One applyable tier of moves - the bold "Recommended" plan or the grounded
- * "Steady plan". Each row shows the CUMULATIVE portfolio odds after applying that
- * step (`portfolioProbabilityAfter`), climbing to `combinedProbability` at the
- * "Apply all" (or a plan-level "Together →" line for a single-step plan). Owns its
- * own apply/busy state so the two tiers apply independently; the parent remounts
- * it (via `key`) on every refresh so applied state resets with a new strategy.
- */
+/** One applyable tier of moves: the bold "Recommended" plan or the grounded "Steady plan". Each
+ *  row shows the CUMULATIVE odds after that step, climbing to combinedProbability at "Apply
+ *  all". Owns its own apply/busy state so the tiers apply independently; the parent remounts it
+ *  by key on every refresh so applied state resets with a new strategy. */
 function MoveTier({
   moves,
   combinedProbability,
@@ -321,7 +313,7 @@ function MoveTier({
   label: string;
   projectNames: Record<string, string>;
   /** The serialized re-solve inputs; when present, each move gets an include-toggle
-   *  and the odds recompute live client-side (OVERHAUL S1 / vision §8.2). */
+   *  and the odds recompute live client-side. */
   resolveInput?: ResolveInput;
   collapsible?: boolean;
   defaultOpen?: boolean;
@@ -335,7 +327,7 @@ function MoveTier({
   const [busy, setBusy] = useState<number | "all" | null>(null);
   const [pending, startTransition] = useTransition();
   const [open, setOpen] = useState(defaultOpen);
-  // The most recent committed bundle - backs the inline Undo (vision §8.2). `indices`
+  // The most recent committed bundle - backs the inline Undo. `indices`
   // are the rows it applied, so undo can bring exactly those back into the list.
   const [lastVersion, setLastVersion] = useState<{
     id: string;
@@ -348,7 +340,7 @@ function MoveTier({
   // Live re-solve: the running portfolio odds after each INCLUDED, not-yet-applied
   // move (in recommended order) plus the combined - recomputed client-side from the
   // serialized inputs, identical to the server's baked numbers for the same subset.
-  // §0 holds: the odds still come from `forecast()`; the browser only relocates it.
+   // holds: the odds still come from `forecast()`; the browser only relocates it.
   const live = useMemo(() => {
     if (!resolveInput) return null;
     const seq = moves
@@ -388,18 +380,14 @@ function MoveTier({
 
   // The single commit path: apply a set of moves as ONE snapshotted bundle, then
   // remember it for Undo. Both the per-row Apply and "Apply N" funnel through here,
-  // so every change is a recorded, reversible PlanVersion (§1.3). The server orders
+  // so every change is a recorded, reversible PlanVersion. The server orders
   // the moves (deadline reschedules last) - the card passes recommended order.
   function commit(
     entries: { move: StrategyMove; index: number }[],
     busyKey: number | "all",
-    /**
-     * The moves still on the table that the user unchecked. Only the whole-slate
-     * Apply passes this - that click is a decision about every offered move, so
-     * `kept ≻ declined` is a real revealed preference. Applying a single row says
-     * nothing about the rows left alone, so `applyOne` passes nothing and the
-     * server records no observation.
-     */
+    /** Moves still on the table that the user unchecked. Only the whole-slate Apply passes
+     *  this - that click is a decision about every offered move, so kept ≻ declined is a real
+     *  revealed preference. Applying a single row says nothing about the rest. */
     declined?: StrategyMove[],
   ) {
     if (entries.length === 0) return;
@@ -447,7 +435,7 @@ function MoveTier({
     commit(entries, "all", declined);
   }
 
-  // Revert the whole last bundle (§8.2): one snapshot restore, then bring its rows
+  // Revert the whole last bundle: one snapshot restore, then bring its rows
   // back into the list so they can be reconsidered.
   function undo() {
     if (!lastVersion) return;
@@ -584,21 +572,16 @@ function MoveTier({
   );
 }
 
-/**
- * The Today page's single portfolio recommendation. Replaces the old pit-wall +
- * "Needs attention" stack with one AI-synthesized strategy: a narrative
- * assessment plus ordered, inline-applyable moves spanning every project. The
- * bold tier is the LLM's pick (re-scored jointly so each step shows the running
- * portfolio odds); the optional grounded "Steady plan" tier is the joint
- * optimizer's mechanical-only plan, collapsible so Today stays calm.
+/** The Today page's single portfolio recommendation. Replaces the old pit-wall + "Needs
+ *  attention" stack with one synthesized strategy: a narrative assessment plus ordered,
+ *  inline-applyable moves across every project. The bold tier is the LLM's pick, re-scored
+ *  jointly; the optional grounded tier is the optimizer's mechanical-only plan, collapsible so
+ *  Today stays calm.
  *
- * Regeneration is gated deterministically (the server only marks `stale` when the
- * odds moved materially or the strategy aged out - a cosmetic edit never does).
- * When the LLM is available (`canUseLLM`), the card auto-regenerates in the
- * background - on first load it upgrades the deterministic draft, and a stale
- * strategy refreshes itself - so the AI strategy stays current without a click.
- * "Am I on track?" / the stale banner's Refresh remain as manual triggers.
- */
+ *  Regeneration is gated server-side (stale only fires when the odds moved materially or the
+ *  strategy aged out). With the LLM available the card auto-regenerates in the background, so
+ *  the strategy stays current without a click; "Am I on track?" and Refresh stay as manual
+ *  triggers. */
 export function StrategyCard({
   strategy,
   stale,
@@ -616,20 +599,16 @@ export function StrategyCard({
   activeJob?: JobRun | null;
   /** taskId → project name, so deferred tasks can show which project they're from. */
   projectNames?: Record<string, string>;
-  /** Expand the grounded "Steady plan" tier by default (true on /strategy). */
   steadyPlanDefaultOpen?: boolean;
-  /**
-   * How loud the banner reads: "gentle" by default (calm front door); "escalated"
-   * only when a hard deadline is genuinely at risk - then the card takes a danger
-   * accent so a true emergency doesn't read like a minor slip.
-   */
+  /** How loud the banner reads: gentle by default, escalated only when a hard deadline is
+   *  genuinely at risk - then the card takes a danger accent so a real emergency doesn't read
+   *  like a minor slip. */
   severity?: "gentle" | "escalated";
 }) {
-  // The synthesis runs on the queue, so this card no longer receives a strategy
-  // back from the action - it watches the job and the SERVER re-renders with
-  // the newly cached strategy once the worker has written it. `strategy` is
-  // therefore always the current truth here, and the card has one source of it
-  // rather than a local copy racing the server's.
+  // The synthesis runs on the queue, so this card no longer gets a strategy back from the
+  // action - it watches the job and the SERVER re-renders with the newly cached strategy once
+  // the worker has written it. So `strategy` is always current here and there's no local copy
+  // racing the server's.
   const job = useJobRun(activeJob);
   const refreshing = job.pending;
   const current = strategy;
@@ -640,17 +619,14 @@ export function StrategyCard({
     job.start(() => refreshPortfolioStrategyAction());
   }
 
-  // Aggressive policy: when the LLM is available, regenerate in the background - 
-  // upgrade a deterministic draft on first load, or refresh a stale strategy - 
-  // exactly once per mount. The server's deterministic gate already ensures
-  // `stale` only fires on a material change, so this never spins on cosmetic edits.
+  // Aggressive policy: with the LLM available, regenerate in the background exactly once per
+  // mount - upgrading a deterministic draft on first load, or refreshing a stale strategy. The
+  // server's gate already ensures stale only fires on a material change.
   //
-  // THREE GUARDS, and each one closes a different loop. The ref stops a second
-  // fire within a mount; `activeJob` stops this card and the one on the other
-  // page from both enqueueing (the action de-duplicates server-side too, but
-  // arriving there twice is still two round trips); and the router refresh that
-  // follows a completed job re-renders this component, so without `job.run` a
-  // freshly finished refresh would immediately trigger the next one.
+  // Three guards, each closing a different loop: the ref stops a second fire within a mount,
+  // activeJob stops this card and the one on the other page from both enqueueing, and since the
+  // router refresh after a completed job re-renders this component, without job.run a freshly
+  // finished refresh would immediately trigger the next one.
   const autoFired = useRef(false);
   const { run: watchedJob, start: startJob } = job;
   useEffect(() => {
@@ -661,14 +637,11 @@ export function StrategyCard({
   }, [canUseLLM, watchedJob, stale, strategy.usedLLM, startJob]);
 
   const calm = current.onTrack || current.moves.length === 0;
-  // Every move is a `hold` ⇒ the strategist looked and concluded that waiting IS the
-  // move. That is neither `calm` (something is genuinely off track) nor a plan to act
-  // on, so the hero caption says "hold course" instead of promising a plan.
-  //
-  // Caption only, deliberately: a hold needs an off-track goal, and `detectDivergence`
-  // tags `at_risk` critical whether the deadline is near or far - so such a goal all but
-  // always raises the escalated banner, which owns the headline. A "nothing worth
-  // changing" headline lost that race every time and would only ever have been dead code.
+  // Every move is a `hold`, so the strategist looked and concluded waiting IS the move. That's
+  // neither calm (something is genuinely off track) nor a plan to act on, so the hero caption
+  // says "hold course" instead of promising a plan. Caption only, deliberately: a hold needs an
+  // off-track goal, and detectDivergence tags at_risk critical whether the deadline is near or
+  // far, so such a goal almost always raises the escalated banner, which owns the headline.
   const holdOnly =
     !calm && current.moves.length > 0 && current.moves.every((m) => m.kind === "hold");
   const primaryLabel = current.usedLLM ? "Am I on track?" : "Get AI strategy";

@@ -70,7 +70,7 @@ export function KanbanBoard({
     if (status === from) return;
     startTransition(async () => {
       applyOptimistic({ taskId, status });
-      // Pass the local stamp so a drag-to-done accrues a work session (S2 slice B);
+      // Pass the local stamp so a drag-to-done accrues a work session;
       // ignored by the action for any non-completion transition.
       await updateTaskStatusAction(taskId, status, undefined, localSessionStamp());
     });

@@ -2,28 +2,22 @@ import "server-only";
 import { cache } from "react";
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
-import { ID_COOKIE, verifySession } from "./session";
+import { ID_COOKIE, verifySession } from "@/lib/session";
 
-// Authentication helpers - the single place the rest of the app asks
-// "who is the current user?". `getUser` is memoised per render pass, so repeated
-// calls within one request verify the token once.
+// Authentication helpers - the single place the rest of the app asks "who is the current user?".
+// getUser is memoised per render pass, so repeated calls within one request verify the token once.
 //
-// This reads the verified Cognito ID token and nothing else: no database round
-// trip on any request. Email and name ride in the token deliberately, because
-// `app/(app)/layout.tsx` renders both on every page and fetching them would put
-// a query in front of every render.
+// This reads the verified Cognito ID token and nothing else: no database round trip on any
+// request. Email and name ride in the token deliberately, because app/(app)/layout.tsx renders
+// both on every page and fetching them would put a query in front of every render.
 //
-// `claims.sub` is `custom:app_uid` - the Postgres `users.id`, not the Cognito
-// subject. lib/session.ts does that mapping so nothing downstream has to know
-// there are two identifiers; every RLS policy keeps resolving through the same
-// uuid it always did.
+// claims.sub is custom:app_uid - the Postgres users.id, not the Cognito subject. session.ts does
+// that mapping so nothing downstream has to know there are two identifiers.
 //
-// The old note here read: "sessions are stateless, so a token stays valid until
-// it expires even if the user row is deleted... the break-glass is rotating
-// SESSION_SECRET, which invalidates every session at once." That is no longer
-// true, and the improvement is worth naming: an ID token still lives its full
-// hour, but the refresh token behind it is revocable per user, so logout and
-// account deletion are now real rather than cosmetic. See globalSignOut.
+// Sessions used to be stateless, so a token stayed valid until expiry even if the user row was
+// deleted, and the only break-glass was rotating SESSION_SECRET. Not any more: an ID token still
+// lives its full hour, but the refresh token behind it is revocable per user, so logout and
+// account deletion are real rather than cosmetic. See globalSignOut.
 
 export interface SessionUser {
   id: string;
