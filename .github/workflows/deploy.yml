@@ -1,0 +1,157 @@
+# Deploys to AWS on every push to main. There is one environment: this is a
+# two-user app whose whole budget is $10/mo, and a staging copy would double the
+# only line item that costs anything (Aurora). What stands in for staging is the
+# pull-request diff job in infra-diff.yml, which shows the blast radius before
+# anything merges.
+#
+# Auth is OIDC federation, no stored AWS key. The role is created by
+# `aws/infra/lib/cicd-stack.ts` and trusts exactly one subject:
+#
+#   repo:AforSmithz/TaskBuddy:ref:refs/heads/main
+#
+# so a workflow running on any other ref cannot assume it, including a workflow
+# edited in a pull request. Deploy it once, by hand, then set the outputs as
+# repository variables:
+#
+#   cd aws/infra && npx cdk deploy taskbuddy-cicd
+#   gh variable set AWS_DEPLOY_ROLE_ARN --body arn:aws:iam::<acct>:role/taskbuddy-github-deploy
+#   gh secret   set TASKBUDDY_ALERT_EMAIL
+#   gh secret   set TASKBUDDY_ORIGIN_SECRET
+#
+# TASKBUDDY_ORIGIN_SECRET must be the value already deployed, not a fresh one:
+# CDK writes it to both the CloudFront custom header and the function's
+# environment, so a new value rotates the pair - harmless, but every request in
+# flight while the two halves disagree gets a 403. Read the live one with:
+#
+#   aws lambda get-function-configuration --function-name taskbuddy-web \
+#     --region ap-southeast-1 --query 'Environment.Variables.ORIGIN_SECRET' --output text
+#
+# The schema is NOT applied here. aws/sql/*.sql runs through
+# aws/scripts/apply-sql.sh against the cluster, by a human who has read it. A
+# pipeline that silently runs DDL on the only copy of the data is a bad trade
+# for the twelve seconds it saves.
+name: deploy
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'app/**'
+      - 'components/**'
+      - 'lib/**'
+      - 'public/**'
+      - 'aws/**'
+      - 'proxy.ts'
+      - 'next.config.ts'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/deploy.yml'
+  workflow_dispatch:
+    inputs:
+      stacks:
+        description: 'Stacks to deploy, space separated. Empty deploys all six.'
+        required: false
+        default: ''
+      allow_stateful_replacement:
+        description: 'Permit a change that replaces or destroys Aurora / the Cognito pool'
+        type: boolean
+        default: false
+
+# Two deploys of the same CloudFormation stacks at once is a guaranteed
+# ResourceNotReady. Queue instead, and do not cancel one that is mid-rollback.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+permissions:
+  id-token: write # required to mint the OIDC token
+  contents: read
+
+env:
+  AWS_REGION: ap-southeast-1
+  NEXT_TELEMETRY_DISABLED: '1'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    # An Aurora update can sit in UPDATE_IN_PROGRESS for a long time; the role's
+    # session is two hours for the same reason.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          # package.json has no packageManager field, so the version is pinned
+          # here instead. Matches the 10.x the lockfile was written with.
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          # 22, not latest: it is what the Lambda functions run
+          # (lambda.Runtime.NODEJS_22_X in aws/infra/lib/node-function.ts), and
+          # building on a newer major than you deploy to is how a syntax feature
+          # reaches production untested.
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # The CDK app is its own npm project with its own lockfile. `npx tsx` in
+      # cdk.json resolves tsx from the root install above.
+      - name: Install CDK dependencies
+        run: npm ci
+        working-directory: aws/infra
+
+      # Both typecheck steps run before AWS credentials are requested. A
+      # compile error should fail without a token ever being issued.
+      - name: Typecheck (app)
+        run: pnpm exec tsc --noEmit
+
+      - name: Typecheck (infra)
+        run: npm run typecheck
+        working-directory: aws/infra
+
+      - name: Lint
+        run: pnpm lint
+
+      # Next shares a build cache between runs in .next/cache. Without it every
+      # build is cold and the docs warn about it explicitly ("No Cache Detected").
+      - uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.next/cache
+          key: ${{ runner.os }}-next-${{ hashFiles('pnpm-lock.yaml') }}-${{ hashFiles('app/**', 'components/**', 'lib/**', 'proxy.ts', 'next.config.ts') }}
+          restore-keys: |
+            ${{ runner.os }}-next-${{ hashFiles('pnpm-lock.yaml') }}-
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ap-southeast-1
+          # Longer than the default hour: credentials that expire mid-deploy
+          # strand a stack in UPDATE_IN_PROGRESS.
+          role-duration-seconds: 7200
+
+      - name: Build and deploy
+        env:
+          TASKBUDDY_ALERT_EMAIL: ${{ secrets.TASKBUDDY_ALERT_EMAIL }}
+          TASKBUDDY_ORIGIN_SECRET: ${{ secrets.TASKBUDDY_ORIGIN_SECRET }}
+          # Skipped in CI only. `bedrock` bills a real Converse per run to
+          # re-answer an account-level question that changes once a year;
+          # `probes` re-checks service reachability that a deploy proves anyway.
+          PREFLIGHT_SKIP: bedrock,probes
+          ALLOW_STATEFUL_REPLACEMENT: ${{ inputs.allow_stateful_replacement && '1' || '' }}
+          # Through the environment, not interpolated into the run line: a
+          # workflow_dispatch input is attacker-controlled text as far as the
+          # shell is concerned.
+          STACKS: ${{ inputs.stacks }}
+        # Unquoted on purpose - the space-separated list has to word-split into
+        # separate arguments. shellcheck would flag it; it is the intent.
+        run: bash aws/scripts/deploy.sh $STACKS
+
+      - name: Site URL
+        run: |
+          aws cloudformation describe-stacks \
+            --stack-name taskbuddy-web --region "$AWS_REGION" \
+            --query "Stacks[0].Outputs[?OutputKey=='SiteUrl'].OutputValue" \
+            --output text >> "$GITHUB_STEP_SUMMARY"
