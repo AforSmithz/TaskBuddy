@@ -4,7 +4,6 @@ import { useState, useTransition } from "react";
 import { CalendarClock, Loader2 } from "lucide-react";
 import { setProjectDeadlineAction } from "@/lib/actions";
 
-/** Inline date picker that sets/clears a project's deadline. */
 export function DeadlineEditor({
   projectId,
   deadline,

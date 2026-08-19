@@ -30,7 +30,7 @@ export interface RowFactors {
 
 /**
  * The presentational shape one task row needs. A stored `Task` maps onto it via
- * `taskToRowData`, and so do the strategist's proposed (not-yet-real) tasks - 
+ * `taskToRowData`, and so do the strategist's proposed (not-yet-real) tasks -
  * everything past `title` is optional, so a sparse proposal renders only what it
  * knows (no priority badge, no due date) while a real task renders in full.
  */
@@ -53,7 +53,6 @@ export interface TaskRowData {
   origin?: TaskOrigin | null;
 }
 
-/** Lift a stored task into the row shape - the canonical full-detail mapping. */
 export function taskToRowData(t: Task): TaskRowData {
   return {
     title: t.title,
@@ -93,7 +92,6 @@ const FACTORS: {
   { key: "effort", label: "Effort", penalty: true },
 ];
 
-/** Per-factor 1-5 breakdown behind a task's priority score. */
 export function FactorBreakdown({ factors }: { factors: RowFactors }) {
   const present = FACTORS.map((f) => ({
     ...f,
@@ -163,11 +161,8 @@ export function TaskDetailRow({
   /** Marks the task as set-aside: shows a "Deferred" tag (no cross-out). */
   deferred?: boolean;
   defaultBreakdownOpen?: boolean;
-  /** When set, the title links here (e.g. the task's detail page). */
   href?: string;
-  /** Top-right control (e.g. a status select). */
   trailing?: React.ReactNode;
-  /** Appended to the meta row (e.g. an actual-time input). */
   metaTrailing?: React.ReactNode;
 }) {
   const [open, setOpen] = useState(defaultBreakdownOpen);

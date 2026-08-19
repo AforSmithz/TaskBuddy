@@ -10,7 +10,6 @@ import { cn } from "@/lib/cn";
 
 export type Band = "track" | "risk" | "off";
 
-/** Map a probability to its on-track band. */
 export function band(probability: number): Band {
   if (isOnTrack(probability)) return "track";
   if (probability >= 0.4) return "risk";
@@ -39,7 +38,6 @@ const BAND_BAR: Record<Band, string> = {
   off: "bg-[var(--color-danger)]",
 };
 
-/** Headline forecast for a project: probability, band, slack, deadline. */
 export function ForecastMeter({
   forecast,
   deadline,
@@ -49,7 +47,7 @@ export function ForecastMeter({
 }) {
   const b = band(forecast.probability);
   const slack = forecast.slackMinutes;
-  // Critical-chain buffer (§5a S3a): the p90−p50 safety margin the variance
+  // Critical-chain buffer: the p90−p50 safety margin the variance
   // demands, and how much of it the deadline leaves uncovered. Toned only when it
   // needs attention; null (hidden) when no buffer is defined.
   const buffer = criticalChainBuffer(forecast);

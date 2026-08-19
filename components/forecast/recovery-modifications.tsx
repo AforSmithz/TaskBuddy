@@ -33,7 +33,7 @@ type Phase = "loading" | "ready" | "empty";
 
 /**
  * The Modify half of the recovery callout (Step 2): fires the strategist in the
- * background to reshape existing tasks - scope a task down or split a monolith - 
+ * background to reshape existing tasks - scope a task down or split a monolith -
  * so the plan fits the budget. The user accepts explicitly; the preview
  * probability is the deterministic forecast's, never the LLM's.
  */

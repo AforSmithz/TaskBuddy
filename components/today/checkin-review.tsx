@@ -37,16 +37,15 @@ function actionLabel(p: CheckinProposal): { icon: typeof Timer; text: string } {
 }
 
 /** Optional context for `moveOutcome` - the shipped task titles + DAG so a
- *  resolve_blocker line can name its freed dependents (§5.6 6b). Display-only. */
+ *  resolve_blocker line can name its freed dependents. Display-only. */
 interface OutcomeCtx {
   titleById: Map<string, string>;
   deps: DependencyEdge[];
 }
 
-/** One line of the post-commit outcome summary (§5.6 slice 6a/6b) - a glyph + the item
- *  title (+ optional sub-lines), derived purely from the committed move's payload and
- *  the shipped re-solve inputs (no probability is computed here - frontend rule §2.8).
- *  The glyph carries the meaning: ✓ done/learned/cleared, ＋ added scope, → moved, − skipped. */
+/** One line of the post-commit outcome summary - a glyph plus the item title, derived purely
+ *  from the committed move's payload and the shipped re-solve inputs. The glyph carries the
+ *  meaning: check = done/learned/cleared, plus = added scope, arrow = moved, minus = skipped. */
 function moveOutcome(
   move: StrategyMove,
   ctx?: OutcomeCtx,
@@ -92,13 +91,10 @@ function moveOutcome(
   }
 }
 
-/**
- * The inline review surface for an interpreted check-in (§5.6 slice 5). Reuses the
- * S1 live-re-solve (`resolveSubsetCumulative`) for the odds-moving Family-A rows and
- * the S1 commit/undo (`commitStrategyBundleAction` / `undoPlanVersionAction`); the
- * odds-silent Family-B rows confirm captures/logs with no percentage. The whole
- * accepted Family-A set commits as ONE PlanVersion so Undo reverts it atomically.
- */
+/** The inline review surface for an interpreted check-in. Reuses the live re-solve for the
+ *  odds-moving Family-A rows and the existing commit/undo; the odds-silent Family-B rows confirm
+ *  captures and logs with no percentage. The whole accepted Family-A set commits as ONE
+ *  PlanVersion so Undo reverts it atomically. */
 export function CheckinReview({
   result,
   onDone,
@@ -194,12 +190,10 @@ export function CheckinReview({
   }
 
   if (committed) {
-    // Post-commit outcome summary (§5.6 slice 6a): what the accepted moves did,
-    // grouped by goal (recital ✓ / work ✓ / gym −), the portfolio odds transition,
-    // and a reflective end-of-day read. All from already-committed data + the same
-    // sanctioned S1 re-solve - no fresh probability is computed here.
-    // Titles + DAG for naming a resolve_blocker's freed dependents (§5.6 6b) - the same
-    // shipped re-solve inputs the odds use; no fresh computation, display only.
+  // Post-commit summary: what the accepted moves did, grouped by goal, plus the odds
+  // transition and a reflective end-of-day read. All from already-committed data and the same
+  // re-solve the odds use - nothing fresh is computed here. The titles and DAG are for naming
+  // a resolve_blocker's freed dependents.
     const outcomeCtx: OutcomeCtx = {
       titleById: new Map(resolveInput.tasks.map((t) => [t.id, t.title])),
       deps: resolveInput.deps,

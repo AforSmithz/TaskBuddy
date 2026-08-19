@@ -36,7 +36,6 @@ const GOALS_NAV: NavItem[] = [
   { href: "/create", label: "New entry", icon: FilePlus2, exact: false },
 ];
 
-/** Two-letter initials from a display name, for the account avatar. */
 function initials(name: string): string {
   const parts = name.trim().split(/\s+/).filter(Boolean);
   if (parts.length === 0) return "?";

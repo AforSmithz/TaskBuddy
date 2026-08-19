@@ -47,7 +47,6 @@ export function TaskRow({
   areas: string[];
   /** Titles of prerequisite tasks that aren't done yet, if any. */
   waitingOn?: string[];
-  /** Why deadline pressure pulled this task ahead in the global order, if it did. */
   pulledAheadReason?: string;
   onMove: (id: string, status: TaskStatus, from: TaskStatus) => void;
   onAssignArea: (id: string, area: string) => void;

@@ -8,7 +8,6 @@ import { formatPct } from "@/components/forecast/forecast-meter";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
 
-/** Compact "2h ago" stamp - history rows don't need the full timestamp. */
 function relativeTime(iso: string): string {
   const mins = Math.round((Date.now() - new Date(iso).getTime()) / 60000);
   if (mins < 1) return "just now";
@@ -20,15 +19,14 @@ function relativeTime(iso: string): string {
 
 /** One entry in the merged plan timeline: an applied strategy bundle (`undoPlanVersion`
  *  = row restore) or an automatic roll of the committed plan (`undoPlanRoll` = arrangement
- *  restore). Two distinct undo semantics, one time-ordered feed (design §5). */
+ *  restore). Two distinct undo semantics, one time-ordered feed. */
 type TimelineEntry =
   | { type: "apply"; at: string; version: PlanVersion }
   | { type: "roll"; at: string; roll: PlanRoll };
 
-/** Neutral, structural label per roll kind - WHAT changed, not WHY. The causal line
- *  ("Pulled Recital forward to protect its deadline") is S3c-3's `diagnoseRoll`, computed
- *  server-side and passed in as `rollCauses`; this map is the defensive fallback when a
- *  summary is absent. */
+/** Neutral structural label per roll kind - WHAT changed, not why. The causal line ("Pulled
+ *  Recital forward to protect its deadline") is computed server-side and passed in as
+ *  rollCauses; this map is the fallback when a summary is absent. */
 const ROLL_LABEL: Record<PlanRollKind, string> = {
   material: "Plan reshuffled",
   anchor: "Rolled forward a day",
@@ -129,13 +127,10 @@ function RollRow({
   );
 }
 
-/**
- * The plan timeline (vision §1.3): every applied strategy bundle AND every automatic
- * roll of the committed plan, unioned into one newest-first feed. Applies carry the odds
- * the user accepted and a whole-bundle Revert; rolls carry their near-horizon lead and a
- * roll-Undo that restores the prior arrangement through reconcile. Reverted entries stay
- * listed (struck through) so the record is complete. Each row drives its own undo verb.
- */
+/** The plan timeline: every applied strategy bundle and every automatic roll, unioned into one
+ *  newest-first feed. Applies carry the odds the user accepted and a whole-bundle Revert; rolls
+ *  carry their near-horizon lead and a roll-Undo that restores the prior arrangement through
+ *  reconcile. Reverted entries stay listed, struck through, so the record is complete. */
 export function PlanHistory({
   versions,
   rolls,
@@ -143,7 +138,7 @@ export function PlanHistory({
 }: {
   versions: PlanVersion[];
   rolls: PlanRoll[];
-  /** Server-diagnosed "why it changed" line per roll id (S3c-3 `diagnoseRoll`). Optional - 
+  /** Server-diagnosed "why it changed" line per roll id. Optional -
    *  a roll with no entry falls back to the neutral structural label. */
   rollCauses?: Record<string, string>;
 }) {

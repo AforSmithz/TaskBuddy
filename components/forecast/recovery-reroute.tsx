@@ -11,7 +11,7 @@ import { Button } from "@/components/ui/button";
  * A re-route only recovers the *forecast* when the deadline itself is in
  * jeopardy (over budget / at risk). On-time projects flagged only for a blocked
  * or overdue task don't need a whole new approach. No probability threshold here
- * - the LLM judges whether a genuinely different route exists, and the forecast
+ * the LLM judges whether a genuinely different route exists, and the forecast
  * guardrail in `generateReroute` drops it if it doesn't clearly help.
  */
 function hasRerouteSignals(plan: RecoveryPlan): boolean {
@@ -135,7 +135,7 @@ export function RecoveryReroute({ plan }: { plan: RecoveryPlan }) {
           ))}
         </ul>
 
-        {/* The honest cost: definition-of-done this lighter route lowers (§5 gate
+        {/* The honest cost: definition-of-done this lighter route lowers (the gate
             check 2) - recorded as degraded notes on accept, never silently. */}
         {suggestion.degradedCriteria.length > 0 && (
           <>

@@ -47,7 +47,6 @@ const RECOVERY_OPTIONS: {
  * Weights default to Normal; only non-neutral ones are persisted. The save action
  * re-normalizes server-side, so the form just sends its current view.
  */
-/** A goal the user can weight individually. */
 export interface WeightableGoal {
   id: string;
   name: string;
@@ -71,7 +70,6 @@ export function ValueModelForm({
 }: {
   model: ValueModel;
   areas: string[];
-  /** Open goals, offered a per-goal importance override. */
   goals: WeightableGoal[];
   /**
    * Whether the saved area weights currently reorder the plan (server-computed).
@@ -90,7 +88,7 @@ export function ValueModelForm({
   );
   // `DERIVED` (not a number) when unset, so an explicit "Normal" is distinguishable
   // from "unset" - the former overrides the area-derived value, the latter defers
-  // to it. `goalValue()` depends on exactly that distinction.
+   // to it. `goalValue()` depends on exactly that distinction.
   const [goalWeights, setGoalWeights] = useState<Record<string, GoalWeight>>(() =>
     Object.fromEntries(goals.map((g) => [g.id, model.projectWeights[g.id] ?? DERIVED])),
   );

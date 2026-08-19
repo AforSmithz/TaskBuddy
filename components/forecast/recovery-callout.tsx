@@ -259,7 +259,6 @@ export function RecoveryCallout({ plan }: { plan: RecoveryPlan }) {
   );
 }
 
-/** One overdue task: reschedule its due date (inline picker) or mark it done. */
 function OverdueRow({ task }: { task: RecoveryPlan["overdue"][number] }) {
   const [pending, startTransition] = useTransition();
   const [applied, setApplied] = useState(false);
@@ -326,7 +325,6 @@ function OverdueRow({ task }: { task: RecoveryPlan["overdue"][number] }) {
   );
 }
 
-/** One blocked task: clear its blocker and return it to the active queue. */
 function BlockedRow({ task }: { task: RecoveryPlan["blocked"][number] }) {
   const [pending, startTransition] = useTransition();
   const [applied, setApplied] = useState(false);

@@ -54,7 +54,7 @@ export function TodayPlan({
       ) : (
         <>
           {todaySlice ? (
-            // Today's blocks are drag-to-reorderable (S3c-5); upcoming days stay display-only.
+                     // Today's blocks are drag-to-reorderable; upcoming days stay display-only.
             <TodayReorder day={todaySlice} todayISO={todayISO} />
           ) : (
             <div className="px-5 py-6">
