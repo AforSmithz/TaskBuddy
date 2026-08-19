@@ -7,7 +7,9 @@ import {
   EDGE_REGION,
   GITHUB_DEPLOY_BRANCH,
   GITHUB_OWNER,
+  GITHUB_OWNER_ID,
   GITHUB_REPO,
+  GITHUB_REPO_ID,
   REGION,
 } from "./config";
 
@@ -67,16 +69,25 @@ export class CicdStack extends Stack {
     // One specific GitHub context in one specific repository. StringEquals, not
     // StringLike: a wildcard in a `sub` condition is how these trust policies
     // end up matching every branch in the repo, including a branch someone
-    // opened a pull request from.
-    const principalFor = (sub: string) =>
+    // opened a pull request from. A list of exact strings is an OR and keeps
+    // that property.
+    //
+    // Both spellings of the subject are listed because GitHub is mid-migration
+    // to id-qualified claims (see GITHUB_OWNER_ID in config.ts) and the repo API
+    // reports the new prefix while still saying use_immutable_subject: false.
+    // Rather than guess which one a token will carry, accept either - they name
+    // the same branch of the same repository, so the set of workflows that can
+    // assume the role is identical.
+    const principalFor = (context: string) =>
       new iam.OpenIdConnectPrincipal(provider, {
         StringEquals: {
           [`${GITHUB_OIDC_HOST}:aud`]: AUDIENCE,
-          [`${GITHUB_OIDC_HOST}:sub`]: sub,
+          [`${GITHUB_OIDC_HOST}:sub`]: [
+            `repo:${GITHUB_OWNER}/${GITHUB_REPO}:${context}`,
+            `repo:${GITHUB_OWNER}@${GITHUB_OWNER_ID}/${GITHUB_REPO}@${GITHUB_REPO_ID}:${context}`,
+          ],
         },
       });
-
-    const repo = `repo:${GITHUB_OWNER}/${GITHUB_REPO}`;
     const bootstrapRole = (name: string, region: string) =>
       `arn:aws:iam::${account}:role/cdk-${CDK_QUALIFIER}-${name}-${account}-${region}`;
 
@@ -120,7 +131,7 @@ export class CicdStack extends Stack {
     const deployRole = new iam.Role(this, "DeployRole", {
       roleName: `${APP}-github-deploy`,
       description: `cdk deploy from ${GITHUB_OWNER}/${GITHUB_REPO} on ${GITHUB_DEPLOY_BRANCH}`,
-      assumedBy: principalFor(`${repo}:ref:refs/heads/${GITHUB_DEPLOY_BRANCH}`),
+      assumedBy: principalFor(`ref:refs/heads/${GITHUB_DEPLOY_BRANCH}`),
       // An Aurora parameter change can run past the one-hour default, and the
       // credentials expire mid-rollback rather than mid-deploy, which is worse.
       maxSessionDuration: Duration.hours(2),
@@ -134,7 +145,7 @@ export class CicdStack extends Stack {
     const diffRole = new iam.Role(this, "DiffRole", {
       roleName: `${APP}-github-diff`,
       description: `cdk diff from pull requests in ${GITHUB_OWNER}/${GITHUB_REPO}`,
-      assumedBy: principalFor(`${repo}:pull_request`),
+      assumedBy: principalFor("pull_request"),
       maxSessionDuration: Duration.hours(1),
     });
     diffRole.addToPolicy(

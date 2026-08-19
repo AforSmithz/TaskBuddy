@@ -120,6 +120,22 @@ export const ORIGIN_SECRET_HEADER = "x-taskbuddy-origin";
 export const GITHUB_OWNER = "AforSmithz";
 export const GITHUB_REPO = "TaskBuddy";
 
+// GitHub now issues IMMUTABLE subject claims: the `sub` carries the numeric
+// owner and repository ids, not just the names -
+//
+//   repo:AforSmithz@35168441/TaskBuddy@1339483965:ref:refs/heads/main
+//
+// so a trust policy written against the plain `repo:owner/name:...` form
+// matches nothing. The failure is silent in the worst way: the token validates,
+// no statement matches, and STS answers "Not authorized to perform
+// sts:AssumeRoleWithWebIdentity", which reads like a missing permission rather
+// than a mismatched string. Measured against the live token 2026-08-19.
+//
+// Re-read these if the repository is ever recreated:
+//   gh api /repos/AforSmithz/TaskBuddy/actions/oidc/customization/sub
+export const GITHUB_OWNER_ID = "35168441";
+export const GITHUB_REPO_ID = "1339483965";
+
 // Only this branch can deploy. A push to any other ref gets a token whose `sub`
 // doesn't match the deploy role's condition, so the assume-role call fails
 // before any AWS API is touched.
