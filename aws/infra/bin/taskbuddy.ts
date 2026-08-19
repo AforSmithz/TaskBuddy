@@ -2,6 +2,7 @@
 import { App, Tags } from "aws-cdk-lib";
 import { APP, REGION } from "../lib/config";
 import { AuthStack } from "../lib/auth-stack";
+import { CicdStack } from "../lib/cicd-stack";
 import { DataStack } from "../lib/data-stack";
 import { EdgeStack } from "../lib/edge-stack";
 import { EventsStack } from "../lib/events-stack";
@@ -64,6 +65,18 @@ new ObservabilityStack(app, `${APP}-observability`, {
   dlq: eventsStack.dlq,
   jobQueue: eventsStack.jobQueue,
   worker: eventsStack.worker,
+});
+
+// Deployed once, by hand, from a laptop - and then never again by CI, which is
+// why it is not in the list aws/scripts/deploy.sh deploys. A pipeline that can
+// rewrite its own trust policy is a pipeline whose branch condition means
+// nothing. Deploy it with:
+//
+//   cd aws/infra && npx cdk deploy taskbuddy-cicd
+//
+new CicdStack(app, `${APP}-cicd`, {
+  env,
+  description: "GitHub Actions OIDC provider and the two roles CI assumes",
 });
 
 // us-east-1 only. See edge-stack.ts.
