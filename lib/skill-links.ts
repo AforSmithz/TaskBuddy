@@ -1,35 +1,28 @@
-import type { ExtractedLink, LinkSuggestion, LinkVerdict, SkillNode, Task } from "./types";
-import type { ChatMessage } from "./bedrock";
-import { isLLMConfigured } from "./checkin";
-import { skillProgress } from "./skill";
+import type { ExtractedLink, LinkSuggestion, LinkVerdict, SkillNode, Task } from "@/lib/types";
+import type { ChatMessage } from "@/lib/bedrock";
+import { isLLMConfigured } from "@/lib/checkin";
+import { skillProgress } from "@/lib/skill";
 
-// The skill-node ↔ task linker (the LLM-proposes half of §0, applied to spillover).
+// The skill-node <-> task linker.
 //
 // Why this needs a model at all: the decomposer phrases a skill node as a CAPABILITY
-// ("Navigate a short spontaneous conversation") and the extraction pipeline phrases a
-// task as an ACTION ("Take weekly italki lesson"). Those describe the same evening and
-// share no words. Measured over the real workspace: 0 of 81 node×task pairs cleared the
-// fuzzy title matcher's bar, while the matcher scored a hand-written matching pair at
-// 1.00 - it works, it just cannot see this relation. So the edge is proposed
-// semantically, confirmed by the user, and only then read by spillover.
+// ("Navigate a short spontaneous conversation") and extraction phrases a task as an ACTION
+// ("Take weekly italki lesson"). Those describe the same evening and share no words. Over the
+// real workspace, 0 of 81 node×task pairs cleared the fuzzy title matcher's bar while it scored
+// a hand-written matching pair at 1.00 - it works, it just can't see this relation. So the edge
+// is proposed semantically, confirmed by the user, and only then read by spillover.
 //
-// The model proposes pairs + prose. It never outputs a score, a probability, or an
-// ordering - `forecast()` remains the sole owner of odds (§0).
+// The model proposes pairs and prose. It never outputs a score, a probability, or an ordering.
 //
-// No `server-only` directive and no static `bedrock` import: the client is pulled in
-// dynamically inside the one async call, exactly as `checkin.ts` does it, so the pure
-// half (`sanitizeLinks`, `pairKey`) stays importable from a plain-Node test harness.
+// No server-only directive and no static bedrock import: the client is pulled in dynamically
+// inside the one async call, so the pure half stays importable from a plain-Node harness.
 //
-// The wire shape is an ARRAY, not the task-keyed map it used to be. The map bought a
-// structural one-skill-per-task guarantee for free (unique JSON keys), but strict
-// structured outputs need an enumerated `properties` set, so preserving it would mean a
-// fresh 60-property schema on every call. `bestPerTask` is now the ONLY fan-out defence
-// - it was already written to be, for the legacy-array branch, and it collapses
-// deterministically by is_checkpoint, then depth, then order.
-//
-// What the schema buys back is bigger than what it cost: `task_key` and `node_key` are
-// per-request ENUMS built from the handles actually shipped, so a hallucinated handle is
-// structurally impossible rather than filtered out after the fact.
+// The wire shape is an ARRAY, not the task-keyed map it used to be. The map bought a structural
+// one-skill-per-task guarantee for free (unique JSON keys), but strict structured outputs need
+// an enumerated properties set, so keeping it would mean a fresh 60-property schema every call.
+// bestPerTask is now the ONLY fan-out defence. What the schema buys back is bigger: task_key
+// and node_key are per-request ENUMS built from the handles actually shipped, so a hallucinated
+// handle is structurally impossible rather than filtered after the fact.
 
 /** Cap what the model sees, so a large workspace can't blow the context window. */
 const MAX_NODES = 40;
@@ -94,7 +87,7 @@ unused because no task on this list exercises them.`;
 
 /**
  * Reject a response the pipeline cannot use. Under a strict schema `links` is guaranteed
- * to be an array, so this is now a cheap assertion rather than a chain-advancing filter - 
+ * to be an array, so this is now a cheap assertion rather than a chain-advancing filter -
  * an EMPTY array is the expected, correct answer most of the time and must pass.
  */
 function isUsable(d: LinkSuggestion): boolean {
@@ -102,13 +95,9 @@ function isUsable(d: LinkSuggestion): boolean {
   return Array.isArray(links) || (typeof links === "object" && links !== null);
 }
 
-/**
- * Built per request so `task_key` and `node_key` are closed sets. This is the single
- * biggest win in the migration for this file: the model cannot name a handle that was not
- * shipped, which turns `sanitizeLinks`' hallucinated-handle filter from a safety mechanism
- * into a redundant assertion. Note the schema string differs every call, so there is no
- * server-side schema caching to expect.
- */
+/** Built per request so task_key and node_key are closed sets - the model can't name a handle
+ *  that wasn't shipped, which turns sanitizeLinks' hallucinated-handle filter into a redundant
+ *  assertion. The schema string differs every call, so expect no server-side caching. */
 export function linkSchema(taskKeys: string[], nodeKeys: string[]) {
   return {
     type: "object",
@@ -136,12 +125,9 @@ export function linkSchema(taskKeys: string[], nodeKeys: string[]) {
   };
 }
 
-/**
- * Longest path from a root, over the goal's own prerequisite DAG - a node's specificity.
- * Foundations sit at depth 0; a capstone with three layers of prerequisites at depth 3.
- * Cycle-safe (the decomposer's `sanitizeSkills` already strips them, but a hand-edited
- * graph must not hang this). Used only to break a tie between two candidate skills.
- */
+/** Longest path from a root over the goal's prerequisite DAG - a node's specificity.
+ *  Foundations sit at 0, a capstone three layers deep at 3. Cycle-safe (sanitizeSkills already
+ *  strips them, but a hand-edited graph mustn't hang this). Only breaks ties. */
 export function nodeDepth(node: SkillNode, byId: Map<string, SkillNode>): number {
   const memo = new Map<string, number>();
   const walk = (id: string, seen: Set<string>): number => {
@@ -159,17 +145,14 @@ export function nodeDepth(node: SkillNode, byId: Map<string, SkillNode>): number
   return walk(node.id, new Set());
 }
 
-/**
- * When a model ignores the one-skill-per-task schema and returns an array, collapse it
- * deterministically instead of trusting its ordering.
+/** When a model ignores the one-skill-per-task schema and returns an array, collapse it
+ *  deterministically instead of trusting its ordering.
  *
- * Ordering cannot be trusted: in the observed fan-out the model emitted the skills in
- * plain graph order (N1, N2, … N8), so "keep the first" would have kept the two most
- * FOUNDATIONAL, least specific skills. In a well-formed run it led with the most advanced.
- * Same code, opposite meaning. So the tiebreak is explicit: a checkpoint (the decomposer
- * defines those as milestones you could prove to someone - exactly demonstration) beats a
- * drill; deeper in the DAG beats shallower; the model's order decides only a true tie.
- */
+ *  Ordering can't be trusted: in the observed fan-out the model emitted skills in plain graph
+ *  order, so "keep the first" would have kept the two most FOUNDATIONAL ones; in a well-formed
+ *  run it led with the most advanced. Same code, opposite meaning. So the tiebreak is explicit:
+ *  a checkpoint beats a drill, deeper in the DAG beats shallower, and the model's order decides
+ *  only a true tie. */
 export function bestPerTask(
   entries: { taskKey: string; node: SkillNode; rationale: string; order: number }[],
   byId: Map<string, SkillNode>,
@@ -192,16 +175,14 @@ export function bestPerTask(
     .map((e) => ({ taskKey: e.taskKey, node: e.node, rationale: e.rationale }));
 }
 
-/**
- * Second pass: judge ONE pair, with no other skills or tasks in context.
+/** Second pass: judge ONE pair with no other skills or tasks in context.
  *
- * The two failures this rejects were both observed live, and both were rationalised
- * fluently inside the assignment prompt: "Watch a Spanish show" → "Describe daily routines
- * with present tense verbs" (passive exposure standing in for a productive skill), and
- * "Set measurable milestones for conversation goal" → "Express future plans and intentions"
- * (a pun - planning your study in English is not expressing future plans in Spanish).
- * Alone, with nothing to assign, each is easy to reject.
- */
+ *  Both failures this rejects were observed live and fluently rationalised inside the
+ *  assignment prompt: "Watch a Spanish show" -> "Describe daily routines with present tense
+ *  verbs" (passive exposure standing in for a productive skill), and "Set measurable milestones
+ *  for conversation goal" -> "Express future plans and intentions" (a pun - planning your study
+ *  in English is not expressing future plans in Spanish). Alone, with nothing to assign, each is
+ *  easy to reject. */
 const VERIFY_SYSTEM_PROMPT = `You are checking ONE claim, in isolation. You are given a
 single TASK and a single SKILL.
 
@@ -257,7 +238,7 @@ export type LinkJudge = (taskTitle: string, skillTitle: string) => Promise<boole
  *  errors drops the suggestion rather than admitting an unchecked link. The cost of a
  *  false negative is a missing suggestion; of a false positive, a wrong credit. */
 async function llmJudge(taskTitle: string, skillTitle: string): Promise<boolean> {
-  const { callBedrockJSON } = await import("./bedrock");
+  const { callBedrockJSON } = await import("@/lib/bedrock");
   const messages: ChatMessage[] = [
     { role: "system", content: VERIFY_SYSTEM_PROMPT },
     { role: "user", content: `TASK: ${taskTitle}\nSKILL: ${skillTitle}` },
@@ -284,14 +265,10 @@ async function llmJudge(taskTitle: string, skillTitle: string): Promise<boolean>
   }
 }
 
-/**
- * Drop every proposed link the judge won't vouch for. Pairs are judged concurrently but
- * independently - no pair ever sees another, which is the entire point.
- *
- * Concurrency is capped. One click used to fire up to MAX_LINKS judge calls at once, and
- * because the judge fails CLOSED, a burst of 429s silently deleted good suggestions
- * rather than surfacing an error.
- */
+/** Drop every proposed link the judge won't vouch for. Pairs are judged concurrently but
+ *  independently - no pair ever sees another, which is the whole point. Concurrency is capped:
+ *  one click used to fire up to MAX_LINKS judge calls at once, and because the judge fails
+ *  CLOSED a burst of 429s silently deleted good suggestions instead of surfacing an error. */
 export async function filterVerified(
   links: ProposedLink[],
   nodeById: Map<string, SkillNode>,
@@ -336,21 +313,15 @@ export interface ProposedLink {
   rationale: string;
 }
 
-/**
- * Propose skill-node ↔ task links. `existingPairs` holds every pair already on record
- * in ANY status, so a dismissed pair is never resurrected and a confirmed one is never
- * duplicated. Returns [] when no LLM is configured - the offline fallback for this
- * feature is *nothing*, deliberately: the only offline matcher available is the title
- * similarity that this whole edge exists to work around, so a heuristic here would
- * manufacture links it cannot justify.
+/** Propose skill-node <-> task links. `existingPairs` holds every pair already on record in ANY
+ *  status, so a dismissed pair is never resurrected and a confirmed one never duplicated.
+ *  Returns [] with no LLM configured - the offline fallback here is deliberately NOTHING, since
+ *  the only offline matcher available is the title similarity this edge exists to work around.
  *
- * Only the **unlocked frontier** is offered as a link target (`skillProgress().unlocked`
- * - unattained nodes whose prerequisites are all attained). A link is a device for
- * *inferring* an attainment, and inference may only walk the graph one node at a time;
- * without this the linker happily proposed a capstone three unmet prerequisites deep,
- * and spillover credited it. Saying "I can do X" outright is unaffected - assertion may
- * jump the graph, inference may not.
- */
+ *  Only the unlocked frontier is offered as a target. A link is a device for INFERRING an
+ *  attainment, and inference may only walk the graph one node at a time; without this the
+ *  linker happily proposed a capstone three unmet prerequisites deep and spillover credited it.
+ *  Saying "I can do X" outright is unaffected - assertion may jump the graph, inference may not. */
 export async function suggestSkillTaskLinks(
   nodes: SkillNode[],
   tasks: Task[],
@@ -370,7 +341,7 @@ export async function suggestSkillTaskLinks(
   const skillLines = [...nodeByKey].map(([k, n]) => `${k}: ${n.title}`).join("\n");
   const taskLines = [...taskByKey].map(([k, t]) => `${k}: ${t.title}`).join("\n");
 
-  const { callBedrockJSON } = await import("./bedrock");
+  const { callBedrockJSON } = await import("@/lib/bedrock");
   const messages: ChatMessage[] = [
     { role: "system", content: SYSTEM_PROMPT },
     { role: "user", content: `SKILLS:\n${skillLines}\n\nTASKS:\n${taskLines}` },
@@ -397,20 +368,15 @@ export async function suggestSkillTaskLinks(
   }
 }
 
-/**
- * Defensive clean-up of an LLM-proposed link set: drop hallucinated handles, pairs we
- * already know about (in any status), and duplicates within the response itself. Keeps
- * persistence honest regardless of what the model returns.
+/** Defensive clean-up of a proposed link set: drop hallucinated handles, pairs we already know
+ *  about, and duplicates within the response itself.
  *
- * `nodeByKey` contains ONLY the unlocked frontier, so a locked node is unreachable here
- * even if the model invents its handle - and under the per-request `node_key` enum it
- * cannot invent one at all.
+ *  `nodeByKey` contains ONLY the unlocked frontier, so a locked node is unreachable even if the
+ *  model invents its handle - and under the per-request enum it can't invent one at all.
  *
- * The ARRAY is now the shape the prompt asks for; the task-keyed map is the legacy branch,
- * kept because it costs nothing and a non-strict caller could still produce it. Fan-out is
- * no longer bounded by unique JSON keys, so `bestPerTask` is the only thing standing
- * between a fanned-out response and the review surface. Do not remove it.
- */
+ *  The array is the shape the prompt asks for; the task-keyed map is a legacy branch kept
+ *  because it costs nothing. Fan-out is no longer bounded by unique JSON keys, so bestPerTask is
+ *  the only thing between a fanned-out response and the review surface. Don't remove it. */
 export function sanitizeLinks(
   links: Record<string, ExtractedLink | null> | ExtractedLink[],
   nodeByKey: Map<string, SkillNode>,
@@ -426,7 +392,7 @@ export function sanitizeLinks(
     if (!node || !taskByKey.has(taskKey)) return;
     const rationale = (raw.rationale ?? "").trim().slice(0, 160);
     if (!rationale) return;
-    // `forecast()` is the sole owner of odds (§0). The prompt forbids numbers in the
+       // `forecast()` is the sole owner of odds. The prompt forbids numbers in the
     // rationale, but this string is persisted and shown verbatim on the confirm surface,
     // so a prose-only invariant is not an invariant.
     if (/\d|%/.test(rationale)) return;

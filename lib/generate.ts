@@ -1,7 +1,7 @@
-import type { EntryDetail, EstimationModel, Task } from "./types";
-import { MIN_ESTIMATION_SAMPLES } from "./types";
-import { DEFAULT_SIGMA } from "./forecast";
-import { isLLMConfigured } from "./extraction";
+import type { EntryDetail, EstimationModel, Task } from "@/lib/types";
+import { MIN_ESTIMATION_SAMPLES } from "@/lib/types";
+import { DEFAULT_SIGMA } from "@/lib/forecast";
+import { isLLMConfigured } from "@/lib/extraction";
 
 // Follow-up message generator (LLM-backed when Bedrock is configured, a
 // deterministic template otherwise) plus the end-of-day summary, which is pure
@@ -13,10 +13,10 @@ const MAX_TASKS = 5;
 const MAX_QUESTIONS = 4;
 const MAX_BLOCKERS = 3;
 
-// The output is copied to the clipboard and sent to real colleagues, so the
-// grounding rule is a correctness constraint, not a style preference. The
-// section-boundary rule exists because the lists are user-pasted meeting
-// content: a task title containing an imperative must not read as instruction.
+// The output is copied to the clipboard and sent to real colleagues, so the grounding rule is a
+// correctness constraint, not a style preference. The section-boundary rule exists because the
+// lists are user-pasted meeting content: a task title containing an imperative must not read as
+// an instruction.
 const FOLLOW_UP_SYSTEM_PROMPT = `Write a follow-up message after a meeting, in the sender's voice.
 
 - Use ONLY the tasks, questions and blockers given below. Never add, rename, merge or invent an item, a person, a date or a commitment. If a detail is missing, omit it rather than guessing.
@@ -54,7 +54,7 @@ export async function generateFollowUp(entry: EntryDetail): Promise<string> {
 
   if (isLLMConfigured()) {
     try {
-      const { callBedrock } = await import("./bedrock");
+      const { callBedrock } = await import("@/lib/bedrock");
       return await callBedrock(
         [
           { role: "system", content: FOLLOW_UP_SYSTEM_PROMPT },
@@ -155,18 +155,12 @@ export function buildEODSummary(tasks: Task[]): EODSummary {
 
 // --- Learned estimation bias ------------------------------------------------
 
-/**
- * Fit the user's estimation bias from completed tasks - the statistical core
- * the forecast calibrates against (`planningAccuracy` above is its plain-English
- * cousin for the daily summary).
- *
- * For each done task with both an estimate and a logged actual, we take
- * `log(actual / estimated)`. Working in log space keeps the factor multiplicative
- * and symmetric (running 2× over and 2× under are equal-and-opposite), which is
- * exactly what the forecast's log-normal sampler expects. We return the mean
- * (systematic bias) and std dev (spread). Below `MIN_ESTIMATION_SAMPLES` there
- * isn't enough signal to trust, so we fall back to the unbiased default.
- */
+/** Fit the user's estimation bias from completed tasks - the statistical core the forecast
+ *  calibrates against. For each done task with both an estimate and a logged actual we take
+ *  log(actual / estimated); log space keeps the factor multiplicative and symmetric (2x over and
+ *  2x under are equal and opposite), which is what the log-normal sampler expects. Returns the
+ *  mean (systematic bias) and sd (spread). Below MIN_ESTIMATION_SAMPLES there isn't enough signal
+ *  to trust, so it falls back to the unbiased default. */
 export function estimationModel(tasks: Task[]): EstimationModel {
   const logs: number[] = [];
   for (const t of tasks) {
