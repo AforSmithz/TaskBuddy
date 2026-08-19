@@ -1,17 +1,17 @@
 import type { EntryKind, ExtractionResult } from "./types";
-import type { ChatMessage } from "./foundry";
+import type { ChatMessage } from "./bedrock";
 import { heuristicExtract, heuristicPlan } from "./heuristic";
 
 // Meeting extraction orchestrator.
-// Uses Microsoft Foundry when configured; otherwise falls back to the offline
+// Uses Amazon Bedrock when configured; otherwise falls back to the offline
 // heuristic extractor so the app is fully usable without any API keys.
 
 // Re-exported from the provider module so there is exactly one definition of
 // "is the LLM layer configured". Nine modules and three route components import
 // it from here, including app/(app)/layout.tsx, which uses it to decide demo
 // mode - a second, drifting copy would silently flip half the app.
-export { isLLMConfigured } from "./foundry-config";
-import { isLLMConfigured } from "./foundry-config";
+export { isLLMConfigured } from "./bedrock-config";
+import { isLLMConfigured } from "./bedrock-config";
 
 // The 1-5 rubric is shared by both prompts. It used to live only in the meeting
 // prompt, and the plan prompt referred to it as "the same rubrics as meeting
@@ -247,9 +247,9 @@ export async function extractEntry(
     return { result: HEURISTIC[kind](rawInput), source: "heuristic" };
   }
 
-  // Imported lazily so the app loads without Foundry configured; lib/foundry.ts
+  // Imported lazily so the app loads without Bedrock configured; lib/bedrock.ts
   // is server-only.
-  const { callFoundryJSON } = await import("./foundry");
+  const { callBedrockJSON } = await import("./bedrock");
   const projectHint = context.projectNames?.length
     ? `\n\nExisting projects you may reuse by exact name: ${context.projectNames.join(", ")}.`
     : "";
@@ -270,7 +270,7 @@ export async function extractEntry(
 
   for (let attempt = 1; attempt <= MAX_LLM_ATTEMPTS; attempt++) {
     try {
-      const result = await callFoundryJSON<ExtractionResult>(messages, {
+      const result = await callBedrockJSON<ExtractionResult>(messages, {
         schema: EXTRACTION_SCHEMA as unknown as Record<string, unknown>,
         schemaName: "extraction_result",
         // Extraction is largely transcription; the judgement is in the scoring.

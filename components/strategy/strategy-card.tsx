@@ -21,6 +21,7 @@ import {
   Unlock,
 } from "lucide-react";
 import type {
+  JobRun,
   PortfolioStrategy,
   StrategyMove,
   StrategyMoveKind,
@@ -35,6 +36,7 @@ import {
   refreshPortfolioStrategyAction,
   undoPlanVersionAction,
 } from "@/lib/actions";
+import { useJobRun } from "@/components/jobs/use-job-run";
 import { band, formatPct } from "@/components/forecast/forecast-meter";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -601,6 +603,7 @@ export function StrategyCard({
   strategy,
   stale,
   canUseLLM,
+  activeJob = null,
   projectNames = {},
   steadyPlanDefaultOpen = false,
   severity = "gentle",
@@ -608,6 +611,9 @@ export function StrategyCard({
   strategy: PortfolioStrategy;
   stale: boolean;
   canUseLLM: boolean;
+  /** A strategy refresh already in flight, per the server. Keeps the pending
+   *  state alive across a reload, and stops a second card from starting one. */
+  activeJob?: JobRun | null;
   /** taskId → project name, so deferred tasks can show which project they're from. */
   projectNames?: Record<string, string>;
   /** Expand the grounded "Steady plan" tier by default (true on /strategy). */
@@ -619,35 +625,40 @@ export function StrategyCard({
    */
   severity?: "gentle" | "escalated";
 }) {
-  // The freshly refreshed strategy wins over the server-passed one until the
-  // next server render catches up (revalidatePath fires inside the action).
-  const [refreshed, setRefreshed] = useState<PortfolioStrategy | null>(null);
-  const current = refreshed ?? strategy;
-  const isStale = stale && refreshed === null;
-
-  const [refreshing, startRefresh] = useTransition();
+  // The synthesis runs on the queue, so this card no longer receives a strategy
+  // back from the action - it watches the job and the SERVER re-renders with
+  // the newly cached strategy once the worker has written it. `strategy` is
+  // therefore always the current truth here, and the card has one source of it
+  // rather than a local copy racing the server's.
+  const job = useJobRun(activeJob);
+  const refreshing = job.pending;
+  const current = strategy;
+  const isStale = stale && !refreshing;
 
   function refresh() {
-    startRefresh(async () => {
-      const next = await refreshPortfolioStrategyAction();
-      setRefreshed(next);
-    });
+    if (refreshing) return;
+    job.start(() => refreshPortfolioStrategyAction());
   }
 
   // Aggressive policy: when the LLM is available, regenerate in the background - 
   // upgrade a deterministic draft on first load, or refresh a stale strategy - 
   // exactly once per mount. The server's deterministic gate already ensures
   // `stale` only fires on a material change, so this never spins on cosmetic edits.
+  //
+  // THREE GUARDS, and each one closes a different loop. The ref stops a second
+  // fire within a mount; `activeJob` stops this card and the one on the other
+  // page from both enqueueing (the action de-duplicates server-side too, but
+  // arriving there twice is still two round trips); and the router refresh that
+  // follows a completed job re-renders this component, so without `job.run` a
+  // freshly finished refresh would immediately trigger the next one.
   const autoFired = useRef(false);
+  const { run: watchedJob, start: startJob } = job;
   useEffect(() => {
-    if (autoFired.current || !canUseLLM || refreshed) return;
+    if (autoFired.current || !canUseLLM || watchedJob) return;
     if (strategy.usedLLM && !stale) return; // already a fresh AI strategy
     autoFired.current = true;
-    startRefresh(async () => {
-      const next = await refreshPortfolioStrategyAction();
-      setRefreshed(next);
-    });
-  }, [canUseLLM, refreshed, stale, strategy.usedLLM, startRefresh]);
+    startJob(() => refreshPortfolioStrategyAction());
+  }, [canUseLLM, watchedJob, stale, strategy.usedLLM, startJob]);
 
   const calm = current.onTrack || current.moves.length === 0;
   // Every move is a `hold` ⇒ the strategist looked and concluded that waiting IS the
@@ -709,6 +720,18 @@ export function StrategyCard({
             <p className="min-w-0 text-[12px] text-[var(--color-fg-muted)]">
               Synthesizing your strategy…
             </p>
+          </div>
+        ) : job.failed ? (
+          /* The worker reported back, and it did not go well. Worth saying: the
+             card below is still the last good strategy, not a broken render. */
+          <div className="mb-5 flex items-center justify-between gap-3 rounded-[14px] border border-[var(--color-border)] border-l-2 border-l-[var(--color-danger)] bg-[var(--color-surface-raised)] px-3.5 py-2.5">
+            <p className="min-w-0 text-[12px] text-[var(--color-fg-muted)]">
+              Couldn&apos;t refresh the strategy. Showing the last one.
+            </p>
+            <Button variant="secondary" size="sm" onClick={refresh}>
+              <RefreshCw className="size-3.5" />
+              Try again
+            </Button>
           </div>
         ) : isStale ? (
           /* Stale and not auto-refreshing (e.g. LLM offline) - offer a manual refresh. */

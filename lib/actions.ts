@@ -19,28 +19,24 @@ import {
   createGoal,
   createRecurringActivity,
   discardDraft,
-  getGoal,
   removeGoalCriterion,
-  replaceSkillNodes,
   setGoalCriterionMet,
   setGoalKind,
   setSkillNodeAttained,
   setTriageItemDeferred,
-  listSkillNodes,
   listAllSkillNodes,
-  listSkillTaskLinksForGoal,
   listConfirmedSkillTaskLinks,
-  insertSuggestedLinks,
   setSkillTaskLinkStatus,
-  getCachedStrategy,
   getEntry,
+  getJobRun,
+  settleJobRun,
+  startJobRun,
   listAllTasks,
   logActivityCompletion,
   logWorkSession,
   logCommitment,
   setAutoStrategy,
   setAvailability,
-  setCachedStrategy,
   setOverride,
   setProjectDeadline,
   setValueModel,
@@ -57,18 +53,22 @@ import {
   type ReorderOutcome,
 } from "./store";
 import { buildEODSummary, generateFollowUp, type EODSummary } from "./generate";
-import { decomposeLearningGoal } from "./decompose";
-import { pairKey, suggestSkillTaskLinks } from "./skill-links";
 import { skillProgress } from "./skill";
 import {
   generateCorrectiveTasks,
   generateReroute,
   generateTaskModifications,
 } from "./strategist";
-import { generatePortfolioStrategy } from "./portfolio-strategist";
 import { interpretCheckin, resolveCheckin, proposeFromCheckin } from "./checkin";
 import { SKILL_TASK_PREFIX, type ResolveInput } from "./portfolio-state";
 import { requireUser } from "./auth";
+import {
+  decomposeGoalJob,
+  refreshStrategyJob,
+  suggestSkillLinksJob,
+  type Job,
+} from "./job-handlers";
+import { isQueueConfigured, publish } from "./jobs";
 import type { ValueModel } from "./value-model";
 import type { WindowAvailability } from "./window-availability";
 import type {
@@ -82,11 +82,12 @@ import type {
   DraftClassification,
   EntryKind,
   GoalKind,
+  JobHandle,
+  JobRun,
   ModificationSuggestion,
   OfferedMove,
   PitCall,
   PlanVersion,
-  PortfolioStrategy,
   RecoverySuggestion,
   ReroutePart,
   RerouteSuggestion,
@@ -141,6 +142,119 @@ async function revalidateAll() {
     console.error("rolling-plan roll failed (non-fatal):", err);
   }
   revalidatePaths();
+}
+
+// --- The queue seam ---------------------------------------------------------
+//
+// Three actions below used to run a model call while the user waited; the
+// measured worst case was 43 seconds. They now publish an event and return, and
+// `job_runs` is how the browser finds out what happened. See aws/README.md
+// "Event-driven, and why it is not decoration" for what the queue buys beyond
+// the wait: retries that outlive the request, failures that reach a DLQ instead
+// of a console line, and a concurrency cap the platform enforces.
+
+/**
+ * Hand one long job to the queue - or run it here, when there is no queue.
+ *
+ * THE INLINE PATH IS NOT A FALLBACK BOLTED ON FOR SAFETY, it is the local
+ * development path and the deployment-without-the-events-stack path. With no
+ * `EVENT_BUS_NAME` this runs exactly what the action ran before, in-request, so
+ * behaviour is unchanged anywhere the bus is absent. `lib/job-handlers.ts` holds
+ * the body either way, so the two paths cannot drift.
+ *
+ * It is chosen by whether a bus is CONFIGURED, never by whether a publish
+ * succeeded. Those are different failures: the first is a deployment shape, the
+ * second is an outage, and quietly answering an outage by running the model
+ * call in the web request would reintroduce the exact latency this migration
+ * removed, on the day the infrastructure is least healthy.
+ *
+ * A failure on the inline path is RECORDED rather than thrown. The caller is a
+ * `useTransition` in a client component and an action that throws surfaces as a
+ * generic error boundary with no way back; a `failed` row renders the real
+ * message next to a retry button, which is the same affordance the queued path
+ * needs anyway.
+ */
+async function enqueue(
+  type: Job["type"],
+  subjectId: string | null,
+  toJob: (jobId: string) => Job,
+  body: () => Promise<Record<string, unknown> | void>,
+): Promise<JobHandle> {
+  const { run, reused } = await startJobRun(type, subjectId);
+  // Something is already in flight for this subject. Every one of these jobs is
+  // a billed model call, and the strategy refresh is fired automatically on
+  // mount by two separate pages, so joining the existing run matters.
+  if (reused) {
+    return {
+      jobId: run.id,
+      status: run.status,
+      ranInline: false,
+      result: run.result,
+      error: run.error,
+    };
+  }
+
+  // THE TEST IS "IS THERE A BUS", NOT "DID THE PUBLISH WORK". A publish that
+  // fails against a bus that exists is an outage, and running a 43-second model
+  // call inside the web request is precisely what this migration removed - it
+  // would risk the request timeout on the one path least able to afford it.
+  // Failing here is recoverable: the row records why, and the user can retry.
+  if (isQueueConfigured()) {
+    if (await publish(toJob(run.id))) {
+      return {
+        jobId: run.id,
+        status: "queued",
+        ranInline: false,
+        result: null,
+        error: null,
+      };
+    }
+    const error = "Could not queue that job. Try again in a moment.";
+    await settleJobRun(run.id, "failed", { error });
+    return { jobId: run.id, status: "failed", ranInline: false, result: null, error };
+  }
+
+  await settleJobRun(run.id, "running", {});
+  try {
+    const result = (await body()) ?? null;
+    await settleJobRun(run.id, "succeeded", { result, error: null });
+    await revalidateAll();
+    return {
+      jobId: run.id,
+      status: "succeeded",
+      ranInline: true,
+      result,
+      error: null,
+    };
+  } catch (err) {
+    console.error(`job ${type} failed inline:`, err);
+    const error = err instanceof Error ? err.message : String(err);
+    await settleJobRun(run.id, "failed", { error });
+    return { jobId: run.id, status: "failed", ranInline: true, result: null, error };
+  }
+}
+
+/**
+ * Read one job's state - the poll the pending UI runs while it waits.
+ *
+ * THIS IS ALSO WHERE THE ASYNC PATH GETS ITS REVALIDATION. A worker writes
+ * skill nodes or a strategy from a Lambda that has no render pass, so nothing
+ * it does can invalidate a page on its own. The first poll that observes a
+ * finished job is running inside a request that can, so it revalidates there.
+ *
+ * The cost is bounded but not free, and worth stating precisely: each watcher
+ * observes the terminal state once (it stops polling immediately after), so
+ * this is once per open tab watching the job rather than once per tick - and
+ * `revalidateAll` rolls the plan, which is a real piece of work. Two tabs on
+ * Today therefore roll twice. That is the same shape the synchronous action
+ * had, one roll per completion per caller, and two users with two tabs is not
+ * a load worth adding coordination for.
+ */
+export async function pollJobRunAction(jobId: string): Promise<JobRun | null> {
+  await requireUser();
+  const run = await getJobRun(jobId);
+  if (run?.status === "succeeded") await revalidateAll();
+  return run;
 }
 
 /**
@@ -302,14 +416,24 @@ export async function setGoalKindAction(
  * Decompose a learning goal into a skill graph (the LLM-proposes decomposer).
  * Replaces any prior plan. No-ops for project goals - their decomposition is the
  * task DAG from extraction.
+ *
+ * The slowest job in the app: 43 seconds measured, which is what made it the
+ * first one worth moving off the request path. Returns a handle to watch, not a
+ * finished plan - the skills appear on the next render after the job lands.
  */
-export async function decomposeGoalAction(goalId: string): Promise<void> {
-  await requireUser();
-  const goal = await getGoal(goalId);
-  if (!goal || goal.kind !== "learning") return;
-  const skills = await decomposeLearningGoal(goal.name, goal.description);
-  await replaceSkillNodes(goalId, skills);
-  await revalidateAll();
+export async function decomposeGoalAction(goalId: string): Promise<JobHandle> {
+  const user = await requireUser();
+  return enqueue(
+    "goal.decompose.requested",
+    goalId,
+    (jobId) => ({
+      type: "goal.decompose.requested",
+      userId: user.id,
+      goalId,
+      jobId,
+    }),
+    () => decomposeGoalJob(goalId),
+  );
 }
 
 /**
@@ -318,22 +442,24 @@ export async function decomposeGoalAction(goalId: string): Promise<void> {
  * confirmed edges. Pairs already on record in ANY status are excluded before the call,
  * so a dismissed link is never re-proposed.
  */
-export async function suggestSkillLinksAction(goalId: string): Promise<number> {
-  await requireUser();
-  const goal = await getGoal(goalId);
-  if (!goal || goal.kind !== "learning") return 0;
-
-  const [nodes, tasks, existing] = await Promise.all([
-    listSkillNodes(goalId),
-    listAllTasks(),
-    listSkillTaskLinksForGoal(goalId),
-  ]);
-  const existingPairs = new Set(existing.map((l) => pairKey(l.skill_node_id, l.task_id)));
-
-  const proposed = await suggestSkillTaskLinks(nodes, tasks, existingPairs);
-  const created = await insertSuggestedLinks(proposed);
-  await revalidateAll();
-  return created.length;
+export async function suggestSkillLinksAction(
+  goalId: string,
+): Promise<JobHandle> {
+  const user = await requireUser();
+  return enqueue(
+    "goal.skill_links.requested",
+    goalId,
+    (jobId) => ({
+      type: "goal.skill_links.requested",
+      userId: user.id,
+      goalId,
+      jobId,
+    }),
+    // The count used to be this action's return value. It has nowhere to go now
+    // that the action does not wait, so it rides the job row instead and the
+    // card reads it from there.
+    async () => ({ created: await suggestSkillLinksJob(goalId) }),
+  );
 }
 
 /** Confirm a proposed link (it starts driving spillover) or dismiss it (never
@@ -911,14 +1037,17 @@ export async function reorderTodayAction(
  * previously cached strategy for time-drift continuity, persists the result, and
  * revalidates both pages that render it.
  */
-export async function refreshPortfolioStrategyAction(): Promise<PortfolioStrategy> {
-  await requireUser();
-  const prev = await getCachedStrategy();
-  const strategy = await generatePortfolioStrategy(prev);
-  await setCachedStrategy(strategy);
-  revalidatePath("/");
-  revalidatePath("/strategy");
-  return strategy;
+export async function refreshPortfolioStrategyAction(): Promise<JobHandle> {
+  const user = await requireUser();
+  return enqueue(
+    "strategy.refresh.requested",
+    // Portfolio-wide: there is no subject, and the null is load-bearing - the
+    // partial unique index is declared `nulls not distinct` precisely so this
+    // job still gets the one-live-run guard the others get from their goal id.
+    null,
+    (jobId) => ({ type: "strategy.refresh.requested", userId: user.id, jobId }),
+    () => refreshStrategyJob(),
+  );
 }
 
 /** Generate a follow-up message for an entry's open questions and blockers. */

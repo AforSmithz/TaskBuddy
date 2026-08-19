@@ -2,6 +2,7 @@
 
 import { useTransition } from "react";
 import {
+  AlertTriangle,
   Check,
   GraduationCap,
   Lock,
@@ -9,9 +10,14 @@ import {
   Sparkles,
   RefreshCw,
 } from "lucide-react";
-import { COMPLETION_CONFIDENCE_LABELS, type SkillNode } from "@/lib/types";
+import {
+  COMPLETION_CONFIDENCE_LABELS,
+  type JobRun,
+  type SkillNode,
+} from "@/lib/types";
 import { skillProgress, topoSortSkills } from "@/lib/skill";
 import { decomposeGoalAction, setSkillAttainedAction } from "@/lib/actions";
+import { useJobRun } from "@/components/jobs/use-job-run";
 import { Card, CardHeader } from "@/components/ui/card";
 import { Pill } from "@/components/ui/badge";
 import { formatMinutes } from "@/lib/format";
@@ -23,22 +29,31 @@ import { cn } from "@/lib/cn";
  * built, it tracks the two progress kinds apart - *skill* (checkpoints cleared)
  * vs *effort* (practice minutes attained) - and surfaces which skills are
  * unlocked (prerequisites met) vs still locked.
+ *
+ * Building the plan is the slowest job in the app - 43 seconds measured - so it
+ * runs on the queue and this card watches for it to land. `activeJob` is the
+ * server's answer to "is one already running?", which is what keeps the pending
+ * state honest across a reload: the work continues in a Lambda whether or not
+ * this page is open.
  */
 export function SkillPlan({
   goalId,
   nodes,
+  activeJob = null,
 }: {
   goalId: string;
   nodes: SkillNode[];
+  activeJob?: JobRun | null;
 }) {
-  const [pending, startTransition] = useTransition();
+  const job = useJobRun(activeJob);
+  const pending = job.pending;
   const progress = skillProgress(nodes);
   const ordered = topoSortSkills(nodes);
   const unlocked = new Set(progress.unlocked);
 
   function build() {
     if (pending) return;
-    startTransition(() => decomposeGoalAction(goalId));
+    job.start(() => decomposeGoalAction(goalId));
   }
 
   return (
@@ -66,11 +81,13 @@ export function SkillPlan({
               type="button"
               onClick={build}
               disabled={pending}
+              aria-busy={pending}
               className="mt-3 flex h-9 items-center gap-1.5 rounded-[12px] bg-[var(--color-accent-subtle)] px-3 text-[13px] font-semibold text-[var(--color-accent)] transition-colors hover:bg-[var(--color-accent)] hover:text-white disabled:opacity-60"
             >
               <Sparkles className={cn("size-4", pending && "animate-pulse")} />
-              {pending ? "Building the plan…" : "Build skill plan"}
+              {pending ? "Building the plan…" : job.failed ? "Try again" : "Build skill plan"}
             </button>
+            <JobNotice pending={pending} error={job.error} />
           </div>
         ) : (
           <>
@@ -91,15 +108,46 @@ export function SkillPlan({
               type="button"
               onClick={build}
               disabled={pending}
+              aria-busy={pending}
               className="mt-3 flex items-center gap-1.5 text-[12px] font-semibold text-[var(--color-fg-muted)] transition-colors hover:text-[var(--color-fg)] disabled:opacity-60"
             >
               <RefreshCw className={cn("size-3.5", pending && "animate-spin")} />
-              {pending ? "Rebuilding…" : "Rebuild plan"}
+              {pending ? "Rebuilding…" : job.failed ? "Rebuild failed - try again" : "Rebuild plan"}
             </button>
+            <JobNotice pending={pending} error={job.error} />
           </>
         )}
       </div>
     </Card>
+  );
+}
+
+/**
+ * What the queue is doing, in words.
+ *
+ * A spinner alone is not enough once the work outlives the request: the job
+ * keeps running if you navigate away, and a failure arrives minutes later with
+ * no request left to attach an error to. Both facts are worth saying out loud.
+ */
+function JobNotice({ pending, error }: { pending: boolean; error: string | null }) {
+  if (pending) {
+    return (
+      <p className="mt-2 text-[12px] text-[var(--color-fg-subtle)]" aria-live="polite">
+        Working on it. This takes up to a minute and keeps going if you leave
+        this page.
+      </p>
+    );
+  }
+  if (!error) return null;
+  return (
+    <p
+      className="mt-2 flex items-start gap-1.5 text-[12px] text-[var(--color-danger)]"
+      role="status"
+      aria-live="polite"
+    >
+      <AlertTriangle className="mt-px size-3.5 shrink-0" />
+      <span>{error}</span>
+    </p>
   );
 }
 

@@ -1834,3 +1834,96 @@ export interface CheckinScope {
    *  requires one; the strategist's own adds inherit it the same way). */
   area: string;
 }
+
+// --- Asynchronous jobs (the queue-backed LLM path) --------------------------
+
+/**
+ * Where a queued job has got to.
+ *
+ * `retrying` is not decoration. SQS redelivers a failed message up to
+ * `maxReceiveCount` times, so the first failure is usually transient (a Bedrock
+ * throttle clears in seconds) and telling the user "that failed" would be a
+ * lie the queue is about to disprove. The worker only writes `failed` on the
+ * delivery it can prove is the last one.
+ */
+export type JobRunStatus =
+  | "queued"
+  | "running"
+  | "retrying"
+  | "succeeded"
+  | "failed";
+
+/** True once the job will not change state again on its own. */
+export function isTerminalJobStatus(status: JobRunStatus): boolean {
+  return status === "succeeded" || status === "failed";
+}
+
+/**
+ * One attempt at a long job, as the browser sees it.
+ *
+ * This row exists because the Server Actions stopped waiting. A published event
+ * gives the caller nothing to render, so without a status row "the request
+ * returned immediately" and "nothing happened" look identical to the user.
+ */
+export interface JobRun {
+  id: string;
+  /** A `Job["type"]` from lib/job-handlers.ts. */
+  type: string;
+  /** The goal this job is about; null for portfolio-wide work. */
+  subjectId: string | null;
+  status: JobRunStatus;
+  /** Whatever the body returned that the UI needs, e.g. `{ created: 4 }`. */
+  result: Record<string, unknown> | null;
+  /** The failure message, shown beside the retry affordance. */
+  error: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * How long a non-terminal job may sit untouched before the UI stops believing
+ * in it and offers a retry.
+ *
+ * DERIVED FROM THE QUEUE, NOT CHOSEN. A failed delivery does not come back
+ * immediately: the message reappears when its visibility timeout expires, so
+ * the worst case before the DLQ is roughly
+ * `WORKER_MAX_RECEIVE_COUNT * visibilityTimeout` — 3 x 360s in
+ * aws/infra/lib/config.ts, plus slack for the bus hop and a cold start.
+ *
+ * Too short and the UI declares dead a job SQS is still going to run, and the
+ * retry enqueues a second copy of work that is already in flight — billed
+ * twice. Too long and a job whose event never reached the queue at all (the
+ * bus-to-queue target has its own DLQ) pins the button forever. If the queue's
+ * visibility timeout changes, change this with it.
+ */
+export const JOB_STALE_MS = 20 * 60 * 1000;
+
+/** True when a job has stopped making progress and the UI should stop waiting. */
+export function isJobAbandoned(run: JobRun, now: number = Date.now()): boolean {
+  if (isTerminalJobStatus(run.status)) return false;
+  return now - new Date(run.updatedAt).getTime() > JOB_STALE_MS;
+}
+
+/**
+ * What a Server Action hands back once it no longer does the work itself.
+ *
+ * `ranInline` is the honest bit: with no `EVENT_BUS_NAME` (local development,
+ * and any deployment without the events stack) `publish()` returns false and
+ * the action runs the body in-request exactly as it used to. The caller gets a
+ * job that is already terminal, and should not start polling for it.
+ */
+export interface JobHandle {
+  jobId: string;
+  status: JobRunStatus;
+  ranInline: boolean;
+  /**
+   * The outcome, when the action already has one.
+   *
+   * These carry the INLINE path's result, and they are not a convenience: a
+   * terminal job is never polled, so a handle that came back already finished
+   * is the only chance the browser gets to see what it produced or why it
+   * failed. On the queued path both are null and the poll fills them in.
+   */
+  result: Record<string, unknown> | null;
+  error: string | null;
+}

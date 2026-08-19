@@ -12,6 +12,11 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Generated. aws/.build is the 41 MB Next standalone bundle and cdk.out is
+    // the synthesized CloudFormation plus every esbuild artefact; linting either
+    // reports thousands of problems in code nobody wrote.
+    "aws/.build/**",
+    "aws/infra/cdk.out/**",
   ]),
 ]);
 

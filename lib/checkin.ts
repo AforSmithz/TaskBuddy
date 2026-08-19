@@ -15,12 +15,12 @@ import type {
   StrategyMovePayload,
   SuggestedTask,
 } from "./types";
-import type { ChatMessage } from "./foundry";
+import type { ChatMessage } from "./bedrock";
 import type { DependencyEdge } from "./schedule";
 
 // §5.6 stage A - interpret a free-form activity report into ungrounded, quoted,
 // register-tagged intents (design/s5.6-nl-checkin-loop.md). Shaped exactly like
-// `lib/extraction.ts`: a Foundry call when configured, else an offline heuristic
+// `lib/extraction.ts`: a Bedrock call when configured, else an offline heuristic
 // parser, so the loop is fully usable with no API key. The LLM stays on natural
 // language - it may echo a candidate HANDLE but never a DB id; the deterministic
 // stage B (resolveCheckin) does the binding (§0 firewall).
@@ -34,8 +34,8 @@ import type { DependencyEdge } from "./schedule";
 // here while nine other modules import the identical one from lib/extraction.ts.
 // They used to be two separate copies of the same env read, which is exactly how
 // half the app ends up thinking the LLM is live while the other half does not.
-export { isLLMConfigured } from "./foundry-config";
-import { isLLMConfigured } from "./foundry-config";
+export { isLLMConfigured } from "./bedrock-config";
+import { isLLMConfigured } from "./bedrock-config";
 
 /** Cap the intents a single report may yield. Every Family-A intent costs its own
  *  solver call in stage C, so a rambling 30-clause check-in is ~31 joint forecasts. */
@@ -200,7 +200,7 @@ export async function interpretCheckin(
     return { result: heuristicInterpret(report), source: "heuristic" };
   }
 
-  const { callFoundryJSON } = await import("./foundry");
+  const { callBedrockJSON } = await import("./bedrock");
   const messages: ChatMessage[] = [
     { role: "system", content: SYSTEM_PROMPT },
     {
@@ -214,7 +214,7 @@ export async function interpretCheckin(
   ];
 
   try {
-    const result = await callFoundryJSON<CheckinInterpretationWire>(messages, {
+    const result = await callBedrockJSON<CheckinInterpretationWire>(messages, {
       schema: checkinSchema(candidates),
       schemaName: "checkin_intents",
       // Clause segmentation, negation, kind selection with an explicit tie-break, and a

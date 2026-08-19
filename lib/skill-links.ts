@@ -1,5 +1,5 @@
 import type { ExtractedLink, LinkSuggestion, LinkVerdict, SkillNode, Task } from "./types";
-import type { ChatMessage } from "./foundry";
+import type { ChatMessage } from "./bedrock";
 import { isLLMConfigured } from "./checkin";
 import { skillProgress } from "./skill";
 
@@ -16,7 +16,7 @@ import { skillProgress } from "./skill";
 // The model proposes pairs + prose. It never outputs a score, a probability, or an
 // ordering - `forecast()` remains the sole owner of odds (§0).
 //
-// No `server-only` directive and no static `foundry` import: the client is pulled in
+// No `server-only` directive and no static `bedrock` import: the client is pulled in
 // dynamically inside the one async call, exactly as `checkin.ts` does it, so the pure
 // half (`sanitizeLinks`, `pairKey`) stays importable from a plain-Node test harness.
 //
@@ -257,13 +257,13 @@ export type LinkJudge = (taskTitle: string, skillTitle: string) => Promise<boole
  *  errors drops the suggestion rather than admitting an unchecked link. The cost of a
  *  false negative is a missing suggestion; of a false positive, a wrong credit. */
 async function llmJudge(taskTitle: string, skillTitle: string): Promise<boolean> {
-  const { callFoundryJSON } = await import("./foundry");
+  const { callBedrockJSON } = await import("./bedrock");
   const messages: ChatMessage[] = [
     { role: "system", content: VERIFY_SYSTEM_PROMPT },
     { role: "user", content: `TASK: ${taskTitle}\nSKILL: ${skillTitle}` },
   ];
   try {
-    const verdict = await callFoundryJSON<LinkVerdict>(messages, {
+    const verdict = await callBedrockJSON<LinkVerdict>(messages, {
       schema: VERDICT_SCHEMA as unknown as Record<string, unknown>,
       schemaName: "link_verdict",
       // A single yes/no with two titles in context.
@@ -370,14 +370,14 @@ export async function suggestSkillTaskLinks(
   const skillLines = [...nodeByKey].map(([k, n]) => `${k}: ${n.title}`).join("\n");
   const taskLines = [...taskByKey].map(([k, t]) => `${k}: ${t.title}`).join("\n");
 
-  const { callFoundryJSON } = await import("./foundry");
+  const { callBedrockJSON } = await import("./bedrock");
   const messages: ChatMessage[] = [
     { role: "system", content: SYSTEM_PROMPT },
     { role: "user", content: `SKILLS:\n${skillLines}\n\nTASKS:\n${taskLines}` },
   ];
 
   try {
-    const result = await callFoundryJSON<LinkSuggestion>(messages, {
+    const result = await callBedrockJSON<LinkSuggestion>(messages, {
       schema: linkSchema([...taskByKey.keys()], [...nodeByKey.keys()]),
       schemaName: "skill_task_links",
       // The assignment pass compares every task against every skill and applies the

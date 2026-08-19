@@ -14,7 +14,7 @@ import type {
   TaskModification,
 } from "./types";
 import type { Task } from "./types";
-import type { ChatMessage } from "./foundry";
+import type { ChatMessage } from "./bedrock";
 import { isLLMConfigured } from "./extraction";
 import {
   getRecoveryContext,
@@ -287,8 +287,8 @@ export async function generateCorrectiveTasks(
   const ctx = await getRecoveryContext(projectId);
   if (!ctx) return null;
 
-  // Imported lazily so the app loads without Foundry configured.
-  const { callFoundryJSON } = await import("./foundry");
+  // Imported lazily so the app loads without Bedrock configured.
+  const { callBedrockJSON } = await import("./bedrock");
 
   const messages: ChatMessage[] = [
     { role: "system", content: SYSTEM_PROMPT },
@@ -297,7 +297,7 @@ export async function generateCorrectiveTasks(
 
   let raw: RawSuggestion;
   try {
-    raw = await callFoundryJSON<RawSuggestion>(messages, {
+    raw = await callBedrockJSON<RawSuggestion>(messages, {
       schema: GENERATE_SCHEMA,
       schemaName: "corrective_tasks",
       // Rubric scoring and a genuine-gap judgement, not transcription.
@@ -490,7 +490,7 @@ export async function generateTaskModifications(
   const ctx = await getRecoveryContext(projectId);
   if (!ctx) return null;
 
-  const { callFoundryJSON } = await import("./foundry");
+  const { callBedrockJSON } = await import("./bedrock");
 
   const messages: ChatMessage[] = [
     { role: "system", content: MODIFY_SYSTEM_PROMPT },
@@ -499,7 +499,7 @@ export async function generateTaskModifications(
 
   let raw: RawModifications;
   try {
-    raw = await callFoundryJSON<RawModifications>(messages, {
+    raw = await callBedrockJSON<RawModifications>(messages, {
       schema: modifySchema([...taskRefs(ctx.openTasks).keys()]),
       schemaName: "task_modifications",
       // The two arithmetic checks in the prompt are the reasoning-heaviest thing
@@ -729,7 +729,7 @@ export async function generateReroute(
   const ctx = await getRecoveryContext(projectId);
   if (!ctx) return null;
 
-  const { callFoundryJSON } = await import("./foundry");
+  const { callBedrockJSON } = await import("./bedrock");
 
   const messages: ChatMessage[] = [
     { role: "system", content: REROUTE_SYSTEM_PROMPT },
@@ -738,7 +738,7 @@ export async function generateReroute(
 
   let raw: RawReroute;
   try {
-    raw = await callFoundryJSON<RawReroute>(messages, {
+    raw = await callBedrockJSON<RawReroute>(messages, {
       schema: rerouteSchema(ctx.criteria.map((_, i) => criterionHandle(i))),
       schemaName: "reroute_plan",
       reasoningEffort: "medium",

@@ -1,0 +1,22 @@
+{
+  "name": "taskbuddy-infra",
+  "version": "0.1.0",
+  "private": true,
+  "bin": { "taskbuddy-infra": "bin/taskbuddy.js" },
+  "scripts": {
+    "synth": "cdk synth",
+    "diff": "cdk diff",
+    "deploy": "cdk deploy --all",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "aws-cdk": "^2",
+    "esbuild": "^0.25",
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "aws-cdk-lib": "^2",
+    "constructs": "^10"
+  }
+}

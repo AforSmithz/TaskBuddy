@@ -131,7 +131,7 @@ type Verb = "select" | "insert" | "update" | "upsert" | "delete";
 
 interface Filter {
   column: string;
-  op: "eq" | "lt" | "gte" | "in";
+  op: "eq" | "lt" | "gte" | "in" | "isNull";
   value: unknown;
 }
 
@@ -218,6 +218,20 @@ export class QueryBuilder implements PromiseLike<ShimResult> {
 
   eq(column: string, value: string | number | boolean | null): this {
     this.filters.push({ column, op: "eq", value });
+    return this;
+  }
+
+  /**
+   * `column IS NULL`, PostgREST's `.is(col, null)`.
+   *
+   * Not reachable through `.eq(col, null)`, and the difference is the classic
+   * SQL trap rather than a style choice: `.eq` binds a parameter and
+   * `col = NULL` is never true, so the query silently returns nothing at all.
+   * The one caller that needs it is the job-run lookup for portfolio-wide work,
+   * whose `subject_id` is genuinely NULL.
+   */
+  isNull(column: string): this {
+    this.filters.push({ column, op: "isNull", value: null });
     return this;
   }
 
@@ -488,6 +502,8 @@ export class QueryBuilder implements PromiseLike<ShimResult> {
           return `${col} < ${b.bind(this.table, f.column, f.value)}`;
         case "gte":
           return `${col} >= ${b.bind(this.table, f.column, f.value)}`;
+        case "isNull":
+          return `${col} IS NULL`;
         case "in":
           // `= ANY($n::uuid[])`. All 13 `.in()` sites target `id`, `entry_id` or
           // `skill_node_id`, all uuid. It is also valid on an empty array and

@@ -1,0 +1,217 @@
+// Every knob the stacks read, in one place, with the reasoning attached.
+//
+// This file is the AWS counterpart of azure/infra/main.bicepparam. It is
+// deliberately plain TypeScript rather than CDK context: the values below carry
+// cost and latency arguments that a JSON file cannot hold, and several of them
+// sit exactly on a boundary where changing the number changes the bill.
+
+/** Everything lives in one region. See aws/README.md "Why one region". */
+export const REGION = "ap-southeast-1";
+
+/** Prefix for every physical resource name. */
+export const APP = "taskbuddy";
+
+/**
+ * Aurora Serverless v2 floor, in ACU. ZERO IS THE COST CONTROL, NOT A DEFAULT.
+ *
+ * At 0 the cluster auto-pauses after AUTO_PAUSE_SECONDS of no connections and
+ * bills storage only. Setting it to 0.5 - which reads like a harmless
+ * "always have a little capacity" - disables auto-pause entirely and takes the
+ * cluster from roughly $10/mo to roughly $50/mo with no other change and no
+ * warning. This is the AWS equivalent of Azure's `--storage-auto-grow Disabled`
+ * trap: an ops-looking flag that is really the price tag.
+ */
+export const DB_MIN_ACU = 0;
+
+/**
+ * Ceiling. Two users cannot use four ACUs; this exists so that a runaway query
+ * or a backfill cannot scale into three figures of hourly spend.
+ */
+export const DB_MAX_ACU = 4;
+
+/**
+ * Idle time before the cluster pauses. Range is 300 - 86400.
+ *
+ * 900 rather than the 300 default. A dashboard render fires ~21 statements and
+ * `lib/db/pool.ts` sets idleTimeoutMillis to 10s, so connections drop almost
+ * immediately after each page view. At 300 a user reading one screen for six
+ * minutes would pay the ~15s resume on their next click. Fifteen minutes covers
+ * a normal working session while still pausing overnight, which is where all
+ * the saving actually is.
+ */
+export const DB_AUTO_PAUSE_SECONDS = 900;
+
+/**
+ * Automated backup retention, in days. This is the PITR window.
+ *
+ * 7 is the design value and requires a **Paid** account plan. It is a named
+ * constant rather than an inline 7 because of how it fails otherwise.
+ *
+ * On the AWS Free account plan - the credit-based sandbox new accounts get by
+ * default since 2025-07-15 - this exact value is rejected at CreateDBCluster
+ * with "The specified backup retention period exceeds the maximum available to
+ * free tier customers", arriving as a CloudFormation rollback several minutes
+ * into the deploy and naming a quota rather than the plan behind it. The cap
+ * there is 1.
+ *
+ * Lowering this to 1 does NOT make the stack deploy on a Free plan. That was
+ * tried on 2026-08-19 and the next error was the real one: free-plan accounts
+ * must pass `WithExpressConfiguration` to CreateDBCluster, and that parameter
+ * does not exist on the `AWS::RDS::DBCluster` CloudFormation resource - so
+ * Aurora cannot be created by CDK on a Free plan at all, at any retention.
+ * The account was upgraded to Paid instead. See aws/CUTOVER.md.
+ */
+export const DB_BACKUP_RETENTION_DAYS = 7;
+
+/** Postgres major version. Aurora tracks community releases a little behind. */
+export const DB_ENGINE_VERSION = "16.13";
+
+export const DB_NAME = "taskbuddy";
+
+/** Role the application connects as. Never the cluster master. */
+export const DB_APP_ROLE = "taskbuddy_app";
+
+/**
+ * Node runtime for every function. arm64 (Graviton) throughout: ~34% better
+ * price-performance and the entire dependency set is architecture-neutral.
+ */
+export const LAMBDA_ARCH = "arm64";
+
+/**
+ * AWS Lambda Web Adapter layer. Published by AWS into every commercial region
+ * under account 753240598075.
+ *
+ * PINNED, AND CHECKED AT DEPLOY TIME by aws/scripts/preflight.sh. The version
+ * suffix moves, and a stale pin fails as an opaque "layer not found" during
+ * CloudFormation rollback rather than at synth. Re-pin deliberately, never by
+ * reaching for :latest, because a layer bump changes the process supervisor
+ * that fronts `next start`.
+ */
+export const LWA_LAYER_ARN =
+  "arn:aws:lambda:ap-southeast-1:753240598075:layer:LambdaAdapterLayerArm64:25";
+
+/**
+ * Web function timeout. Generous because Server Actions run inside it and
+ * CloudFront's origin read timeout is the real user-facing ceiling.
+ *
+ * NOT the LLM ceiling. Anything that could take 43 seconds belongs on the queue
+ * (see events-stack.ts); this timeout is a backstop for a pathological render,
+ * not a budget for one.
+ */
+export const WEB_TIMEOUT_SECONDS = 60;
+
+/**
+ * 1769 MB is exactly one full vCPU. Below it Lambda gives a fraction of a core
+ * and a Next.js render - which is CPU-bound on React server rendering, not
+ * IO-bound - stretches proportionally. Since Lambda bills GB-milliseconds,
+ * paying for a whole core that finishes in half the time costs the same or less
+ * than half a core that takes twice as long, and the user waits half as long.
+ */
+export const WEB_MEMORY_MB = 1769;
+
+/** LLM workers are IO-bound on Bedrock; they need almost no CPU. */
+export const WORKER_MEMORY_MB = 512;
+
+/**
+ * Worker timeout. Above the observed 43s worst case with real headroom, and
+ * the number SQS visibility timeout is derived from.
+ */
+export const WORKER_TIMEOUT_SECONDS = 300;
+
+/**
+ * Cap on simultaneous LLM workers. This is a TOKEN BUDGET CONTROL, not a
+ * throughput tuning knob: each concurrent worker is another Bedrock request
+ * billing against the same account. Two users cannot legitimately need more
+ * than a couple of jobs in flight, and the skill-link fan-out is the one path
+ * that could otherwise spawn dozens.
+ */
+export const WORKER_MAX_CONCURRENCY = 2;
+
+/**
+ * Deliveries of one message before SQS routes it to the DLQ.
+ *
+ * THE WORKER READS THIS SAME NUMBER, as the `MAX_RECEIVE_COUNT` env var, to
+ * decide whether a failure is a transient `retrying` or a final `failed` on the
+ * job row the browser is watching. Changing it in one place only makes the UI
+ * lie in one direction or the other: report a permanent failure while SQS is
+ * still retrying, or leave a job that already reached the DLQ spinning forever.
+ *
+ * Three, because Bedrock throttles clear in seconds while a schema or prompt
+ * failure will fail identically forever, and paying for ten attempts at a
+ * 43-second reasoning call to learn that is expensive in both senses.
+ */
+export const WORKER_MAX_RECEIVE_COUNT = 3;
+
+/**
+ * How long a delivered message stays invisible to other consumers.
+ *
+ * One minute past the function timeout, NOT the 6x the SQS docs recommend. The
+ * 6x rule exists for batches - it budgets for a whole batch of records being
+ * processed serially - and this event source mapping has `batchSize: 1` with
+ * partial batch failures on, so the only thing that has to fit is one job.
+ *
+ * The margin matters in the other direction too. This is also how long a failed
+ * job waits before its next attempt, so at 1800s the second attempt would land
+ * half an hour after the user pressed the button and the page would have given
+ * up on it long before. `JOB_STALE_MS` in lib/types.ts is derived from this
+ * number times WORKER_MAX_RECEIVE_COUNT; the two move together.
+ *
+ * It must stay ABOVE `WORKER_TIMEOUT_SECONDS`: Lambda kills the first copy at
+ * the function timeout, so a shorter window would redeliver a message while its
+ * first copy is still running and the model would be invoked - and billed -
+ * twice for one job.
+ */
+export const WORKER_VISIBILITY_TIMEOUT_SECONDS = WORKER_TIMEOUT_SECONDS + 60;
+
+/**
+ * Bedrock model ids. Inference profile ids, not bare model ids - Claude 4.5+
+ * refuses on-demand invocation without one.
+ *
+ * `global.` rather than `apac.`: the APAC profile catalogue in ap-southeast-1
+ * stops at Sonnet 4, while the global profiles carry Haiku 4.5 and Sonnet 4.6.
+ * Verified with `aws bedrock list-inference-profiles --region ap-southeast-1`.
+ * Global profiles may route the request to any commercial region, which is a
+ * data-residency decision and is called out in aws/BEDROCK.md.
+ */
+export const BEDROCK_PRIMARY_MODEL = "global.anthropic.claude-haiku-4-5-20251001-v1:0";
+export const BEDROCK_FALLBACK_MODEL = "global.anthropic.claude-sonnet-4-6";
+
+/** Log retention. 30 days matches the Azure Log Analytics workspace. */
+export const LOG_RETENTION_DAYS = 30;
+
+/**
+ * Monthly budget in USD. $10, matching azure/observability.sh, and for the same
+ * reason: the whole stack should sit near $13-17, so a threshold set at the
+ * credit allowance would only speak long after something had gone wrong.
+ */
+export const MONTHLY_BUDGET_USD = 10;
+
+/**
+ * Header CloudFront injects on every origin request, and the only thing that
+ * distinguishes "came through the CDN" from "someone found the function URL".
+ *
+ * WHY THE FUNCTION URL IS PUBLIC AT ALL. The original design put the URL behind
+ * `AuthType: AWS_IAM` with a CloudFront OAC signing each request with SigV4.
+ * That works for GET and is broken for everything else: OAC signs the body too,
+ * Lambda rejects unsigned payloads, and so the *browser* would have to send an
+ * `x-amz-content-sha256` computed over the request body. A browser cannot, and
+ * every Server Action in this app is a POST - which is to say login and every
+ * mutation returned:
+ *
+ *   403 "The request signature we calculated does not match the signature you
+ *        provided."
+ *
+ * None of the three OAC signing behaviours avoid it: `always` needs the client
+ * body hash, `never` requires a public function URL anyway, and `no-override`
+ * only changes which Authorization header wins. Measured against the live
+ * distribution on 2026-08-19, after which GETs worked and POSTs did not.
+ *
+ * So the origin is public and this header is the compensating control, which is
+ * the ordinary pattern for Next.js on Lambda behind CloudFront. It is weaker
+ * than IAM and worth being honest about: anyone holding this value can reach the
+ * origin directly. It is not, however, the thing protecting user data - every
+ * route still verifies a Cognito session, and `lib/actions.ts` still calls
+ * `requireUser()` ~55 times. What this prevents is bypassing the edge:
+ * the security headers, TLS policy, and any future WAF.
+ */
+export const ORIGIN_SECRET_HEADER = "x-taskbuddy-origin";

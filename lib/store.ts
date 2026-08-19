@@ -31,6 +31,8 @@ import type {
   FactorScores,
   ForecastResult,
   GoalCriterion,
+  JobRun,
+  JobRunStatus,
   OpenQuestion,
   CommittedPlan,
   LocalNow,
@@ -66,7 +68,9 @@ import {
   COMMITTED_PLAN_SCHEMA_VERSION,
   MOVE_CHOICE_SCHEMA_VERSION,
   ON_TRACK_PROBABILITY,
+  isJobAbandoned,
   isOnTrack,
+  isTerminalJobStatus,
 } from "./types";
 import { extractEntry } from "./extraction";
 import { estimationModel } from "./generate";
@@ -346,6 +350,9 @@ interface MemDB {
   /** Captured offered-vs-kept move slates, newest-first - the 🟠-tier calibration
    *  signal (STYLE/CAUSE pref weights), capped at `MOVE_CHOICE_CAP`. */
   moveChoices: MoveChoice[];
+  /** Attempts at the queue-backed LLM jobs, newest-first - what the pending UI
+   *  polls. Capped at `JOB_RUN_CAP`. */
+  jobRuns: JobRun[];
   seeded: boolean;
 }
 
@@ -383,6 +390,7 @@ function memDB(): MemDB {
       planRolls: [],
       planReorders: [],
       moveChoices: [],
+      jobRuns: [],
       seeded: false,
     };
   }
@@ -1619,6 +1627,283 @@ export async function setCachedStrategy(
   }
   await ensureSeeded();
   memDB().portfolioStrategy = strategy;
+}
+
+// --- Asynchronous job runs (the queue-backed LLM path) ----------------------
+//
+// The bookkeeping that makes "the Server Action returned before the work
+// finished" survivable. Three actions publish an EventBridge event and return;
+// these rows are the only thing that lets the browser tell "queued" from
+// "nothing happened", and the only place a worker's failure can surface at all
+// (the worker has no render pass and no way to talk to a page).
+//
+// Written from BOTH runtimes: the Server Action creates the row, the SQS worker
+// settles it. Both reach the same RLS-scoped client - one through the session
+// cookie, one through `runAsUser` - so no function here takes a user id.
+
+interface JobRunRow {
+  id: string;
+  type: string;
+  subject_id: string | null;
+  status: JobRunStatus;
+  result: Record<string, unknown> | null;
+  error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+const JOB_RUN_COLUMNS =
+  "id, type, subject_id, status, result, error, created_at, updated_at";
+
+/** Soft cap on retained job rows per user; older ones are pruned past this. */
+const JOB_RUN_CAP = 50;
+
+function toJobRun(row: JobRunRow): JobRun {
+  return {
+    id: row.id,
+    type: row.type,
+    subjectId: row.subject_id,
+    status: row.status,
+    result: row.result,
+    error: row.error,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+/**
+ * The newest job run of `type` for `subjectId`, whatever its state.
+ *
+ * The subject match is done in SQL, via `.isNull()` for the portfolio-wide case.
+ * Filtering it in JS instead would mean reading a bounded page of rows and
+ * hoping the one that matters is inside it - and it is not always: a job that
+ * is genuinely still running sinks below any LIMIT as soon as enough jobs are
+ * started after it, at which point the page shows an idle button for work that
+ * is still going and the enqueue collides with the unique index.
+ */
+export async function latestJobRun(
+  type: string,
+  subjectId: string | null = null,
+): Promise<JobRun | null> {
+  if (isDbConfigured()) {
+    const supabase = await getRequestClient();
+    const q = supabase.from("job_runs").select(JOB_RUN_COLUMNS).eq("type", type);
+    const scoped =
+      subjectId === null ? q.isNull("subject_id") : q.eq("subject_id", subjectId);
+    const rows = mustRows<JobRunRow>(
+      await scoped.order("created_at", { ascending: false }).limit(1),
+      "job_runs latest read",
+    );
+    return rows[0] ? toJobRun(rows[0]) : null;
+  }
+  await ensureSeeded();
+  return (
+    memDB().jobRuns.find((r) => r.type === type && r.subjectId === subjectId) ??
+    null
+  );
+}
+
+/** One job run by id, or null. The read the poll loop makes. */
+export async function getJobRun(id: string): Promise<JobRun | null> {
+  if (isDbConfigured()) {
+    const supabase = await getRequestClient();
+    const row = mustOne<JobRunRow>(
+      await supabase
+        .from("job_runs")
+        .select(JOB_RUN_COLUMNS)
+        .eq("id", id)
+        .maybeSingle(),
+      "job_runs read",
+    );
+    return row ? toJobRun(row) : null;
+  }
+  await ensureSeeded();
+  return memDB().jobRuns.find((r) => r.id === id) ?? null;
+}
+
+/**
+ * The job of `type` for `subjectId` that is still expected to finish, or null.
+ *
+ * "Still expected" is not the same as "not terminal". A row can be stranded:
+ * the bus-to-queue delivery can fail into its own DLQ without a worker ever
+ * seeing it, and a worker killed by its function timeout leaves a `running` row
+ * with nobody left to settle it. `isJobAbandoned` is what stops either case from
+ * pinning a button forever, and it is the reason the enqueue path below can
+ * always make progress.
+ */
+export async function activeJobRun(
+  type: string,
+  subjectId: string | null = null,
+): Promise<JobRun | null> {
+  const run = await latestJobRun(type, subjectId);
+  if (!run || isTerminalJobStatus(run.status) || isJobAbandoned(run)) return null;
+  return run;
+}
+
+/**
+ * Take the one live slot for (type, subject), creating a row to publish against.
+ *
+ * Returns the EXISTING run when one is already in flight, rather than starting a
+ * second copy: every one of these jobs is a billed model call, and the strategy
+ * refresh in particular is fired automatically on mount by two different pages.
+ * `reused: true` tells the caller not to publish.
+ *
+ * A stale live row is settled as `failed` first, so an abandoned job can never
+ * permanently block its own retry - the partial unique index in 01_schema.sql
+ * would otherwise reject the replacement insert.
+ */
+export async function startJobRun(
+  type: string,
+  subjectId: string | null = null,
+): Promise<{ run: JobRun; reused: boolean }> {
+  const existing = await latestJobRun(type, subjectId);
+  if (existing && !isTerminalJobStatus(existing.status)) {
+    if (!isJobAbandoned(existing)) return { run: existing, reused: true };
+    await settleJobRun(existing.id, "failed", {
+      error: "Gave up waiting for this job; it never reported back.",
+    });
+  }
+
+  const now = new Date().toISOString();
+  const run: JobRun = {
+    id: crypto.randomUUID(),
+    type,
+    subjectId,
+    status: "queued",
+    result: null,
+    error: null,
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  if (isDbConfigured()) {
+    const supabase = await getRequestClient();
+    const user_id = await currentUserId(supabase);
+    const res = await supabase.from("job_runs").insert({
+      id: run.id,
+      user_id,
+      type: run.type,
+      subject_id: run.subjectId,
+      status: run.status,
+      result: run.result,
+      error: run.error,
+      created_at: run.createdAt,
+      updated_at: run.updatedAt,
+    });
+    if (res.error) {
+      // Two clicks 50ms apart are two Lambda invocations that cannot see each
+      // other's uncommitted row, so the index - not the read above - is what
+      // actually enforces one live job. Losing that race is a success: the
+      // winner's row is the job.
+      if (res.error.message.includes("job_runs_one_live_per_subject")) {
+        const live = await latestJobRun(type, subjectId);
+        if (live) return { run: live, reused: true };
+      }
+      throw new Error(`DB job_runs insert failed: ${res.error.message}`);
+    }
+    await bestEffortPrune("job_runs", () => pruneJobRuns(supabase));
+    return { run, reused: false };
+  }
+
+  await ensureSeeded();
+  const db = memDB();
+  db.jobRuns.unshift(run);
+  if (db.jobRuns.length > JOB_RUN_CAP) db.jobRuns.length = JOB_RUN_CAP;
+  return { run, reused: false };
+}
+
+/**
+ * Delete job rows older than the most recent `JOB_RUN_CAP` (soft cap).
+ *
+ * TERMINAL ROWS ONLY. Rank is by age, and a job that is genuinely still running
+ * can fall past the cap if enough jobs were started after it - deleting it
+ * would make its watcher's next poll return null, which the hook reads as "this
+ * job no longer exists" and silently drops the pending state on work that is
+ * still going.
+ */
+async function pruneJobRuns(supabase: RequestClient): Promise<void> {
+  const older = mustRows<{ id: string; status: JobRunStatus }>(
+    await supabase
+      .from("job_runs")
+      .select("id, status")
+      .order("created_at", { ascending: false })
+      .range(JOB_RUN_CAP, JOB_RUN_CAP + 1000),
+    "job_runs stale list",
+  );
+  const stale = older.filter((r) => isTerminalJobStatus(r.status));
+  if (stale.length)
+    mustOk(
+      await supabase
+        .from("job_runs")
+        .delete()
+        .in(
+          "id",
+          stale.map((r) => r.id),
+        ),
+      "job_runs prune delete",
+    );
+}
+
+/**
+ * Move a job to `running`, and report whether this caller may run the body.
+ *
+ * FALSE MEANS "THIS JOB IS ALREADY SETTLED" - a redelivery of a message whose
+ * work finished, which SQS produces whenever the visibility timeout lapses just
+ * as a job completes. Skipping the body there matters because `replaceSkillNodes`
+ * wipes and rewrites a goal's whole skill graph: re-running it would destroy
+ * anything the user edited in between.
+ *
+ * IT DOES NOT MAKE REDELIVERY SAFE IN GENERAL, and the difference is worth being
+ * precise about. A worker killed mid-job leaves the row `running`, which claims
+ * successfully and re-runs the body - correctly, because that job never
+ * finished. Nothing here can distinguish "died before doing the work" from
+ * "died after committing it but before settling the row"; the first must retry
+ * and the second must not, and they look identical. The narrow window this
+ * leaves is the price of at-least-once delivery, not an oversight.
+ */
+export async function claimJobRun(id: string): Promise<boolean> {
+  const run = await getJobRun(id);
+  if (!run || isTerminalJobStatus(run.status)) return false;
+  // Clear the previous attempt's message on the way in. A row that failed once
+  // and succeeds on redelivery would otherwise keep its error text, and the
+  // card renders an error whenever one is present - a red failure underneath a
+  // result that actually worked.
+  await settleJobRun(id, "running", { error: null });
+  return true;
+}
+
+/**
+ * Write a job's state. The one writer for every transition after the insert, so
+ * `updated_at` can never be forgotten - and `updated_at` is what the staleness
+ * rule reads, which makes forgetting it look exactly like an abandoned job.
+ */
+export async function settleJobRun(
+  id: string,
+  status: JobRunStatus,
+  fields: { result?: Record<string, unknown> | null; error?: string | null },
+): Promise<void> {
+  const updatedAt = new Date().toISOString();
+  if (isDbConfigured()) {
+    const supabase = await getRequestClient();
+    const patch: Record<string, unknown> = { status, updated_at: updatedAt };
+    // `definedEntries` in the query builder drops undefined keys, so naming a
+    // field here only when the caller passed one keeps a retry from wiping the
+    // error message it just wrote.
+    if (fields.result !== undefined) patch.result = fields.result;
+    if (fields.error !== undefined) patch.error = fields.error;
+    mustOk(
+      await supabase.from("job_runs").update(patch).eq("id", id),
+      "job_runs settle",
+    );
+    return;
+  }
+  await ensureSeeded();
+  const run = memDB().jobRuns.find((r) => r.id === id);
+  if (!run) return;
+  run.status = status;
+  run.updatedAt = updatedAt;
+  if (fields.result !== undefined) run.result = fields.result;
+  if (fields.error !== undefined) run.error = fields.error;
 }
 
 // --- Rolling-horizon committed plan (S3c-1) ---------------------------------

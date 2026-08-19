@@ -130,7 +130,7 @@ export function Sidebar({
               Demo mode
             </p>
             <p className="mt-0.5 text-[11px] leading-snug text-[var(--color-fg-subtle)]">
-              Running offline with sample data. Add the database &amp; Foundry
+              Running offline with sample data. Add the database &amp; Bedrock
               keys to go live.
             </p>
           </div>

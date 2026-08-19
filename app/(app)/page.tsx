@@ -3,6 +3,7 @@ import { Plus, CalendarClock, Gauge } from "lucide-react";
 import {
   forecastDashboard,
   getAvailability,
+  activeJobRun,
   getCachedStrategy,
   getRecurringState,
   listAllDependencies,
@@ -40,6 +41,7 @@ export default async function TodayPage() {
     availability,
     cached,
     recurringStates,
+    strategyJob,
   ] = await Promise.all([
     listAllTasks(),
     listEntries(),
@@ -48,6 +50,9 @@ export default async function TodayPage() {
     getAvailability(),
     getCachedStrategy(),
     getRecurringState(),
+    // Whether a synthesis is already running, so the card resumes its pending
+    // state after a reload rather than starting a second billed run.
+    activeJobRun("strategy.refresh.requested"),
   ]);
   const { forecasts, recoveries, pitWall, globalPlan, agendaOrder, model } =
     dashboard;
@@ -125,6 +130,7 @@ export default async function TodayPage() {
               strategy={strategy}
               stale={strategyStale}
               canUseLLM={canUseLLM}
+              activeJob={strategyJob}
               projectNames={projectNames}
               severity={bannerSeverity}
             />

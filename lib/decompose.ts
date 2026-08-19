@@ -1,14 +1,14 @@
 import "server-only";
 import type { ExtractedSkill, SkillDecomposition } from "./types";
-import type { ChatMessage } from "./foundry";
-import { callFoundryJSON } from "./foundry";
+import type { ChatMessage } from "./bedrock";
+import { callBedrockJSON } from "./bedrock";
 import { isLLMConfigured } from "./extraction";
 
 // Learning-goal decomposer (Engine 1, the LLM-proposes half of §0). Turns a
 // stated learning goal into a prerequisite graph of skills + checkpoints. The
 // LLM proposes the structure and the effort estimates; progress and scheduling
 // are decided elsewhere. Falls back to an offline heuristic when no API key is
-// configured, so the feature works without Foundry.
+// configured, so the feature works without Bedrock.
 
 const MIN_SKILLS = 3;
 const MAX_SKILLS = 9;
@@ -116,7 +116,7 @@ export async function decomposeLearningGoal(
   ];
 
   try {
-    const result = await callFoundryJSON<SkillDecomposition>(messages, {
+    const result = await callBedrockJSON<SkillDecomposition>(messages, {
       schema: DECOMPOSITION_SCHEMA as unknown as Record<string, unknown>,
       schemaName: "skill_decomposition",
       // The one genuinely structural call in the codebase: ordering, dependency
