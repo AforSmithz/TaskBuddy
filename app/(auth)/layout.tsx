@@ -1,6 +1,5 @@
 import { Sparkles } from "lucide-react";
 
-/** Bare, centred layout for the login and signup screens (no sidebar). */
 export default function AuthLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {

@@ -15,7 +15,7 @@ import { ValueModelForm } from "@/components/settings/value-model-form";
 import { WindowAvailabilityForm } from "@/components/settings/window-availability-form";
 
 /**
- * Value Model settings (OVERHAUL §5 step 1). The areas shown are the seed areas
+ * Value Model settings. The areas shown are the seed areas
  * plus any life-area in actual use across tasks and routines, so the user weights
  * exactly the buckets their work falls into.
  */
