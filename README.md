@@ -129,9 +129,7 @@ bus into an SQS queue with a DLQ and a concurrency cap; the skill-link fan-out
 runs through a Step Functions Distributed Map so a throttled judgement retries
 instead of being silently dropped.
 
-Everything sits in `ap-southeast-1`, about 30ms from Jakarta. Unlike the Azure
-build, which needed `eastasia` for the database and `koreacentral` for the model
-because `eastasia` had zero model quota, one region covers the whole stack.
+Everything sits in `ap-southeast-1`, about 30ms from Jakarta. one region covers the whole stack.
 
 ## Scripts
 
