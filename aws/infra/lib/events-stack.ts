@@ -31,28 +31,18 @@ export interface EventsStackProps extends StackProps {
 /**
  * The asynchronous half of the application.
  *
- * ---------------------------------------------------------------------------
- * WHAT PROBLEM THIS ACTUALLY SOLVES
- * ---------------------------------------------------------------------------
- * This is not event-driven architecture for its own sake. The app has eleven
- * LLM call sites and seven of them run at `reasoningEffort: "medium"`; the
- * `skill_decomposition` call was measured at 43 seconds against the previous
- * provider. Today every one of those runs inside a Server Action while the user
- * waits, which means a page render is coupled to a model's latency.
+ * Not event-driven architecture for its own sake. The app has eleven LLM call sites, seven at
+ * medium reasoning effort, and skill_decomposition was measured at 43 seconds. Every one of them
+ * used to run inside a Server Action while the user waited, coupling a page render to a model's
+ * latency.
  *
- * Moving them behind a queue buys four things that are not available in-process:
- *
- *   1. The request returns immediately; the render is no longer hostage to a
- *      43-second call.
- *   2. Retries survive the request. An in-process retry dies with the
- *      invocation; an SQS redrive does not.
- *   3. Failures become visible instead of silent. `filterVerified` in
- *      lib/skill-links.ts fails CLOSED by design, so a burst of 429s currently
- *      deletes good suggestions with nothing but a console line. On a queue the
- *      same burst becomes a retry, and a genuine failure lands in a DLQ that an
- *      alarm watches.
- *   4. Concurrency becomes a budget control the platform enforces, rather than
- *      an in-process semaphore that resets whenever an instance recycles.
+ * Moving them behind a queue buys four things you can't get in-process: the request returns
+ * immediately; retries survive the request (an in-process retry dies with the invocation, an SQS
+ * redrive doesn't); failures become visible instead of silent (filterVerified in skill-links.ts
+ * fails CLOSED by design, so a burst of 429s currently deletes good suggestions with nothing but
+ * a console line, whereas on a queue the same burst is a retry and a genuine failure lands in a
+ * DLQ an alarm watches); and concurrency becomes a budget control the platform enforces rather
+ * than an in-process semaphore that resets whenever an instance recycles.
  */
 export class EventsStack extends Stack {
   readonly bus: events.EventBus;
@@ -129,10 +119,9 @@ export class EventsStack extends Stack {
       fn.addToRolePolicy(
         new iam.PolicyStatement({
           actions: ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
-          // Both the inference profile and the underlying foundation models it
-          // can route to. A policy naming only the profile fails at invoke
-          // time with an AccessDenied that names a model nobody configured,
-          // because a global profile resolves to a model ARN in another region.
+          // Both the inference profile and the foundation models it can route to. A policy
+          // naming only the profile fails at invoke time with an AccessDenied naming a model
+          // nobody configured, because a global profile resolves to an ARN in another region.
           resources: [
             `arn:aws:bedrock:*:${this.account}:inference-profile/*`,
             "arn:aws:bedrock:*::foundation-model/anthropic.*",
@@ -157,14 +146,10 @@ export class EventsStack extends Stack {
       }),
     );
 
-    // -----------------------------------------------------------------------
-    // Skill-link verification: Distributed Map, not Promise.all.
-    // -----------------------------------------------------------------------
-    // lib/skill-links.ts judges each (task, skill) pair with an isolated model
-    // call and drops any pair whose judge errored. In-process that means a
-    // throttling burst quietly deletes good links. Here each pair is a Map
-    // item: it retries on its own schedule, and a pair that still fails is a
-    // recorded failure rather than a silent false.
+    // Skill-link verification: Distributed Map, not Promise.all. lib/skill-links.ts judges each
+    // (task, skill) pair with an isolated model call and drops any pair whose judge errored, so
+    // in-process a throttling burst quietly deletes good links. Here each pair is a Map item: it
+    // retries on its own schedule, and a pair that still fails is a recorded failure.
     const judgeTask = new tasks.LambdaInvoke(this, "JudgePair", {
       lambdaFunction: judge,
       outputPath: "$.Payload",
@@ -198,12 +183,9 @@ export class EventsStack extends Stack {
       tracingEnabled: true,
     });
 
-    // -----------------------------------------------------------------------
-    // Routing: bus -> queue.
-    // -----------------------------------------------------------------------
-    // One rule, an explicit detail-type allow-list. A pattern like
-    // `{ source: ["taskbuddy"] }` would also match every future event type,
-    // including ones added for something other than the LLM workers.
+    // Routing: bus -> queue. One rule with an explicit detail-type allow-list. A pattern like
+    // { source: ["taskbuddy"] } would also match every future event type, including ones added
+    // for something other than the LLM workers.
     new events.Rule(this, "LlmJobsRule", {
       ruleName: `${APP}-llm-jobs`,
       eventBus: this.bus,
@@ -226,16 +208,11 @@ export class EventsStack extends Stack {
       ],
     });
 
-    // -----------------------------------------------------------------------
-    // The daily roll.
-    // -----------------------------------------------------------------------
-    // lib/rolling.ts decides which committed plan to keep as days pass. Today
-    // that is computed on read, so the first person to load a page after
-    // midnight pays for it. EventBridge Scheduler moves it to a fixed time.
-    //
-    // Scheduler rather than an EventBridge rule with a cron expression: it
-    // understands time zones natively, so this stays correct across a DST
-    // change without anyone recomputing a UTC offset.
+    // The daily roll. lib/rolling.ts decides which committed plan to keep as days pass, and
+    // today that's computed on read, so the first person to load a page after midnight pays for
+    // it. Scheduler rather than an EventBridge rule with a cron expression because it
+    // understands time zones natively, so this stays correct across a DST change without anyone
+    // recomputing a UTC offset.
     const schedulerRole = new iam.Role(this, "SchedulerRole", {
       assumedBy: new iam.ServicePrincipal("scheduler.amazonaws.com"),
     });
