@@ -208,22 +208,17 @@ export async function withUser<T>(
   // protocol, which accepts several semicolon-separated statements per message; the extended
   // protocol (anything with parameters) doesn't, which is why this can't use a $1 placeholder.
   //
-  // Interpolating is safe here, and only here, because of what the two values are: `uid` was
-  // just matched against UUID_RE, so only hex digits and hyphens survive, and signSession
-  // returns digits, dots and lowercase hex by construction. Neither can carry a quote. Keep
-  // those checks adjacent to this string.
+  // Interpolating is safe here, and only here, because of what the value is: `uid` was just
+  // matched against UUID_RE, so only hex digits and hyphens survive, and signSession returns
+  // digits, dots and lowercase hex by construction. Neither can carry a quote. Keep those
+  // checks adjacent to this string.
   //
-  // app.user_id is written alongside app.session and is TRANSITIONAL. It is what lets the app
-  // and the schema be deployed in either order: a database still on 01_schema.sql's unsigned
-  // app.uid() reads it, one that has had 06_session_mac.sql applied ignores it and reads the
-  // signed value instead. Delete this half once 06 is applied everywhere - and note that until
-  // it is deleted, re-running 01_schema.sql silently reverts app.uid() to the forgeable version
-  // with nothing failing to say so. 06's header says the same thing from the other side.
+  // app.uid() re-derives the HMAC over this value and compares (06_session_mac.sql), so an
+  // unsigned or forged app.session reads as NULL and all 26 policies deny. Note that re-running
+  // 01_schema.sql on its own reverts app.uid() to the forgeable version with nothing failing to
+  // say so; apply-sql.sh runs 06 last for exactly that reason.
     const session = key ? signSession(uid, key) : uid;
-    await client.query(
-      `BEGIN; select set_config('app.session', '${session}', true), ` +
-        `set_config('app.user_id', '${uid}', true)`,
-    );
+    await client.query(`BEGIN; select set_config('app.session', '${session}', true)`);
     const out = await fn(client);
     await client.query("COMMIT");
     return out;
