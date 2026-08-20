@@ -29,6 +29,8 @@ import {
   setSkillTaskLinkStatus,
   getEntry,
   getJobRun,
+  jobQuotaExceeded,
+  DAILY_JOB_QUOTA,
   settleJobRun,
   startJobRun,
   listAllTasks,
@@ -179,6 +181,22 @@ async function enqueue(
       result: run.result,
       error: run.error,
     };
+  }
+
+  // The spend ceiling. Checked here rather than before startJobRun for two reasons: a run that
+  // JOINED an in-flight job costs nothing new and must not be refused (the strategy refresh
+  // fires automatically on mount of two pages, so refusing it would surface a quota error on
+  // every navigation once the limit was hit), and a refusal that is recorded as a `failed` row
+  // renders its own reason next to the retry button instead of throwing into an error boundary.
+  //
+  // The refusal row counts toward the quota itself, which is deliberate: the limit is on
+  // ATTEMPTS, so hammering the button while locked out does not get you a shorter lockout.
+  if (await jobQuotaExceeded()) {
+    const error =
+      `That's ${DAILY_JOB_QUOTA} AI jobs in 24 hours, which is the daily limit on this ` +
+      `account. It resets as the oldest ones age out.`;
+    await settleJobRun(run.id, "failed", { error });
+    return { jobId: run.id, status: "failed", ranInline: false, result: null, error };
   }
 
   // The test is "is there a bus", not "did the publish work". A publish that fails against a

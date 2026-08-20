@@ -1538,7 +1538,23 @@ interface JobRunRow {
 const JOB_RUN_COLUMNS =
   "id, type, subject_id, status, result, error, created_at, updated_at";
 
-const JOB_RUN_CAP = 50;
+// Rows kept per user before pruneJobRuns() starts deleting terminal ones by age.
+//
+// Raised from 50 when DAILY_JOB_QUOTA arrived, and the relationship is load-bearing rather
+// than incidental: the quota is enforced by COUNTING rows in a 24-hour window, so a cap
+// below the quota would delete the evidence before the limit could ever be reached and the
+// quota would silently never fire. Keep this comfortably above DAILY_JOB_QUOTA.
+const JOB_RUN_CAP = 200;
+
+/** Model calls one account may start per rolling 24 hours.
+ *
+ *  A spend ceiling, not a fairness mechanism. WORKER_MAX_CONCURRENCY caps how many Bedrock
+ *  requests run AT ONCE, which bounds the rate and not the total - a signed-in account can
+ *  create goals in a loop and decompose each one, and the in-flight guard below does not stop
+ *  that because every one of them is a different subject. Two users cannot legitimately need
+ *  120 model calls in a day; the heaviest real day measured on the previous stack was a
+ *  fraction of it. */
+export const DAILY_JOB_QUOTA = 120;
 
 function toJobRun(row: JobRunRow): JobRun {
   return {
@@ -1551,6 +1567,32 @@ function toJobRun(row: JobRunRow): JobRun {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
+}
+
+/** True when this account has started DAILY_JOB_QUOTA jobs in the last 24 hours.
+ *
+ *  Scoped to the caller by RLS, not by a where clause - job_runs.user_id is covered by
+ *  job_runs_owner, so there is no user id to pass and no way to ask about someone else.
+ *
+ *  Reads ids with a LIMIT rather than asking for a count: lib/db/query.ts implements no count
+ *  option (see its header), and a bounded read is the cheaper question anyway - "are there at
+ *  least N" needs at most N rows, while a count scans the whole window.
+ *
+ *  Demo mode has no Bedrock behind it and nothing to spend, so it never blocks. */
+export async function jobQuotaExceeded(): Promise<boolean> {
+  if (!isDbConfigured()) return false;
+
+  const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  const supabase = await getRequestClient();
+  const rows = mustRows<{ id: string }>(
+    await supabase
+      .from("job_runs")
+      .select("id")
+      .gte("created_at", since)
+      .limit(DAILY_JOB_QUOTA),
+    "job_runs quota count",
+  );
+  return rows.length >= DAILY_JOB_QUOTA;
 }
 
 /** Newest job run of `type` for `subjectId`, any state. Subject match is in SQL via
