@@ -27,7 +27,6 @@ import {
   listAllSkillNodes,
   listConfirmedSkillTaskLinks,
   setSkillTaskLinkStatus,
-  getEntry,
   getJobRun,
   jobQuotaExceeded,
   DAILY_JOB_QUOTA,
@@ -54,7 +53,7 @@ import {
   type NewActivityInput,
   type ReorderOutcome,
 } from "@/lib/store";
-import { buildEODSummary, generateFollowUp, type EODSummary } from "@/lib/generate";
+import { buildEODSummary, type EODSummary } from "@/lib/generate";
 import { skillProgress } from "@/lib/skill";
 import {
   generateCorrectiveTasks,
@@ -66,6 +65,7 @@ import { SKILL_TASK_PREFIX, type ResolveInput } from "@/lib/portfolio-state";
 import { requireUser } from "@/lib/auth";
 import {
   decomposeGoalJob,
+  generateFollowUpJob,
   refreshStrategyJob,
   suggestSkillLinksJob,
   type Job,
@@ -961,22 +961,22 @@ export async function refreshPortfolioStrategyAction(): Promise<JobHandle> {
   );
 }
 
-export async function generateFollowUpAction(
-  entryId: string,
-): Promise<{ message: string | null; error: string | null }> {
-  await requireUser();
-  const entry = await getEntry(entryId);
-  if (!entry) return { message: null, error: "Entry not found." };
-  try {
-    const message = await generateFollowUp(entry);
-    return { message, error: null };
-  } catch (err) {
-    console.error("generateFollowUp failed:", err);
-    return {
-      message: null,
-      error: err instanceof Error ? err.message : "Failed to generate message.",
-    };
-  }
+/** Draft the follow-up message for an entry. Returns a handle to watch, not the message: the
+ *  draft comes back on the job row, because the web function has no Bedrock permission and
+ *  could not finish inside its 60s timeout if it did. */
+export async function generateFollowUpAction(entryId: string): Promise<JobHandle> {
+  const user = await requireUser();
+  return enqueue(
+    "entry.follow_up.requested",
+    entryId,
+    (jobId) => ({
+      type: "entry.follow_up.requested",
+      userId: user.id,
+      entryId,
+      jobId,
+    }),
+    () => generateFollowUpJob(entryId),
+  );
 }
 
 // --- Recurring activities (routines & goals) + errands ----------------------
