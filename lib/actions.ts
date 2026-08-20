@@ -55,12 +55,9 @@ import {
 } from "@/lib/store";
 import { buildEODSummary, type EODSummary } from "@/lib/generate";
 import {
-  CHECKIN_PROMPT_CAP,
   checkinCandidates,
-  interpretCheckin,
   proposeFromCheckin,
-  rankForScope,
-  resolveCheckin,
+  regroundResolved,
   unlockedFrontier,
 } from "@/lib/checkin";
 import type { ResolveInput } from "@/lib/portfolio-state";
@@ -69,6 +66,7 @@ import {
   decomposeGoalJob,
   extractEntryJob,
   generateFollowUpJob,
+  interpretCheckinJob,
   refreshStrategyJob,
   suggestModificationsJob,
   suggestRecoveryTasksJob,
@@ -82,6 +80,7 @@ import type { WindowAvailability } from "@/lib/window-availability";
 import type {
   CheckinReview,
   CheckinScope,
+  ResolvedCheckinIntent,
   CompletionConfidence,
   SkillTaskLinkStatus,
   DegradedCriterion,
@@ -841,17 +840,57 @@ export interface CheckinRunResult {
   eod: EODSummary;
 }
 
-/** Run interpret -> resolve -> propose over a free-form check-in. The review/commit half is the
- *  existing bundle machinery. No mutation happens here, it's read-only interpretation.
+/** Stage A+B of a free-form check-in: interpret it and ground it against live entities.
+ *
+ *  Enqueued rather than awaited, because interpretation is the model call. What comes back on
+ *  the job row is `ResolvedCheckinIntent[]` - grounded, id-bearing, and small - which
+ *  buildCheckinReviewAction turns into the review surface.
  *
  *  `scope` binds the check-in to one goal: its entities rank first in the prompt, and an
- *  add_task intent becomes an add_tasks move on that goal instead of a standalone capture. */
+ *  add_task intent becomes an add_tasks move on that goal instead of a standalone capture.
+ *
+ *  The subject is a FRESH id per submission, not the user and not the scope. Every other job
+ *  here wants the enqueue's reuse path - two mounts of the strategy card should share one
+ *  refresh - but two check-ins are two different sentences, and joining the second to the
+ *  first would answer the new one with the old one's reading of it. */
 export async function runCheckinAction(
   rawReport: string,
   scope?: CheckinScope,
+): Promise<JobHandle> {
+  const user = await requireUser();
+  const report = rawReport.trim();
+  return enqueue(
+    "checkin.submitted",
+    crypto.randomUUID(),
+    (jobId) => ({
+      type: "checkin.submitted",
+      userId: user.id,
+      report,
+      scope,
+      jobId,
+    }),
+    () => interpretCheckinJob(report, scope),
+  );
+}
+
+/** Stage C: price the grounded intents into the reviewable surface the capture bar renders.
+ *
+ *  Deliberately a second round trip rather than more work on the job. Every Family-A proposal
+ *  carries the odds AFTER it, re-solved through the same joint scorer the strategy card uses,
+ *  and those numbers are worth having only if they describe the plan as it stands now. Computed
+ *  in the worker they would describe the plan as it stood whenever the queue drained, and there
+ *  is no honest way to render a stale probability next to a live one.
+ *
+ *  regroundResolved re-binds every intent against the candidate set THIS request derived, so
+ *  anything finished or deleted in the meantime degrades to a chip, and an id the client did
+ *  not get from its own job cannot make it into a proposal. */
+export async function buildCheckinReviewAction(
+  resolvedFromJob: ResolvedCheckinIntent[],
+  rawReport: string,
+  source: "llm" | "heuristic",
+  scope?: CheckinScope,
 ): Promise<CheckinRunResult> {
   await requireUser();
-  const report = rawReport.trim();
   const [scorer, tasks, links, allNodes] = await Promise.all([
     createJointScorer(),
     listAllTasks(),
@@ -860,13 +899,8 @@ export async function runCheckinAction(
     listAllSkillNodes(),
   ]);
   const { candidates, skillNodes } = checkinCandidates(scorer);
+  const resolved = regroundResolved(resolvedFromJob, candidates);
 
-  const { result, source } = await interpretCheckin(
-    report,
-    // Cap what the model SEES (scope-ranked), resolve against the full set below.
-    rankForScope(candidates, scope).slice(0, CHECKIN_PROMPT_CAP),
-  );
-  const resolved = resolveCheckin(result, candidates);
   const review = proposeFromCheckin(
     resolved,
     {
@@ -886,7 +920,7 @@ export async function runCheckinAction(
     },
     skillNodes,
   );
-  review.rawReport = result.rawReport;
+  review.rawReport = rawReport;
 
   return {
     review,
