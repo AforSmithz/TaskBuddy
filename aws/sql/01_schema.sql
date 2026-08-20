@@ -90,6 +90,23 @@ $$;
 comment on function app.uid() is
   'Current user id for RLS, from the transaction-local app.user_id GUC. NULL when unset, which denies every policy.';
 
+-- ---------------------------------------------------------------------------
+-- THE DEFINITION ABOVE IS NOT THE ONE THAT SHIPS. 06_session_mac.sql replaces
+-- it, and if you have just re-run this file you must re-run that one.
+--
+-- The version above trusts the GUC, and a GUC is settable by whoever holds the
+-- connection: anyone able to authenticate as taskbuddy_app can point it at any
+-- uuid and read every row below. That makes the policies in this file a guard
+-- against an application bug and nothing more - which is not what the open
+-- security group in aws/infra/lib/data-stack.ts is relying on them for.
+--
+-- 06 swaps in a version that verifies an HMAC over `uuid.expires` against a key
+-- taskbuddy_app cannot read. Nothing fails if you forget: the app writes both
+-- the old and the new GUC during the transition, so it keeps working and the
+-- control is just quietly absent. Same hazard, same remedy, as the 02 -> 03
+-- ordering note at the top of 02_grants.sql.
+-- ---------------------------------------------------------------------------
+
 -- ===========================================================================
 -- Goals: the spine of the app. A goal owns its tasks directly (tasks.goal_id)
 -- and carries a definition-of-done (goal_criteria) + a deadline. Entries are a
