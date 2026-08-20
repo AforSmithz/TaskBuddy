@@ -10,6 +10,7 @@ import type {
   CheckinReview,
   CheckinScope,
   ResolvedCheckinIntent,
+  SkillNode,
   SkillTaskLink,
   StrategyMove,
   StrategyMovePayload,
@@ -33,6 +34,8 @@ import type { DependencyEdge } from "@/lib/schedule";
 // half the app ends up thinking the LLM is live while the other half does not.
 export { isLLMConfigured } from "@/lib/bedrock-config";
 import { isLLMConfigured } from "@/lib/bedrock-config";
+import { SKILL_TASK_PREFIX } from "@/lib/allocate";
+import { skillProgress } from "@/lib/skill";
 
 /** Cap the intents a single report may yield. Every Family-A intent costs its own
  *  solver call in stage C, so a rambling 30-clause check-in is ~31 joint forecasts. */
@@ -526,6 +529,34 @@ export function resolveCheckin(
   candidates: CheckinCandidate[],
 ): ResolvedCheckinIntent[] {
   return interpretation.intents.map((intent) => resolveOne(intent, candidates));
+}
+
+/** Re-bind an already-resolved intent set against a FRESH candidate list.
+ *
+ *  Stage B now runs in the worker and stage C in a later request, so between them the user may
+ *  have finished, deleted or deferred the very thing they checked in about. Ids are stable
+ *  (that is why stage B emits them), so this is a lookup rather than a re-resolution: an entity
+ *  that is still open keeps its binding and picks up its current title, and one that is gone
+ *  degrades to `unresolved` - a chip saying we could not match it, which is true, instead of a
+ *  pre-checked move against a task that no longer exists.
+ *
+ *  Also the trust boundary. `resolved` arrives from the client on its way back in, and every
+ *  id it names is checked against the caller's own candidate set here, so an intent cannot name
+ *  an entity this user does not have open. */
+export function regroundResolved(
+  resolved: ResolvedCheckinIntent[],
+  candidates: CheckinCandidate[],
+): ResolvedCheckinIntent[] {
+  const byId = new Map(candidates.map((c) => [`${c.type}:${c.id}`, c] as const));
+  const live = (c: CheckinCandidate) => byId.get(`${c.type}:${c.id}`) ?? null;
+  return resolved.map((r) => {
+    const stillThere = r.candidates.map(live).filter((c) => c !== null);
+    const match = r.match ? live(r.match) : null;
+    if (!match) {
+      return { intent: r.intent, status: "unresolved", match: null, candidates: [] };
+    }
+    return { intent: r.intent, status: r.status, match, candidates: stillThere };
+  });
 }
 
 // --- Stage C - proposeFromCheckin() (deterministic) ------------------------
@@ -1100,4 +1131,107 @@ export function suggestedTaskFromIntent(intent: CheckinIntent, area: string): Su
     area,
     gap_kind: "rework",
   };
+}
+
+// --- Stage inputs, derived from live state ---------------------------------
+//
+// These sit here rather than beside their callers because there are now TWO callers in two
+// runtimes: the queue worker runs stages A and B, the web request runs stage C, and both need
+// the identical candidate set. A handle is an INDEX into that set (T3 is "the third open
+// task"), so two slightly different derivations would silently bind a quote to the wrong task.
+
+/** How many candidate entities the interpret prompt sees (the rest still resolve).
+ *  Caps the prompt, not the resolution blast radius. */
+export const CHECKIN_PROMPT_CAP = 60;
+
+/** The minimal slice of `JointScorer` (lib/store.ts) the candidate derivation needs, declared
+ *  structurally for the same reason `CheckinProposeContext` is: lib/store.ts reaches the
+ *  database, and this module is meant to stay importable by a fixture test with none. */
+export interface CheckinScorerSlice {
+  resolveInput: {
+    tasks: readonly {
+      id: string;
+      title: string;
+      projectId: string;
+      projectName: string;
+    }[];
+  };
+  activities: readonly { id: string; title: string; area: string }[];
+}
+
+/** Derive the check-in candidate set from the already-computed joint scorer - open tasks and
+ *  the unattained skill frontier are ALREADY in resolveInput.tasks, so this re-gathers nothing.
+ *  Handles are stable within a run (T#/S#/A#). */
+export function checkinCandidates(scorer: CheckinScorerSlice): {
+  candidates: CheckinCandidate[];
+  skillNodes: CheckinCandidate[];
+} {
+  const candidates: CheckinCandidate[] = [];
+  const skillNodes: CheckinCandidate[] = [];
+  let t = 0;
+  let s = 0;
+  for (const task of scorer.resolveInput.tasks) {
+    if (task.id.startsWith(SKILL_TASK_PREFIX)) {
+      const node: CheckinCandidate = {
+        handle: `S${++s}`,
+        type: "skill_node",
+        id: task.id.slice(SKILL_TASK_PREFIX.length),
+        title: task.title,
+        goalId: task.projectId,
+        goalName: task.projectName,
+      };
+      candidates.push(node);
+      skillNodes.push(node);
+    } else {
+      candidates.push({
+        handle: `T${++t}`,
+        type: "task",
+        id: task.id,
+        title: task.title,
+        goalId: task.projectId,
+        goalName: task.projectName,
+      });
+    }
+  }
+  scorer.activities.forEach((a, i) => {
+    candidates.push({
+      handle: `A${i + 1}`,
+      type: "activity",
+      id: a.id,
+      title: a.title,
+      goalId: "",
+      goalName: a.area,
+    });
+  });
+  return { candidates, skillNodes };
+}
+
+/** The unlocked frontier across every learning goal. skillProgress reasons about ONE goal's
+ *  graph (attainedIds is goal-local), so group first - a flat call would let one goal's
+ *  attainments unlock another's nodes. This is what inferred attainment is confined to. */
+export function unlockedFrontier(allNodes: SkillNode[]): ReadonlySet<string> {
+  const byGoal = new Map<string, SkillNode[]>();
+  for (const n of allNodes) {
+    const list = byGoal.get(n.goal_id);
+    if (list) list.push(n);
+    else byGoal.set(n.goal_id, [n]);
+  }
+  const unlocked = new Set<string>();
+  for (const nodes of byGoal.values()) {
+    for (const id of skillProgress(nodes).unlocked) unlocked.add(id);
+  }
+  return unlocked;
+}
+
+/** Put the scoped goal's own entities first before the cap - the scope is the disambiguation.
+ *  Resolution still runs against the FULL set, so this only biases what the model SEES, never
+ *  the blast radius. Stable partition, so the un-scoped ordering is intact. */
+export function rankForScope(
+  candidates: CheckinCandidate[],
+  scope: CheckinScope | undefined,
+): CheckinCandidate[] {
+  if (!scope) return candidates;
+  const inScope = candidates.filter((c) => c.goalId === scope.goalId);
+  const rest = candidates.filter((c) => c.goalId !== scope.goalId);
+  return [...inScope, ...rest];
 }
