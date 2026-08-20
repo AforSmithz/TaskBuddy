@@ -3,6 +3,7 @@ import { runAsUser } from "@/lib/db/context";
 import { closePool } from "@/lib/db/pool";
 import {
   decomposeGoalJob,
+  generateFollowUpJob,
   refreshStrategyJob,
   suggestSkillLinksJob,
   type Job,
@@ -88,6 +89,10 @@ function bodyFor(job: UserJob): () => Promise<Record<string, unknown> | void> {
       return async () => ({ created: await suggestSkillLinksJob(job.goalId) });
     case "strategy.refresh.requested":
       return () => refreshStrategyJob();
+    case "entry.follow_up.requested":
+      // The draft is the whole point of the job, so it rides the row rather
+      // than a write - see generateFollowUpJob.
+      return () => generateFollowUpJob(job.entryId);
     default: {
       // Exhaustiveness: adding a Job variant without a case here fails the
       // build rather than silently dropping that job type in production.
