@@ -224,9 +224,9 @@ export function EntryForm({
           {pending ? (
             <span className="flex items-center gap-1.5">
               <Loader2 className="size-3.5 animate-spin" />
-              {mode === "plan"
-                ? "Building your plan… this can take a few tries"
-                : "Extracting tasks… this can take a few tries"}
+              {/* Used to describe the model call; that now runs on the queue and
+                  the wait moved to the review page. This is just the save. */}
+              Saving your notes…
             </span>
           ) : (
             <>Tip: press ⌘/Ctrl + Enter to submit</>
