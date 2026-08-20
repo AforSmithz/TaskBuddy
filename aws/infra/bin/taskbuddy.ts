@@ -65,6 +65,7 @@ new ObservabilityStack(app, `${APP}-observability`, {
   dlq: eventsStack.dlq,
   jobQueue: eventsStack.jobQueue,
   worker: eventsStack.worker,
+  webLogs: web.webLogs,
 });
 
 // Deployed once, by hand, from a laptop - and then never again by CI, which is

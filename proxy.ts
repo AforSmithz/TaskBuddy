@@ -72,6 +72,15 @@ export async function proxy(request: NextRequest): Promise<NextResponse> {
   // Before anything else. 404 rather than 403: a 403 confirms to a scanner that it found the
   // origin and that a header is what's missing, while a 404 says only that there's nothing here.
   if (!cameThroughCloudFront(request)) {
+    // The token is what observability-stack.ts's metric filter counts, so it is a fixed
+    // string and not a template. Until this existed, someone probing the function URL
+    // directly - or using a leaked header value, the one failure this control has - was
+    // invisible: the request 404s and nothing anywhere goes up.
+    //
+    // JSON.stringify, not interpolation. The path is attacker-controlled and a raw newline
+    // in it would forge a second CloudWatch log line, which is how a metric filter gets
+    // taught to say whatever the attacker wants.
+    console.warn(`origin-reject path=${JSON.stringify(pathname)}`);
     return new NextResponse(null, { status: 404 }) as NextResponse;
   }
 

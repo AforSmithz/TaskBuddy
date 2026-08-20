@@ -3,6 +3,7 @@ import * as budgets from "aws-cdk-lib/aws-budgets";
 import * as cw from "aws-cdk-lib/aws-cloudwatch";
 import * as cwActions from "aws-cdk-lib/aws-cloudwatch-actions";
 import type * as lambda from "aws-cdk-lib/aws-lambda";
+import * as logs from "aws-cdk-lib/aws-logs";
 import type * as rds from "aws-cdk-lib/aws-rds";
 import * as sns from "aws-cdk-lib/aws-sns";
 import * as subs from "aws-cdk-lib/aws-sns-subscriptions";
@@ -16,6 +17,8 @@ export interface ObservabilityStackProps extends StackProps {
   readonly dlq: sqs.Queue;
   readonly jobQueue: sqs.Queue;
   readonly worker: lambda.Function;
+  /** The web function's log group. Read for the origin-reject metric filter below. */
+  readonly webLogs: logs.ILogGroup;
 }
 
 /** Signals. Written at the same time as the rest of the stack, deliberately - the Azure migration
@@ -110,8 +113,9 @@ export class ObservabilityStack extends Stack {
       {
         alarmName: `${APP}-llm-dlq`,
         alarmDescription:
-          "An LLM job failed three times. The message body carries the job " +
-          "type and the ids; nothing has been lost, but nothing will retry.",
+          "Something gave up. Either an LLM job failed three times, or the daily " +
+          "roll schedule exhausted its retry policy - the message body carries the " +
+          "job type and the ids either way. Nothing has been lost; nothing will retry.",
         threshold: 0,
         evaluationPeriods: 1,
         comparisonOperator: cw.ComparisonOperator.GREATER_THAN_THRESHOLD,
@@ -163,6 +167,101 @@ export class ObservabilityStack extends Stack {
           "an unset value reserves the model maximum against the quota.",
         threshold: 5,
         evaluationPeriods: 1,
+        comparisonOperator: cw.ComparisonOperator.GREATER_THAN_THRESHOLD,
+        treatMissingData: cw.TreatMissingData.NOT_BREACHING,
+      },
+    );
+
+    // ---------------------------------------------------------------------
+    // The daily roll.
+    //
+    // Dimension is ScheduleGroup and only ScheduleGroup - EventBridge Scheduler
+    // publishes no per-schedule dimension, so these are account-wide within the
+    // group. `default` is where taskbuddy-daily-roll lives because the schedule
+    // names no group, and it is the only schedule in this account, so the
+    // aggregate is exact today and would need a dedicated group the day it isn't.
+    // ---------------------------------------------------------------------
+    const schedulerMetric = (name: string) =>
+      new cw.Metric({
+        namespace: "AWS/Scheduler",
+        metricName: name,
+        dimensionsMap: { ScheduleGroup: "default" },
+        statistic: "Sum",
+        period: Duration.hours(1),
+      });
+
+    // Delivery to SQS is failing. Distinct from the roll itself failing, which is
+    // the worker's problem and shows up on taskbuddy-worker-errors: this is the
+    // event never reaching the queue at all, usually a role or a policy.
+    alarm("ScheduleTargetErrors", schedulerMetric("TargetErrorCount"), {
+      alarmName: `${APP}-schedule-target-errors`,
+      alarmDescription:
+        "EventBridge Scheduler could not deliver the daily roll to SQS. Check the " +
+        "scheduler role's SendMessage grant on both the queue and the DLQ.",
+      threshold: 0,
+      evaluationPeriods: 1,
+      comparisonOperator: cw.ComparisonOperator.GREATER_THAN_THRESHOLD,
+      treatMissingData: cw.TreatMissingData.NOT_BREACHING,
+    });
+
+    // Retries exhausted. Before the schedule had a DLQ this was the whole failure:
+    // the invocation was dropped and the only evidence was this datapoint. It still
+    // deserves its own alarm because it says WHY the DLQ alarm fired, and it fires
+    // even if the DLQ write is what broke.
+    alarm("ScheduleDropped", schedulerMetric("InvocationDroppedCount"), {
+      alarmName: `${APP}-schedule-dropped`,
+      alarmDescription:
+        "The daily roll exhausted its retry policy. It will not run again until " +
+        "tomorrow; the payload is in the DLQ.",
+      threshold: 0,
+      evaluationPeriods: 1,
+      comparisonOperator: cw.ComparisonOperator.GREATER_THAN_THRESHOLD,
+      treatMissingData: cw.TreatMissingData.NOT_BREACHING,
+    });
+
+    // ---------------------------------------------------------------------
+    // Requests that reached the function URL without the CloudFront header.
+    //
+    // The function URL is authType NONE and kept private by ORIGIN_SECRET_HEADER
+    // alone (see config.ts). The accepted weakness of that control is that anyone
+    // holding the value can bypass the edge - and until this filter existed,
+    // nothing anywhere would have said so. proxy.ts 404s the request silently.
+    //
+    // What this counts is REJECTED attempts, so it cannot detect a successful
+    // bypass by someone who has the header. It detects the reconnaissance that
+    // precedes one, and it detects a rotation done wrong - if the CDN and the
+    // function disagree about the value, every real request lands here and this
+    // goes vertical, which is a much faster diagnosis than a site that 404s.
+    //
+    // One custom metric, ~$0.30/mo. The only line item this whole pass adds.
+    // ---------------------------------------------------------------------
+    const originRejects = new logs.MetricFilter(this, "OriginRejects", {
+      logGroup: props.webLogs,
+      metricNamespace: `${APP}/edge`,
+      metricName: "OriginReject",
+      // Matches the literal token proxy.ts logs. A quoted term is a substring
+      // match on the whole line, which is what we want - the path is appended and
+      // must not have to be matched.
+      filterPattern: logs.FilterPattern.literal('"origin-reject"'),
+      metricValue: "1",
+      // Without this the metric reports NOTHING on a quiet period rather than
+      // zero, and an alarm over it sits in INSUFFICIENT_DATA instead of OK.
+      defaultValue: 0,
+    });
+
+    alarm(
+      "OriginProbing",
+      originRejects.metric({ statistic: "Sum", period: Duration.minutes(15) }),
+      {
+        alarmName: `${APP}-origin-probing`,
+        alarmDescription:
+          "Requests are hitting the Lambda function URL without the CloudFront " +
+          "origin header. A handful is background internet noise finding a public " +
+          "HTTPS endpoint. A sustained rate means someone has the URL and is " +
+          "working on it - or ORIGIN_SECRET and the CDN's custom header have " +
+          "drifted apart, in which case this is every real request.",
+        threshold: 20,
+        evaluationPeriods: 2,
         comparisonOperator: cw.ComparisonOperator.GREATER_THAN_THRESHOLD,
         treatMissingData: cw.TreatMissingData.NOT_BREACHING,
       },
@@ -253,6 +352,11 @@ export class ObservabilityStack extends Stack {
             period: Duration.hours(1),
           }),
         ],
+        width: 12,
+      }),
+      new cw.GraphWidget({
+        title: "Origin rejects - requests that skipped CloudFront",
+        left: [originRejects.metric({ statistic: "Sum" })],
         width: 12,
       }),
       new cw.GraphWidget({
