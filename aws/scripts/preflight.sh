@@ -251,6 +251,36 @@ else
   bad "TASKBUDDY_ALERT_EMAIL is unset. Alarms with no subscriber are decoration."
 fi
 
+# --- 8. Session MAC key ----------------------------------------------------
+# The one secret in this stack with TWO homes that must agree: the Lambda
+# environment (DB_SESSION_KEY, written by CDK) and app.session_key in Postgres
+# (seeded by apply-sql.sh). When they drift, app.uid() returns NULL, every RLS
+# policy denies, and the app renders as though every account is signed out -
+# with no error in any log, on either side. That is the worst failure shape in
+# this repo, so it gets a check rather than a comment.
+#
+# The format rule is duplicated from config.ts on purpose: failing here costs a
+# second, failing there costs a five-minute Next build first.
+if [ -z "${TASKBUDDY_SESSION_MAC_KEY:-}" ]; then
+  bad "TASKBUDDY_SESSION_MAC_KEY is unset. See aws/sql/06_session_mac.sql. Generate: openssl rand -hex 32"
+elif ! printf '%s' "$TASKBUDDY_SESSION_MAC_KEY" | grep -Eq '^[0-9a-fA-F]{64,}$'; then
+  bad "TASKBUDDY_SESSION_MAC_KEY is not 64+ hex characters. Postgres decodes it with decode(...,'hex') and Node with Buffer.from(key,'hex'); anything else decodes differently on each side and every signature fails silently."
+else
+  # Compare against what is actually deployed. A mismatch is not necessarily
+  # wrong - it is how rotation starts - but it must never be a surprise, and on
+  # a first deploy there is nothing to compare against.
+  deployed=$(aws lambda get-function-configuration --function-name taskbuddy-web \
+    --region "$REGION" --query 'Environment.Variables.DB_SESSION_KEY' \
+    --output text 2>/dev/null || true)
+  if [ -z "$deployed" ] || [ "$deployed" = "None" ]; then
+    ok "session MAC key set (no deployed value to compare - first deploy)"
+  elif [ "$deployed" = "$TASKBUDDY_SESSION_MAC_KEY" ]; then
+    ok "session MAC key matches the deployed one"
+  else
+    warn "TASKBUDDY_SESSION_MAC_KEY differs from the deployed DB_SESSION_KEY. This deploy ROTATES it, and every session signed with the old key stops verifying the moment it lands. Insert the new key as a second app.session_key row FIRST (see aws/sql/06_session_mac.sql), or the app reads as signed-out for everyone until apply-sql.sh catches up."
+  fi
+fi
+
 echo
 if [ "$fail" -gt 0 ]; then
   echo "$fail check(s) failed - do not deploy yet."

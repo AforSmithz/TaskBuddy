@@ -16,6 +16,8 @@
 # Environment:
 #   TASKBUDDY_ALERT_EMAIL       required - where alarms go
 #   TASKBUDDY_ORIGIN_SECRET     required - the CloudFront-to-origin shared header
+#   TASKBUDDY_SESSION_MAC_KEY   required - signs the RLS session GUC; must match the
+#                               row apply-sql.sh seeded into app.session_key
 #   SKIP_BUILD=1                reuse the existing aws/.build (rerunning a deploy)
 #   PREFLIGHT_SKIP=bedrock      see aws/scripts/preflight.sh
 #   ALLOW_STATEFUL_REPLACEMENT=1  proceed even if Aurora or the user pool would
@@ -33,6 +35,13 @@ cd "$(dirname "$0")/../.."
 #     --region ap-southeast-1 --query 'Environment.Variables.ORIGIN_SECRET' --output text
 #
 : "${TASKBUDDY_ORIGIN_SECRET:?set TASKBUDDY_ORIGIN_SECRET (see aws/infra/lib/web-stack.ts)}"
+# Same deal, and the same failure shape if it drifts: two stacks read it (web and events),
+# and the database holds a copy that has to agree. Recover the deployed value with:
+#
+#   aws lambda get-function-configuration --function-name taskbuddy-web \
+#     --region ap-southeast-1 --query 'Environment.Variables.DB_SESSION_KEY' --output text
+#
+: "${TASKBUDDY_SESSION_MAC_KEY:?set TASKBUDDY_SESSION_MAC_KEY (see aws/sql/06_session_mac.sql)}"
 REGION="${AWS_REGION:-ap-southeast-1}"
 
 # Order is explicit rather than left to CDK's dependency sort, because it is
@@ -139,4 +148,6 @@ echo "==> deploy (approval: $APPROVAL, region: $REGION)"
 npx cdk deploy "${STACKS[@]}" --require-approval "$APPROVAL"
 
 echo
-echo "Next: bash aws/scripts/apply-sql.sh   (the schema is not deployed by CDK)"
+echo "Next: TASKBUDDY_SESSION_MAC_KEY=... bash aws/scripts/apply-sql.sh"
+echo "      (the schema is not deployed by CDK, and 06_session_mac.sql must be seeded"
+echo "       with the same key this deploy just put in DB_SESSION_KEY)"

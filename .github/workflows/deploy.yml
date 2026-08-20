@@ -17,6 +17,7 @@
 #   gh variable set AWS_DEPLOY_ROLE_ARN --body arn:aws:iam::<acct>:role/taskbuddy-github-deploy
 #   gh secret   set TASKBUDDY_ALERT_EMAIL
 #   gh secret   set TASKBUDDY_ORIGIN_SECRET
+#   gh secret   set TASKBUDDY_SESSION_MAC_KEY
 #
 # TASKBUDDY_ORIGIN_SECRET must be the value already deployed, not a fresh one:
 # CDK writes it to both the CloudFront custom header and the function's
@@ -25,6 +26,18 @@
 #
 #   aws lambda get-function-configuration --function-name taskbuddy-web \
 #     --region ap-southeast-1 --query 'Environment.Variables.ORIGIN_SECRET' --output text
+#
+# TASKBUDDY_SESSION_MAC_KEY has the same "must be the deployed value" rule and a
+# worse failure. It signs the RLS session GUC, and Postgres holds a copy in
+# app.session_key that apply-sql.sh seeded; if this secret drifts from that row,
+# app.uid() returns NULL, every policy denies, and the app renders as if everyone
+# is signed out - with nothing in any log to say why. Read the live one with:
+#
+#   aws lambda get-function-configuration --function-name taskbuddy-web \
+#     --region ap-southeast-1 --query 'Environment.Variables.DB_SESSION_KEY' --output text
+#
+# Rotating it is a two-step: insert the new key as a second app.session_key row,
+# deploy, then delete the old row. See aws/sql/06_session_mac.sql.
 #
 # The schema is NOT applied here. aws/sql/*.sql runs through
 # aws/scripts/apply-sql.sh against the cluster, by a human who has read it. A
@@ -136,6 +149,7 @@ jobs:
         env:
           TASKBUDDY_ALERT_EMAIL: ${{ secrets.TASKBUDDY_ALERT_EMAIL }}
           TASKBUDDY_ORIGIN_SECRET: ${{ secrets.TASKBUDDY_ORIGIN_SECRET }}
+          TASKBUDDY_SESSION_MAC_KEY: ${{ secrets.TASKBUDDY_SESSION_MAC_KEY }}
           # Skipped in CI only. `bedrock` bills a real Converse per run to
           # re-answer an account-level question that changes once a year;
           # `probes` re-checks service reachability that a deploy proves anyway.

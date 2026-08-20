@@ -106,6 +106,7 @@ jobs:
           # against production rather than as a missing value.
           TASKBUDDY_ALERT_EMAIL: ${{ secrets.TASKBUDDY_ALERT_EMAIL }}
           TASKBUDDY_ORIGIN_SECRET: ${{ secrets.TASKBUDDY_ORIGIN_SECRET }}
+          TASKBUDDY_SESSION_MAC_KEY: ${{ secrets.TASKBUDDY_SESSION_MAC_KEY }}
         run: |
           cd aws/infra
           npx cdk diff --all --no-change-set > "$GITHUB_WORKSPACE/diff.txt" 2>&1 || true

@@ -10,8 +10,24 @@
 #
 # 05_drop_password_hash.sql is NOT run here. It is destructive and irreversible
 # and must not happen as part of a cutover; see the header of that file.
+#
+# Environment:
+#   TASKBUDDY_SESSION_MAC_KEY   required - the key 06_session_mac.sql seeds into
+#                               app.session_key. MUST be the same value the web and
+#                               worker functions hold as DB_SESSION_KEY, which is to
+#                               say the same value TASKBUDDY_SESSION_MAC_KEY had when
+#                               aws/scripts/deploy.sh last ran. If they disagree,
+#                               app.uid() returns NULL for everyone, every RLS policy
+#                               denies, and the app reads as signed-out with no error
+#                               in any log. Recover the deployed value with:
+#
+#   aws lambda get-function-configuration --function-name taskbuddy-web \
+#     --region ap-southeast-1 --query 'Environment.Variables.DB_SESSION_KEY' --output text
+#
 set -euo pipefail
 cd "$(dirname "$0")/.."
+
+: "${TASKBUDDY_SESSION_MAC_KEY:?set TASKBUDDY_SESSION_MAC_KEY (see aws/sql/06_session_mac.sql)}"
 
 REGION="${AWS_REGION:-ap-southeast-1}"
 SECRET_NAME="${DB_SECRET_NAME:-taskbuddy/db/master}"
@@ -41,6 +57,7 @@ run() {
   echo "==> $1"
   psql --set ON_ERROR_STOP=1 \
        --set db_name="$PGDATABASE" \
+       --set session_key="$TASKBUDDY_SESSION_MAC_KEY" \
        -h "$PGHOST" -U "$PGUSER" -d "$PGDATABASE" \
        -v ON_ERROR_STOP=1 -f "sql/$1"
   echo
@@ -52,6 +69,10 @@ run 02_grants.sql
 # users.password_hash, which is exactly what 03 exists to take away.
 run 03_auth.sql
 run 04_cognito.sql
+# 06 MUST follow 01: it replaces the app.uid() that 01 creates with one that verifies a
+# signature instead of trusting the GUC. Re-running 01 later puts the trusting version
+# back, with nothing failing to say so - see that file's header.
+run 06_session_mac.sql
 
 echo "all applied. Review the verification query output above - each file ends"
 echo "with checks whose expected results are stated in its comments."
