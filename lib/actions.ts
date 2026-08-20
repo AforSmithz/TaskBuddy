@@ -14,7 +14,8 @@ import {
   createJointScorer,
   type JointScorer,
   confirmDraft,
-  createDraft,
+  createPendingEntry,
+  getEntry,
   createErrandTask,
   createGoal,
   createRecurringActivity,
@@ -65,6 +66,7 @@ import { SKILL_TASK_PREFIX, type ResolveInput } from "@/lib/portfolio-state";
 import { requireUser } from "@/lib/auth";
 import {
   decomposeGoalJob,
+  extractEntryJob,
   generateFollowUpJob,
   refreshStrategyJob,
   suggestSkillLinksJob,
@@ -261,7 +263,7 @@ export async function createEntryAction(
   _prev: FormState,
   formData: FormData,
 ): Promise<FormState> {
-  await requireUser();
+  const user = await requireUser();
   const kind: EntryKind =
     String(formData.get("mode")) === "plan" ? "plan" : "meeting";
   const notes = String(formData.get("notes") ?? "").trim();
@@ -293,13 +295,27 @@ export async function createEntryAction(
     if (newProjectName) {
       projectId = await createGoal(newProjectName);
     }
-    entryId = await createDraft(notes, {
+    const opts = {
       kind,
       area: area ?? undefined,
       projectId,
       autoProject: autoProject && !newProjectName,
-      parentEntryId,
-    });
+    };
+    // The row first, so the redirect below has somewhere real to land and the user's notes are
+    // durable before any model call is attempted. Extraction fills it in from the queue.
+    entryId = await createPendingEntry(notes, { ...opts, parentEntryId });
+    await enqueue(
+      "entry.extract.requested",
+      entryId,
+      (jobId) => ({
+        type: "entry.extract.requested",
+        userId: user.id,
+        entryId,
+        opts,
+        jobId,
+      }),
+      () => extractEntryJob(entryId, opts),
+    );
   } catch (err) {
     console.error("createEntry failed:", err);
     return {
@@ -312,6 +328,37 @@ export async function createEntryAction(
 
    // redirect() throws internally, so it must run outside the try/catch.
   redirect(`/entries/${entryId}/review`);
+}
+
+/** Re-run extraction over a draft that has none, or whose run failed.
+ *
+ *  Safe to fire more than once: replaceDraftExtraction replaces rather than appends, and the job
+ *  refuses to touch an entry that is no longer a draft. The raw input is already on the row, so
+ *  nothing needs re-sending. */
+export async function retryExtractionAction(entryId: string): Promise<JobHandle> {
+  const user = await requireUser();
+  const entry = await getEntry(entryId);
+  if (!entry) throw new Error("That entry no longer exists.");
+  // The filing the create form chose is not recoverable from the row (area lives on tasks that
+  // were never written), so a retry re-derives it: the explicit goal if the stub kept one, the
+  // extractor's suggestion otherwise. Same rule the first attempt used when nothing was pinned.
+  const opts = {
+    kind: entry.kind,
+    projectId: entry.goal_id,
+    autoProject: entry.goal_id === null,
+  };
+  return enqueue(
+    "entry.extract.requested",
+    entryId,
+    (jobId) => ({
+      type: "entry.extract.requested",
+      userId: user.id,
+      entryId,
+      opts,
+      jobId,
+    }),
+    () => extractEntryJob(entryId, opts),
+  );
 }
 
 /**
