@@ -7,6 +7,7 @@ import "@/lib/db/types";
 import { Pool, type PoolClient } from "pg";
 import { Signer } from "@aws-sdk/rds-signer";
 import { RDS_CA_BUNDLE } from "@/lib/db/rds-ca";
+import { sessionKey, signSession } from "@/lib/db/session-mac";
 
 // The connection pool and the transaction wrapper every query goes through.
 //
@@ -169,8 +170,15 @@ export async function closePool(): Promise<void> {
   await p.end().catch(() => {});
 }
 
-/** Run `fn` in a transaction with app.user_id set to `uid`, which is what every RLS policy
+/** Run `fn` in a transaction with the session GUC set to `uid`, which is what every RLS policy
  *  reads through app.uid().
+ *
+ *  The value is SIGNED. app.uid() (aws/sql/06_session_mac.sql) verifies an HMAC over
+ *  `uid.expires` before returning anything, because a plain GUC is settable by whoever holds
+ *  the connection - so the previous unsigned form meant anyone who could authenticate as
+ *  taskbuddy_app could set it to any uuid and read the whole database. That made RLS a guard
+ *  against an application bug rather than against a stolen connection, which is the case the
+ *  publicly-routable cluster in data-stack.ts is actually relying on it for.
  *
  *  Per statement, not per request. set_config(..., true) is transaction-local, so the GUC has
  *  to live in the same transaction as the statement depending on it - session-wide would leak
@@ -192,17 +200,29 @@ export async function withUser<T>(
     throw new Error("Invalid user id.");
   }
 
+  const key = sessionKey();
+
   const client = await getPool().connect();
   try {
   // BEGIN and the GUC in one round trip. Passing no `values` makes pg use the simple query
   // protocol, which accepts several semicolon-separated statements per message; the extended
   // protocol (anything with parameters) doesn't, which is why this can't use a $1 placeholder.
   //
-  // Interpolating `uid` is safe here, and only here, because it was just matched against
-  // UUID_RE - the only characters that survive are hex digits and hyphens, so there's no
-  // quote to escape. Keep the two adjacent.
+  // Interpolating is safe here, and only here, because of what the two values are: `uid` was
+  // just matched against UUID_RE, so only hex digits and hyphens survive, and signSession
+  // returns digits, dots and lowercase hex by construction. Neither can carry a quote. Keep
+  // those checks adjacent to this string.
+  //
+  // app.user_id is written alongside app.session and is TRANSITIONAL. It is what lets the app
+  // and the schema be deployed in either order: a database still on 01_schema.sql's unsigned
+  // app.uid() reads it, one that has had 06_session_mac.sql applied ignores it and reads the
+  // signed value instead. Delete this half once 06 is applied everywhere - and note that until
+  // it is deleted, re-running 01_schema.sql silently reverts app.uid() to the forgeable version
+  // with nothing failing to say so. 06's header says the same thing from the other side.
+    const session = key ? signSession(uid, key) : uid;
     await client.query(
-      `BEGIN; select set_config('app.user_id', '${uid}', true)`,
+      `BEGIN; select set_config('app.session', '${session}', true), ` +
+        `set_config('app.user_id', '${uid}', true)`,
     );
     const out = await fn(client);
     await client.query("COMMIT");
@@ -219,7 +239,7 @@ export async function withUser<T>(
   }
 }
 
-/** Run `fn` on a pooled connection with NO app.user_id set. Only the auth path may use this,
+/** Run `fn` on a pooled connection with NO session GUC set. Only the auth path may use this,
  *  and only via the SECURITY DEFINER functions in 03_auth.sql - with the GUC unset app.uid()
  *  is NULL and every ordinary policy denies, which is the intent. */
 export async function withoutUser<T>(
