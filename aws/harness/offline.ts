@@ -273,6 +273,30 @@ async function main(): Promise<void> {
       ),
       { type: "goal.decompose.requested", userId: "u", goalId: "g", jobId: "j" },
     );
+
+    // The follow-up draft moved onto the queue because the web function has no
+    // bedrock:InvokeModel and a 60s ceiling it could not finish inside. Its
+    // subject is an ENTRY id, the first job whose subject is not a goal, so the
+    // one-live-per-subject index is what stops a double-click billing twice.
+    check(
+      "follow-up job round-trips with its entryId",
+      parse(
+        rec({
+          detail: {
+            type: "entry.follow_up.requested",
+            userId: "u",
+            entryId: "e",
+            jobId: "j",
+          },
+        }),
+      ),
+      { type: "entry.follow_up.requested", userId: "u", entryId: "e", jobId: "j" },
+    );
+    check(
+      "follow-up job with no userId is rejected",
+      parse(rec({ detail: { type: "entry.follow_up.requested", entryId: "e" } })),
+      null,
+    );
   }
 
   // ===========================================================================
@@ -366,6 +390,25 @@ async function main(): Promise<void> {
       "...and binds no parameter for it",
       sql?.values.length === 1,
       `expected only the type parameter, got ${JSON.stringify(sql?.values)}`,
+    );
+    // A follow-up draft lives ONLY in job_runs.result, so the card reads it back with
+    // latestSucceededJobRun. The status filter is the load-bearing half: without it the read is
+    // "newest run", and a regenerate that fails is the newest run - so one failed retry would
+    // erase a perfectly good draft the user was about to copy.
+    const succeededSQL = new QueryBuilder("job_runs", null)
+      .select("id")
+      .eq("type", "entry.follow_up.requested")
+      .eq("status", "succeeded")
+      .eq("subject_id", "e")
+      .toSQL();
+    checkThat(
+      "the last-draft read filters on succeeded in SQL",
+      Boolean(
+        succeededSQL &&
+          /"?status"?\s*=/.test(succeededSQL.text) &&
+          succeededSQL.values.includes("succeeded"),
+      ),
+      `expected a bound status filter, got: ${succeededSQL?.text}`,
     );
   }
 
