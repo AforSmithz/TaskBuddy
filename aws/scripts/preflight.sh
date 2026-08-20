@@ -45,10 +45,29 @@ if echo "$ident" | grep -q '"Account"'; then
   arn=$(echo "$ident" | python3 -c 'import sys,json;print(json.load(sys.stdin)["Arn"])')
   ok "credentials resolve (account $account)"
   # Root credentials can do everything, including things no deployment should.
-  # This is a warning rather than a failure so a first bootstrap is not blocked,
-  # but it should be fixed before anything real is deployed.
+  # This was a warning for a long time and got ignored for exactly as long, so
+  # it is now a failure. Two concrete things break under root, not just theory:
+  #
+  #   - an `aws login` root session expires about hourly, mid-deploy
+  #   - root CANNOT assume the cdk-hnb659fds-* bootstrap roles. Their trust
+  #     policy delegates to `arn:aws:iam::<acct>:root`, which means "the
+  #     account", and account delegation never covers the root user itself. CDK
+  #     reports this as "could not be used to assume ... Proceeding anyway" and
+  #     silently deploys with the caller's own credentials instead.
+  #
+  # ALLOW_ROOT=1 exists for the one case that genuinely needs it: the very first
+  # `cdk bootstrap` on an account with no IAM user yet.
   case "$arn" in
-    *":root") warn "running as ROOT. Create an admin IAM user, enable MFA on root, and use that instead." ;;
+    *":root")
+      if [ -n "${ALLOW_ROOT:-}" ]; then
+        warn "running as ROOT (ALLOW_ROOT set). Only the first bootstrap should need this."
+      else
+        bad "running as ROOT. Use the taskbuddy-admin IAM user: AWS_PROFILE=taskbuddy"
+        echo "        Root sessions expire hourly and cannot assume the CDK bootstrap"
+        echo "        roles, so deploys fall back with \"Proceeding anyway\"."
+        echo "        First bootstrap on a fresh account only: ALLOW_ROOT=1"
+      fi
+      ;;
     *) ok "not running as root ($arn)" ;;
   esac
 else
