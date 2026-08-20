@@ -281,6 +281,32 @@ else
   fi
 fi
 
+# --- 9. Lambda concurrency ceiling -----------------------------------------
+# The web function carries no reservedConcurrentExecutions because it CANNOT: this
+# account's total Lambda concurrency is 10, and reserving any of it drops the
+# unreserved pool below its floor of 10. That cap is a tighter bound than the
+# reservation would have been, so nothing is lost.
+#
+# What is fragile is the coupling. Raise the quota - for a load test, for a second
+# app in the account - and the ceiling silently disappears, along with the only
+# thing bounding what a flood against CloudFront can cost. Nothing fails; it just
+# stops being bounded. So the check is not "is the quota big enough", it is "did
+# the quota grow past the point where we were relying on it being small".
+acct_conc=$(aws lambda get-account-settings --region "$REGION" \
+  --query 'AccountLimit.ConcurrentExecutions' --output text 2>/dev/null || echo "")
+web_reserved=$(aws lambda get-function-concurrency --function-name taskbuddy-web \
+  --region "$REGION" --query 'ReservedConcurrentExecutions' --output text 2>/dev/null || echo "")
+
+if [ -z "$acct_conc" ] || [ "$acct_conc" = "None" ]; then
+  warn "could not read the Lambda concurrency limit; skipping the ceiling check"
+elif [ "$acct_conc" -le 10 ]; then
+  ok "lambda concurrency capped at $acct_conc account-wide (x pool max 6 = $((acct_conc * 6)) db connections)"
+elif [ -n "$web_reserved" ] && [ "$web_reserved" != "None" ]; then
+  ok "lambda quota is $acct_conc and taskbuddy-web reserves $web_reserved"
+else
+  warn "Lambda concurrency quota is now $acct_conc, up from the 10 this stack relies on. Nothing bounds the web tier any more: a flood scales to $acct_conc and bills all of it, and $((acct_conc * 6)) connections is far past what the db-connections alarm expects. Set reservedConcurrentExecutions on taskbuddy-web (WEB_RESERVED_CONCURRENCY in config.ts) and reserve for the workers too."
+fi
+
 echo
 if [ "$fail" -gt 0 ]; then
   echo "$fail check(s) failed - do not deploy yet."

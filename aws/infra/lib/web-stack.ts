@@ -19,7 +19,6 @@ import {
   LOG_RETENTION_DAYS,
   LWA_LAYER_ARN,
   WEB_MEMORY_MB,
-  WEB_RESERVED_CONCURRENCY,
   WEB_TIMEOUT_SECONDS,
   sessionMacKey,
 } from "./config";
@@ -113,8 +112,10 @@ export class WebStack extends Stack {
       ],
       memorySize: WEB_MEMORY_MB,
       timeout: Duration.seconds(WEB_TIMEOUT_SECONDS),
-      // The bill's upper bound, and the database's. See WEB_RESERVED_CONCURRENCY.
-      reservedConcurrentExecutions: WEB_RESERVED_CONCURRENCY,
+      // NO reservedConcurrentExecutions. The account's total Lambda concurrency is 10,
+      // so any reservation drops the unreserved pool under its floor and CloudFormation
+      // rolls the stack back. The account cap is the tighter ceiling anyway - see
+      // WEB_RESERVED_CONCURRENCY in config.ts for what to do if that quota is ever raised.
       tracing: lambda.Tracing.ACTIVE,
       logGroup: this.webLogs,
       environment: {

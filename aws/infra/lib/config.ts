@@ -48,20 +48,27 @@ export const LWA_LAYER_ARN =
 // 43s belongs on the queue. This is a backstop for a pathological render.
 export const WEB_TIMEOUT_SECONDS = 60;
 
-// Ceiling on simultaneous web invocations. Free, and the only control in this stack that puts
-// an upper bound on what an unauthenticated flood can cost: without it Lambda scales the web
-// function to the account limit, so a burst against the CloudFront distribution - or against the
-// function URL directly, if ORIGIN_SECRET_HEADER ever leaks - is billed in full.
+// What a reservation on the web function WOULD be, and why there isn't one.
 //
-// The number is chosen off the database, not off the traffic. lib/db/pool.ts holds max 6
-// connections PER EXECUTION ENVIRONMENT, so this multiplies: 10 x 6 = 60, which is exactly the
-// taskbuddy-db-connections alarm threshold in observability-stack.ts. That is deliberate and the
-// two must move together - it means the connection alarm now fires when the web tier is
-// saturated and cannot fire before, so it reads as "we are at the ceiling" rather than as an
-// unexplained climb.
+// This account's total Lambda concurrency is 10, not the 1000 the docs assume - that is the
+// default AWS gives new accounts until you ask for more. Reserving anything at all fails:
 //
-// Reserved concurrency is also RESERVED: it is subtracted from the account pool and guaranteed
-// to this function, so the workers cannot starve it and it cannot starve them.
+//   Specified ReservedConcurrentExecutions for function decreases account's
+//   UnreservedConcurrentExecution below its minimum value of [10].
+//
+// Measured against the live account 2026-08-20, as a CloudFormation rollback on taskbuddy-web.
+// The reservation is not merely impossible, it is unnecessary: an account-wide cap of 10 is a
+// TIGHTER bound than the 10 this was going to reserve, and it is the ceiling that actually
+// stops a flood costing money. The connection arithmetic the db-connections alarm is written
+// against still holds - 10 concurrent x pool max 6 = 60 - it is just enforced by the account
+// quota rather than by this function.
+//
+// THE TRAP, and the reason this constant still exists rather than being deleted: raising the
+// account quota REMOVES the ceiling. A limit increase requested for some unrelated reason -
+// a load test, a second app in the account - silently un-bounds the web tier and starves
+// nothing until it does. preflight.sh check 9 watches for exactly that and tells you to set
+// this. If you do, reserve for the workers too: at a cap of 10 they share one pool with web,
+// so an unreserved worker is a worker a busy web tier can starve.
 export const WEB_RESERVED_CONCURRENCY = 10;
 
 // 1769 MB is exactly one full vCPU. Below it Lambda gives a fraction of a core and a Next
