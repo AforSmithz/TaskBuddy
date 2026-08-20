@@ -297,6 +297,31 @@ async function main(): Promise<void> {
       parse(rec({ detail: { type: "entry.follow_up.requested", entryId: "e" } })),
       null,
     );
+
+    // Extraction carries the filing the create form chose, because none of it is recoverable
+    // from the entry row: `area` belongs to tasks that do not exist yet, and `autoProject` is a
+    // question rather than a value. Losing it silently files every retried draft under Work.
+    check(
+      "extraction job carries its filing options",
+      parse(
+        rec({
+          detail: {
+            type: "entry.extract.requested",
+            userId: "u",
+            entryId: "e",
+            opts: { kind: "meeting", area: "Hobby", autoProject: true },
+            jobId: "j",
+          },
+        }),
+      ),
+      {
+        type: "entry.extract.requested",
+        userId: "u",
+        entryId: "e",
+        opts: { kind: "meeting", area: "Hobby", autoProject: true },
+        jobId: "j",
+      },
+    );
   }
 
   // ===========================================================================
@@ -409,6 +434,32 @@ async function main(): Promise<void> {
           succeededSQL.values.includes("succeeded"),
       ),
       `expected a bound status filter, got: ${succeededSQL?.text}`,
+    );
+  }
+
+  // ===========================================================================
+  console.log("\nprovisional title - the draft row is NOT NULL before the model runs");
+  // The review page renders entry.title as its heading from the moment of submit, so a blank or
+  // absurd value here is a visibly broken page for the whole time extraction is running.
+  {
+    const { provisionalTitle } = await import("@/lib/store");
+    check(
+      "first non-empty line wins",
+      provisionalTitle("\n\n  Sprint planning with Ana  \nrest of the notes"),
+      "Sprint planning with Ana",
+    );
+    check("empty input still yields a title", provisionalTitle("   \n  "), "Untitled entry");
+    checkThat(
+      "a long first line is clipped on a word boundary",
+      (() => {
+        const t = provisionalTitle(
+          "we spent the whole session going over the migration plan and the rollout order for every service",
+        );
+        return t.length <= 73 && t.endsWith("…") && !t.includes("  ");
+      })(),
+      `got: ${provisionalTitle(
+        "we spent the whole session going over the migration plan and the rollout order for every service",
+      )}`,
     );
   }
 
