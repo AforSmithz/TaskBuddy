@@ -386,6 +386,10 @@ export interface AssembleOptions {
   parentEntryId?: string | null;
   status?: EntryStatus;
   createdAt?: string;
+  /** Assemble INTO an existing row instead of minting one. The extraction job passes the id of
+   *  the stub createPendingEntry already inserted, so the entry keeps the URL the user was
+   *  redirected to while the model was still working. */
+  entryId?: string;
 }
 
 /** extract -> score priority -> resolve dependencies. UUIDs are assigned up front so
@@ -396,7 +400,7 @@ export async function assembleEntry(
 ): Promise<AssembledEntry> {
   const kind = opts.kind ?? "meeting";
   const createdAt = opts.createdAt ?? new Date().toISOString();
-  const entryId = crypto.randomUUID();
+  const entryId = opts.entryId ?? crypto.randomUUID();
 
   // Only when the project is left to us: the extractor needs existing projects to reuse
   // one by name. Skipped during seeding, where listGoals would re-enter ensureSeeded.
@@ -944,27 +948,140 @@ export async function setTriageItemDeferred(
 
 // --- Entries (meetings & plans) ---------------------------------------------
 
-/** Assemble raw input into a draft entry awaiting review. Returns its id. */
-export async function createDraft(
+/** A title to show before the model has produced one. First non-empty line, clipped on a word
+ *  boundary. Never blank: `title` is NOT NULL and the review page renders it as the heading, so
+ *  an empty string here is a visibly broken page for the whole time extraction is running. */
+export function provisionalTitle(rawInput: string): string {
+  const line = rawInput
+    .split("\n")
+    .map((l) => l.trim())
+    .find((l) => l.length > 0);
+  if (!line) return "Untitled entry";
+  if (line.length <= 72) return line;
+  const clipped = line.slice(0, 72);
+  const lastSpace = clipped.lastIndexOf(" ");
+  return `${(lastSpace > 40 ? clipped.slice(0, lastSpace) : clipped).trimEnd()}…`;
+}
+
+/** Insert the draft row BEFORE anything has been extracted into it, and return its id.
+ *
+ *  This is what lets the extraction run on the queue. The user is redirected to a real entry URL
+ *  immediately, the row holds their raw input from that moment on, and the job fills in the rest.
+ *  Persisting the input here rather than carrying it in the queue message is the point: a message
+ *  that dies in the DLQ takes nothing with it, and the draft can simply be re-extracted.
+ *
+ *  Everything the model decides is left empty on purpose - a stub with a plausible-looking
+ *  summary would be indistinguishable from a finished extraction on the review page. */
+export async function createPendingEntry(
   rawInput: string,
   opts: AssembleOptions = {},
 ): Promise<string> {
-  const assembled = await assembleEntry(rawInput, {
-    ...opts,
+  const entry: Entry = {
+    id: crypto.randomUUID(),
+    title: provisionalTitle(rawInput),
+    raw_input: rawInput,
+    summary: "",
+    discussion_points: [],
+    stakeholders: [],
+    daily_objective: "",
+    key_deliverables: [],
+    assumptions: [],
+    risks: [],
+    kind: opts.kind ?? "meeting",
     status: "draft",
-  });
+    // Only an EXPLICIT project is known this early; the auto-filed one is the extractor's
+    // suggestion and lands with the rest of its output.
+    goal_id: opts.projectId ?? null,
+    parent_entry_id: opts.parentEntryId ?? null,
+    created_at: opts.createdAt ?? new Date().toISOString(),
+  };
+
   if (isDbConfigured()) {
-    await persistSupabase(assembled);
+    const supabase = await getRequestClient();
+    const user_id = await currentUserId(supabase);
+    mustOk(
+      await supabase.from("entries").insert({ ...entry, user_id }),
+      "pending entry insert",
+    );
   } else {
     await ensureSeeded();
-    const db = memDB();
-    db.entries.unshift(assembled.entry);
-    db.decisions.push(...assembled.decisions);
-    db.questions.push(...assembled.questions);
-    db.tasks.push(...assembled.tasks);
-    db.deps.push(...assembled.deps);
+    memDB().entries.unshift(entry);
   }
-  return assembled.entry.id;
+  return entry.id;
+}
+
+/** Write a finished extraction over a draft, replacing whatever was there.
+ *
+ *  REPLACES rather than appends, which is what makes the extraction job safe to run twice. SQS
+ *  is at-least-once: a worker that finishes the model call and then dies before deleting the
+ *  message gets the whole job redelivered, and an appending version would leave the user
+ *  reviewing two copies of every task. Re-extracting a draft is also just a useful thing to be
+ *  able to do.
+ *
+ *  Only ever called on a DRAFT. Once confirmDraft has flipped the entry to active the user has
+ *  accepted specific tasks, and replacing them wholesale would silently discard that decision. */
+export async function replaceDraftExtraction(
+  entryId: string,
+  a: AssembledEntry,
+): Promise<void> {
+  if (isDbConfigured()) {
+    const supabase = await getRequestClient();
+    // Deleting the tasks cascades their dependency edges, same as confirmDraft relies on.
+    for (const table of ["tasks", "decisions", "open_questions"]) {
+      mustOk(
+        await supabase.from(table).delete().eq("entry_id", entryId),
+        `${table} clear`,
+      );
+    }
+    mustOk(
+      await supabase
+        .from("entries")
+        .update({
+          title: a.entry.title,
+          summary: a.entry.summary,
+          discussion_points: a.entry.discussion_points,
+          stakeholders: a.entry.stakeholders,
+          daily_objective: a.entry.daily_objective,
+          key_deliverables: a.entry.key_deliverables,
+          assumptions: a.entry.assumptions,
+          risks: a.entry.risks,
+          goal_id: a.entry.goal_id,
+        })
+        .eq("id", entryId),
+      "entry extraction update",
+    );
+    if (a.decisions.length)
+      mustOk(
+        await supabase.from("decisions").insert(a.decisions),
+        "decisions insert",
+      );
+    if (a.questions.length)
+      mustOk(
+        await supabase.from("open_questions").insert(a.questions),
+        "open_questions insert",
+      );
+    if (a.tasks.length)
+      mustOk(await supabase.from("tasks").insert(a.tasks), "tasks insert");
+    if (a.deps.length)
+      mustOk(
+        await supabase.from("task_dependencies").insert(a.deps),
+        "task_dependencies insert",
+      );
+    return;
+  }
+
+  await ensureSeeded();
+  const db = memDB();
+  db.decisions = db.decisions.filter((d) => d.entry_id !== entryId);
+  db.questions = db.questions.filter((q) => q.entry_id !== entryId);
+  db.tasks = db.tasks.filter((t) => t.entry_id !== entryId);
+  db.deps = db.deps.filter((d) => d.entry_id !== entryId);
+  const i = db.entries.findIndex((e) => e.id === entryId);
+  if (i >= 0) db.entries[i] = { ...db.entries[i], ...a.entry, id: entryId };
+  db.decisions.push(...a.decisions);
+  db.questions.push(...a.questions);
+  db.tasks.push(...a.tasks);
+  db.deps.push(...a.deps);
 }
 
 /** Finalise a draft: drop declined tasks, apply the confirmed filing, flip to active.
