@@ -1,9 +1,11 @@
 import "server-only";
 import { decomposeLearningGoal } from "@/lib/decompose";
+import { generateFollowUp } from "@/lib/generate";
 import { generatePortfolioStrategy } from "@/lib/portfolio-strategist";
 import { pairKey, suggestSkillTaskLinks } from "@/lib/skill-links";
 import {
   getCachedStrategy,
+  getEntry,
   getGoal,
   insertSuggestedLinks,
   listAllTasks,
@@ -41,6 +43,7 @@ export type Job =
   | { type: "goal.decompose.requested"; userId: string; goalId: string; jobId?: string }
   | { type: "goal.skill_links.requested"; userId: string; goalId: string; jobId?: string }
   | { type: "strategy.refresh.requested"; userId: string; jobId?: string }
+  | { type: "entry.follow_up.requested"; userId: string; entryId: string; jobId?: string }
   | { type: "plan.roll.daily" };
 
 /** The jobs a user starts and watches - everything except the scheduled roll. */
@@ -86,4 +89,25 @@ export async function refreshStrategyJob(): Promise<void> {
   const prev = await getCachedStrategy();
   const strategy = await generatePortfolioStrategy(prev);
   await setCachedStrategy(strategy);
+}
+
+/** Draft the follow-up message for one entry.
+ *
+ *  The odd one out among these jobs: it writes NOTHING. The message is a draft the user copies
+ *  or discards, so persisting it would mean a table, a staleness question every time the entry's
+ *  tasks change, and a migration - for a string that is worth less than the tasks it summarises.
+ *  It rides `job_runs.result` instead, exactly as the link proposer's count does, and a reload
+ *  after a settled run is meant to lose it.
+ *
+ *  Never throws for a model failure: generateFollowUp catches its own and returns the template
+ *  version, so a `failed` row here means the ENTRY read failed, which is worth showing. */
+export async function generateFollowUpJob(
+  entryId: string,
+): Promise<{ message: string | null }> {
+  const entry = await getEntry(entryId);
+  // Deleted between enqueue and delivery. Succeeding with a null message is right: there is
+  // nothing to draft and nothing broken, and a `failed` row would offer a retry that can only
+  // fail the same way.
+  if (!entry) return { message: null };
+  return { message: await generateFollowUp(entry) };
 }
