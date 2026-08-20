@@ -199,8 +199,12 @@ export class EventsStack extends Stack {
           "goal.decompose.requested",
           "goal.skill_links.requested",
           "strategy.refresh.requested",
+          "strategy.recovery_tasks.requested",
+          "strategy.modifications.requested",
+          "strategy.reroute.requested",
           "checkin.submitted",
           "entry.extract.requested",
+          "entry.follow_up.requested",
         ],
       },
       targets: [
