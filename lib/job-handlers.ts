@@ -4,9 +4,12 @@ import { generateFollowUp } from "@/lib/generate";
 import { generatePortfolioStrategy } from "@/lib/portfolio-strategist";
 import { pairKey, suggestSkillTaskLinks } from "@/lib/skill-links";
 import {
+  assembleEntry,
   getCachedStrategy,
   getEntry,
   getGoal,
+  replaceDraftExtraction,
+  type AssembleOptions,
   insertSuggestedLinks,
   listAllTasks,
   listSkillNodes,
@@ -44,6 +47,16 @@ export type Job =
   | { type: "goal.skill_links.requested"; userId: string; goalId: string; jobId?: string }
   | { type: "strategy.refresh.requested"; userId: string; jobId?: string }
   | { type: "entry.follow_up.requested"; userId: string; entryId: string; jobId?: string }
+  | {
+      type: "entry.extract.requested";
+      userId: string;
+      entryId: string;
+      /** The filing the user chose on the create form. Not on the entry row: `area` belongs to
+       *  the tasks, which do not exist yet, and `autoProject` is a question rather than a value.
+       *  Small, and re-read on every redelivery, which is what keeps a retry identical. */
+       opts: Pick<AssembleOptions, "kind" | "area" | "projectId" | "autoProject">;
+      jobId?: string;
+    }
   | { type: "plan.roll.daily" };
 
 /** The jobs a user starts and watches - everything except the scheduled roll. */
@@ -110,4 +123,34 @@ export async function generateFollowUpJob(
   // fail the same way.
   if (!entry) return { message: null };
   return { message: await generateFollowUp(entry) };
+}
+
+
+/** Extract a draft: run the model over the raw input the stub row is already holding, then write
+ *  the result over that row.
+ *
+ *  The entry exists before this runs (createPendingEntry), so the user is looking at its review
+ *  page the whole time. That ordering is the reason the raw input is never at risk: this job can
+ *  fail, be retried, or be re-run by hand, and the worst case is a draft that still needs
+ *  extracting rather than lost notes.
+ *
+ *  Guarded on `draft`. A redelivery that arrives after the user has already confirmed must not
+ *  replace the tasks they accepted - replaceDraftExtraction would happily do exactly that. */
+export async function extractEntryJob(
+  entryId: string,
+  opts: Pick<AssembleOptions, "kind" | "area" | "projectId" | "autoProject">,
+): Promise<{ tasks: number } | void> {
+  const entry = await getEntry(entryId);
+  if (!entry) return;
+  if (entry.status !== "draft") return { tasks: entry.tasks.length };
+
+  const assembled = await assembleEntry(entry.raw_input, {
+    ...opts,
+    entryId,
+    status: "draft",
+    parentEntryId: entry.parent_entry_id,
+    createdAt: entry.created_at,
+  });
+  await replaceDraftExtraction(entryId, assembled);
+  return { tasks: assembled.tasks.length };
 }
