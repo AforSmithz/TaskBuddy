@@ -3,6 +3,7 @@ import { runAsUser } from "@/lib/db/context";
 import { closePool } from "@/lib/db/pool";
 import {
   decomposeGoalJob,
+  extractEntryJob,
   generateFollowUpJob,
   refreshStrategyJob,
   suggestSkillLinksJob,
@@ -89,6 +90,10 @@ function bodyFor(job: UserJob): () => Promise<Record<string, unknown> | void> {
       return async () => ({ created: await suggestSkillLinksJob(job.goalId) });
     case "strategy.refresh.requested":
       return () => refreshStrategyJob();
+    case "entry.extract.requested":
+      // The heaviest of these and the one the user is actively waiting on: the
+      // review page they were redirected to is empty until this lands.
+      return () => extractEntryJob(job.entryId, job.opts);
     case "entry.follow_up.requested":
       // The draft is the whole point of the job, so it rides the row rather
       // than a write - see generateFollowUpJob.
