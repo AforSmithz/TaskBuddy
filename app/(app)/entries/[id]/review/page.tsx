@@ -1,10 +1,12 @@
 import Link from "next/link";
 import { notFound, redirect } from "next/navigation";
 import { ArrowLeft, Target, GitBranch, HelpCircle } from "lucide-react";
-import { getEntry, listEntries, listGoals } from "@/lib/store";
+import { getEntry, latestJobRun, listEntries, listGoals } from "@/lib/store";
 import { Card, CardHeader, CardBody } from "@/components/ui/card";
 import { Pill } from "@/components/ui/badge";
 import { ReviewPanel } from "@/components/entries/review-panel";
+import { ExtractionStatus } from "@/components/entries/extraction-status";
+import { isTerminalJobStatus } from "@/lib/types";
 
 export const metadata = { title: "Review — TaskBuddy" };
 
@@ -14,16 +16,26 @@ export default async function ReviewPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
-  const [entry, projects, entries] = await Promise.all([
+  const [entry, projects, entries, extraction] = await Promise.all([
     getEntry(id),
     listGoals(),
     listEntries(),
+    // Any state, not just live: a failed run is the difference between "still working" and
+    // "this needs a retry", and both belong on this page.
+    latestJobRun("entry.extract.requested", id),
   ]);
   if (!entry) notFound();
   // Only drafts are reviewable; a confirmed entry goes straight to its detail.
   if (entry.status !== "draft") redirect(`/entries/${id}`);
 
   const isPlan = entry.kind === "plan";
+  // Stand in for the review while the job is working, and after a failure that left nothing to
+  // review. NOT keyed on an empty task list alone: the heuristic extractor legitimately returns
+  // no tasks for notes with no action in them, and that entry is finished, not pending.
+  const awaitingExtraction =
+    extraction !== null &&
+    (!isTerminalJobStatus(extraction.status) ||
+      (extraction.status === "failed" && entry.tasks.length === 0));
 
   return (
     <main className="mx-auto max-w-[820px] px-8 py-8">
@@ -43,7 +55,9 @@ export default async function ReviewPage({
           {entry.title}
         </h1>
         <p className="mt-1 text-[13px] text-[var(--color-fg-muted)]">
-          Nothing is saved yet — accept the tasks you want, then confirm.
+          {awaitingExtraction
+            ? "Your notes are saved. Nothing goes into your plan until you confirm."
+            : "Nothing is saved yet — accept the tasks you want, then confirm."}
         </p>
       </div>
 
@@ -72,13 +86,17 @@ export default async function ReviewPage({
         </Card>
       )}
 
-      <div className="mt-5">
-        <ReviewPanel
-          entry={entry}
-          projects={projects}
-          entries={entries}
-        />
-      </div>
+      {awaitingExtraction ? (
+        <ExtractionStatus entryId={id} job={extraction} />
+      ) : (
+        <div className="mt-5">
+          <ReviewPanel
+            entry={entry}
+            projects={projects}
+            entries={entries}
+          />
+        </div>
+      )}
 
       {!isPlan && entry.decisions.length > 0 && (
         <Card className="mt-5">
