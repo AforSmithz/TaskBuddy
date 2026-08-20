@@ -1620,6 +1620,46 @@ export async function latestJobRun(
   );
 }
 
+/** Newest SUCCEEDED run of `type` for `subjectId`, or null.
+ *
+ *  Separate from latestJobRun because "is something running" and "what did the last good run
+ *  produce" are different questions with different right answers, and one row cannot serve both:
+ *  a regenerate that fails is the newest run AND must not erase the draft the previous one
+ *  produced. Status is filtered in SQL for the same reason the subject match is - a failed retry
+ *  between here and the last success would otherwise sink the row we want below the LIMIT.
+ *
+ *  This is how a job whose OUTPUT is the whole product survives a reload. Jobs that write rows
+ *  (decompose, the link proposer) do not need it; the follow-up draft lives nowhere but
+ *  `job_runs.result`, so without this read the card silently loses it. Retention is JOB_RUN_CAP
+ *  terminal rows per user, which is the honest lifetime for a draft. */
+export async function latestSucceededJobRun(
+  type: string,
+  subjectId: string | null = null,
+): Promise<JobRun | null> {
+  if (isDbConfigured()) {
+    const supabase = await getRequestClient();
+    const q = supabase
+      .from("job_runs")
+      .select(JOB_RUN_COLUMNS)
+      .eq("type", type)
+      .eq("status", "succeeded");
+    const scoped =
+      subjectId === null ? q.isNull("subject_id") : q.eq("subject_id", subjectId);
+    const rows = mustRows<JobRunRow>(
+      await scoped.order("created_at", { ascending: false }).limit(1),
+      "job_runs latest succeeded read",
+    );
+    return rows[0] ? toJobRun(rows[0]) : null;
+  }
+  await ensureSeeded();
+  return (
+    memDB().jobRuns.find(
+      (r) =>
+        r.type === type && r.subjectId === subjectId && r.status === "succeeded",
+    ) ?? null
+  );
+}
+
 export async function getJobRun(id: string): Promise<JobRun | null> {
   if (isDbConfigured()) {
     const supabase = await getRequestClient();
