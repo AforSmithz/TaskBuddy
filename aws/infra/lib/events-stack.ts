@@ -21,6 +21,7 @@ import {
   WORKER_MEMORY_MB,
   WORKER_TIMEOUT_SECONDS,
   WORKER_VISIBILITY_TIMEOUT_SECONDS,
+  sessionMacKey,
 } from "./config";
 import { nodeFunction } from "./node-function";
 
@@ -93,6 +94,8 @@ export class EventsStack extends Stack {
         PGHOST: props.cluster.clusterEndpoint.hostname,
         PGDATABASE: DB_NAME,
         PGUSER: DB_APP_ROLE,
+        // Same key as the web function. runAsUser opens the same signed transactions.
+        DB_SESSION_KEY: sessionMacKey(),
         BEDROCK_MODEL: BEDROCK_PRIMARY_MODEL,
         BEDROCK_FALLBACK_MODEL,
         EVENT_BUS_NAME: this.bus.eventBusName,
@@ -217,6 +220,10 @@ export class EventsStack extends Stack {
       assumedBy: new iam.ServicePrincipal("scheduler.amazonaws.com"),
     });
     this.jobQueue.grantSendMessages(schedulerRole);
+    // Scheduler writes the undeliverable event itself, as its own principal, so this
+    // grant is required and is NOT implied by the queue's redrive policy - that governs
+    // the worker's failures, a different path into the same queue.
+    this.dlq.grantSendMessages(schedulerRole);
 
     new scheduler.CfnSchedule(this, "DailyRoll", {
       name: `${APP}-daily-roll`,
@@ -228,6 +235,22 @@ export class EventsStack extends Stack {
         arn: this.jobQueue.queueArn,
         roleArn: schedulerRole.roleArn,
         input: JSON.stringify({ type: "plan.roll.daily" }),
+
+        // Stated rather than defaulted. Scheduler's default is 185 attempts over 24
+        // hours, which for a DAILY schedule means a failing delivery is still retrying
+        // when the next day's fire is due - two rolls in flight for different days, and
+        // an alarm that cannot tell you which one is broken. An hour is the whole
+        // sensible window for a job whose entire point is to land before anyone is awake.
+        retryPolicy: {
+          maximumRetryAttempts: 5,
+          maximumEventAgeInSeconds: 3600,
+        },
+
+        // Without this a schedule that exhausts its retries is simply GONE: Scheduler
+        // drops the invocation and the only trace is an InvocationDroppedCount datapoint
+        // nobody is looking at. Reusing the LLM DLQ rather than making a second one, so
+        // the taskbuddy-llm-dlq alarm already covers it and there is one place to look.
+        deadLetterConfig: { arn: this.dlq.queueArn },
       },
     });
 

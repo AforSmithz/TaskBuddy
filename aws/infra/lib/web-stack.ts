@@ -19,7 +19,9 @@ import {
   LOG_RETENTION_DAYS,
   LWA_LAYER_ARN,
   WEB_MEMORY_MB,
+  WEB_RESERVED_CONCURRENCY,
   WEB_TIMEOUT_SECONDS,
+  sessionMacKey,
 } from "./config";
 
 export interface WebStackProps extends StackProps {
@@ -56,6 +58,9 @@ const STATIC_BUNDLE = "../.build/static";
  */
 export class WebStack extends Stack {
   readonly distribution: cloudfront.Distribution;
+  /** Exposed for observability-stack.ts, which puts a metric filter on it to count
+   *  requests that reached the function URL without the CloudFront origin header. */
+  readonly webLogs: logs.LogGroup;
 
   constructor(scope: Construct, id: string, props: WebStackProps) {
     super(scope, id, props);
@@ -88,7 +93,7 @@ export class WebStack extends Stack {
     // Named to match the function, unlike an earlier draft of this stack where
     // the group said `-web-app` and the function said `-web`, so CDK silently
     // created a second group and every log line went to the one nobody looked at.
-    const webLogs = new logs.LogGroup(this, "WebLogs", {
+    this.webLogs = new logs.LogGroup(this, "WebLogs", {
       logGroupName: `/aws/lambda/${APP}-web`,
       retention: LOG_RETENTION_DAYS,
       removalPolicy: RemovalPolicy.DESTROY,
@@ -108,8 +113,10 @@ export class WebStack extends Stack {
       ],
       memorySize: WEB_MEMORY_MB,
       timeout: Duration.seconds(WEB_TIMEOUT_SECONDS),
+      // The bill's upper bound, and the database's. See WEB_RESERVED_CONCURRENCY.
+      reservedConcurrentExecutions: WEB_RESERVED_CONCURRENCY,
       tracing: lambda.Tracing.ACTIVE,
-      logGroup: webLogs,
+      logGroup: this.webLogs,
       environment: {
         // Hands control to the adapter instead of the Node handler contract.
         AWS_LAMBDA_EXEC_WRAPPER: "/opt/bootstrap",
@@ -128,6 +135,9 @@ export class WebStack extends Stack {
         PGHOST: props.cluster.clusterEndpoint.hostname,
         PGDATABASE: DB_NAME,
         PGUSER: DB_APP_ROLE,
+        // Signs the RLS session GUC. Must match the row apply-sql.sh seeded into
+        // app.session_key, or app.uid() returns NULL and every page reads as signed-out.
+        DB_SESSION_KEY: sessionMacKey(),
 
         COGNITO_USER_POOL_ID: props.userPool.userPoolId,
         COGNITO_CLIENT_ID: props.userPoolClient.userPoolClientId,

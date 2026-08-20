@@ -48,6 +48,22 @@ export const LWA_LAYER_ARN =
 // 43s belongs on the queue. This is a backstop for a pathological render.
 export const WEB_TIMEOUT_SECONDS = 60;
 
+// Ceiling on simultaneous web invocations. Free, and the only control in this stack that puts
+// an upper bound on what an unauthenticated flood can cost: without it Lambda scales the web
+// function to the account limit, so a burst against the CloudFront distribution - or against the
+// function URL directly, if ORIGIN_SECRET_HEADER ever leaks - is billed in full.
+//
+// The number is chosen off the database, not off the traffic. lib/db/pool.ts holds max 6
+// connections PER EXECUTION ENVIRONMENT, so this multiplies: 10 x 6 = 60, which is exactly the
+// taskbuddy-db-connections alarm threshold in observability-stack.ts. That is deliberate and the
+// two must move together - it means the connection alarm now fires when the web tier is
+// saturated and cannot fire before, so it reads as "we are at the ceiling" rather than as an
+// unexplained climb.
+//
+// Reserved concurrency is also RESERVED: it is subtracted from the account pool and guaranteed
+// to this function, so the workers cannot starve it and it cannot starve them.
+export const WEB_RESERVED_CONCURRENCY = 10;
+
 // 1769 MB is exactly one full vCPU. Below it Lambda gives a fraction of a core and a Next
 // render (CPU-bound on React SSR, not IO-bound) stretches proportionally. Billing is
 // GB-milliseconds, so a whole core finishing in half the time costs the same or less.
@@ -110,6 +126,35 @@ export const MONTHLY_BUDGET_USD = 10;
 // origin directly. It isn't what protects user data though - every route still verifies a
 // Cognito session. What it prevents is bypassing the edge (security headers, TLS policy, WAF).
 export const ORIGIN_SECRET_HEADER = "x-taskbuddy-origin";
+
+// Key the app signs the RLS session GUC with, and which app.uid() verifies against. Two stacks
+// need it (the web function and the LLM worker both open transactions), so unlike
+// TASKBUDDY_ORIGIN_SECRET it is read through a function rather than inline in one stack.
+//
+// Not generated on synth and not committed, for the same reasons as the origin secret: a
+// generated value would change every deploy and invalidate every signature; a committed one is
+// the key. Unlike the origin secret it also has a second home - app.session_key in Postgres,
+// seeded by aws/scripts/apply-sql.sh from this same environment variable. If the two ever
+// disagree, app.uid() returns NULL for everyone and the app reads as signed-out with no error
+// anywhere; see aws/sql/06_session_mac.sql.
+export function sessionMacKey(): string {
+  const key = process.env.TASKBUDDY_SESSION_MAC_KEY;
+  if (!key) {
+    throw new Error(
+      "TASKBUDDY_SESSION_MAC_KEY is not set. It is what makes app.uid() unforgeable " +
+        "by anyone holding a database connection - see aws/sql/06_session_mac.sql. " +
+        "Generate one with: openssl rand -hex 32",
+    );
+  }
+  if (!/^[0-9a-fA-F]{64,}$/.test(key)) {
+    throw new Error(
+      "TASKBUDDY_SESSION_MAC_KEY must be at least 64 hex characters. Postgres decodes " +
+        "it with decode(..., 'hex') and Node with Buffer.from(key, 'hex'); a non-hex " +
+        "value decodes differently on each side and every signature fails silently.",
+    );
+  }
+  return key;
+}
 
 // --- CI/CD -----------------------------------------------------------------
 
