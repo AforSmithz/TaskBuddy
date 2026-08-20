@@ -14,13 +14,22 @@ import {
   Lightbulb,
   FolderKanban,
 } from "lucide-react";
-import { getEntry, getEntrySchedule, getGoal } from "@/lib/store";
+import {
+  activeJobRun,
+  getEntry,
+  getEntrySchedule,
+  getGoal,
+  latestSucceededJobRun,
+} from "@/lib/store";
 import { formatDate } from "@/lib/format";
 import { Card, CardHeader, CardBody } from "@/components/ui/card";
 import { Pill } from "@/components/ui/badge";
 import { TaskList } from "@/components/entries/task-list";
 import { ScheduleTimeline } from "@/components/entries/schedule-timeline";
 import { FollowUp } from "@/components/entries/follow-up";
+
+/** Named once: the page reads two different questions off this job type. */
+const FOLLOW_UP_JOB = "entry.follow_up.requested";
 
 export default async function EntryPage({
   params,
@@ -34,10 +43,21 @@ export default async function EntryPage({
   if (entry.status === "draft") redirect(`/entries/${id}/review`);
 
   const isPlan = entry.kind === "plan";
-  const [project, scheduleDays] = await Promise.all([
+  const [project, scheduleDays, followUpJob, lastFollowUp] = await Promise.all([
     entry.goal_id ? getGoal(entry.goal_id) : Promise.resolve(null),
     getEntrySchedule(entry),
+    // A draft still in flight, so a reload mid-run shows the spinner rather
+    // than an idle button beside running work.
+    activeJobRun(FOLLOW_UP_JOB, id),
+    // ...and the last one that landed, because the draft lives nowhere else.
+    // Without this the card promises the job "keeps running if you leave this
+    // page" and then has nothing to show the user who takes it up on that.
+    latestSucceededJobRun(FOLLOW_UP_JOB, id),
   ]);
+  const lastDraft =
+    typeof lastFollowUp?.result?.message === "string"
+      ? { message: lastFollowUp.result.message, at: lastFollowUp.updatedAt }
+      : null;
 
   const countPill = (n: number) => <Pill>{n}</Pill>;
 
@@ -233,7 +253,11 @@ export default async function EntryPage({
               title="Follow-up message"
               icon={<Mail className="size-4" />}
             />
-            <FollowUp entryId={entry.id} />
+            <FollowUp
+              entryId={entry.id}
+              activeJob={followUpJob}
+              lastDraft={lastDraft}
+            />
           </Card>
         </div>
       </div>
