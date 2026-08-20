@@ -46,7 +46,21 @@ if [ -z "${TASKBUDDY_ALLOWED_ORIGINS:-}" ]; then
   fi
 fi
 export TASKBUDDY_ALLOWED_ORIGINS
-pnpm build
+
+# TASKBUDDY_NO_LLM is scoped to THIS command, deliberately not exported: it is
+# read at runtime by isLLMConfigured(), so exporting it would be inherited by
+# nothing that matters here but reads as if the deployed function inherits it
+# too. It does not - the Lambda's environment comes from web-stack.ts.
+#
+# Prerendering has no database, so the store falls back to its in-memory demo
+# and ensureSeeded() runs the sample entries through extractEntry(). In CI that
+# found AWS_REGION set, decided the LLM was configured, and spent both attempts
+# per entry getting AccessDenied from a deploy role with no bedrock:InvokeModel
+# before falling back to the heuristic it should have used from the start -
+# "LLM extraction exhausted all attempts" in the build log, and 7.8s of static
+# generation that takes 151ms without it. The seeded data is thrown away either
+# way; every (app) route is dynamic.
+TASKBUDDY_NO_LLM=1 pnpm build
 
 if [ ! -d ".next/standalone" ]; then
   echo "ERROR: .next/standalone missing. Is output:'standalone' still set in next.config.ts?" >&2
