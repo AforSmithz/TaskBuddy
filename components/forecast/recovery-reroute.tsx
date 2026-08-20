@@ -1,10 +1,11 @@
 "use client";
 
-import { useEffect, useState, useTransition } from "react";
+import { useState, useTransition } from "react";
 import { AlertTriangle, ArrowRight, Check, Loader2, Route } from "lucide-react";
 import type { RecoveryPlan, RerouteSuggestion } from "@/lib/types";
 import { applyRerouteAction, suggestRerouteAction } from "@/lib/actions";
 import { formatPct } from "@/components/forecast/forecast-meter";
+import { useSuggestionJob } from "@/components/forecast/use-suggestion-job";
 import { Button } from "@/components/ui/button";
 
 /**
@@ -18,43 +19,21 @@ function hasRerouteSignals(plan: RecoveryPlan): boolean {
   return plan.reasons.some((r) => r.severity === "critical");
 }
 
-type Phase = "loading" | "ready" | "empty";
-
 /**
- * The Re-route half of the recovery callout (Step 3): fires the strategist in
- * the background to propose a *whole-plan alternative* - a different approach to
- * the same deliverable - when the current path won't fit. All-or-nothing: the
- * user switches to the new approach or keeps the current plan. The preview
+ * The Re-route half of the recovery callout (Step 3): puts the strategist on
+ * the queue to propose a *whole-plan alternative* - a different approach to the
+ * same deliverable - when the current path won't fit. All-or-nothing: the user
+ * switches to the new approach or keeps the current plan. The preview
  * probability is the deterministic forecast's, never the LLM's.
  */
 export function RecoveryReroute({ plan }: { plan: RecoveryPlan }) {
-  const [phase, setPhase] = useState<Phase>(
-    hasRerouteSignals(plan) ? "loading" : "empty",
+  const { phase, suggestion } = useSuggestionJob<RerouteSuggestion>(
+    hasRerouteSignals(plan),
+    () => suggestRerouteAction(plan.projectId),
+    (s) => s.tasks.length > 0,
   );
-  const [suggestion, setSuggestion] = useState<RerouteSuggestion | null>(null);
   const [switched, setSwitched] = useState(false);
   const [pending, startTransition] = useTransition();
-
-  useEffect(() => {
-    if (phase !== "loading") return;
-    let active = true;
-    suggestRerouteAction(plan.projectId)
-      .then((result) => {
-        if (!active) return;
-        if (result && result.tasks.length > 0) {
-          setSuggestion(result);
-          setPhase("ready");
-        } else {
-          setPhase("empty");
-        }
-      })
-      .catch(() => active && setPhase("empty"));
-    return () => {
-      active = false;
-    };
-    // projectId identifies the plan; re-running on other field changes is unwanted.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [plan.projectId]);
 
   if (phase === "empty") return null;
 

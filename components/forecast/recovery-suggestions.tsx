@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useTransition } from "react";
+import { useState, useTransition } from "react";
 import { Check, Loader2, Sparkles } from "lucide-react";
 import type { GapKind, RecoveryPlan, RecoverySuggestion } from "@/lib/types";
 import {
@@ -8,6 +8,7 @@ import {
   suggestRecoveryTasksAction,
 } from "@/lib/actions";
 import { formatPct } from "@/components/forecast/forecast-meter";
+import { useSuggestionJob } from "@/components/forecast/use-suggestion-job";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
 
@@ -26,44 +27,21 @@ function hasGapSignals(plan: RecoveryPlan): boolean {
   );
 }
 
-type Phase = "loading" | "ready" | "empty";
-
 /**
  * The LLM half of the recovery callout. The deterministic moves render
- * instantly above this; this fires the strategist in the background (spinner),
- * then surfaces net-new corrective tasks the user must explicitly accept. The
+ * instantly above this; this fires the strategist on the queue (spinner), then
+ * surfaces net-new corrective tasks the user must explicitly accept. The
  * preview probability is the deterministic forecast's, never the LLM's.
  */
 export function RecoverySuggestions({ plan }: { plan: RecoveryPlan }) {
-  const [phase, setPhase] = useState<Phase>(
-    hasGapSignals(plan) ? "loading" : "empty",
+  const { phase, suggestion } = useSuggestionJob<RecoverySuggestion>(
+    hasGapSignals(plan),
+    () => suggestRecoveryTasksAction(plan.projectId),
+    (s) => s.tasks.length > 0,
   );
-  const [suggestion, setSuggestion] = useState<RecoverySuggestion | null>(null);
-  const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [deselected, setDeselected] = useState<Set<number>>(new Set());
   const [accepted, setAccepted] = useState(false);
   const [pending, startTransition] = useTransition();
-
-  useEffect(() => {
-    if (phase !== "loading") return;
-    let active = true;
-    suggestRecoveryTasksAction(plan.projectId)
-      .then((result) => {
-        if (!active) return;
-        if (result && result.tasks.length > 0) {
-          setSuggestion(result);
-          setSelected(new Set(result.tasks.map((_, i) => i)));
-          setPhase("ready");
-        } else {
-          setPhase("empty");
-        }
-      })
-      .catch(() => active && setPhase("empty"));
-    return () => {
-      active = false;
-    };
-    // projectId identifies the plan; re-running on other field changes is unwanted.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [plan.projectId]);
 
   if (phase === "empty") return null;
 
@@ -86,8 +64,11 @@ export function RecoverySuggestions({ plan }: { plan: RecoveryPlan }) {
     );
   }
 
+  // Tracked as the UNCHECKED set so "everything is checked" is the resting state rather than
+  // something an effect has to seed once the job lands.
+  const selectedCount = suggestion.tasks.length - deselected.size;
   const toggle = (i: number) =>
-    setSelected((s) => {
+    setDeselected((s) => {
       const next = new Set(s);
       if (next.has(i)) next.delete(i);
       else next.add(i);
@@ -95,8 +76,8 @@ export function RecoverySuggestions({ plan }: { plan: RecoveryPlan }) {
     });
 
   function accept() {
-    if (!suggestion || selected.size === 0) return;
-    const chosen = suggestion.tasks.filter((_, i) => selected.has(i));
+    if (!suggestion || selectedCount === 0) return;
+    const chosen = suggestion.tasks.filter((_, i) => !deselected.has(i));
     startTransition(async () => {
       await acceptRecoveryTasksAction(plan.projectId, chosen);
       setAccepted(true);
@@ -118,7 +99,7 @@ export function RecoverySuggestions({ plan }: { plan: RecoveryPlan }) {
         >
           <input
             type="checkbox"
-            checked={selected.has(i)}
+            checked={!deselected.has(i)}
             disabled={pending}
             onChange={() => toggle(i)}
             className="size-3.5 shrink-0 accent-[var(--color-accent)]"
@@ -138,7 +119,7 @@ export function RecoverySuggestions({ plan }: { plan: RecoveryPlan }) {
         <span
           className={cn(
             "text-[12px] text-[var(--color-fg-muted)]",
-            selected.size === 0 && "opacity-50",
+            selectedCount === 0 && "opacity-50",
           )}
         >
           Adding all →{" "}
@@ -151,11 +132,11 @@ export function RecoverySuggestions({ plan }: { plan: RecoveryPlan }) {
           variant="secondary"
           size="sm"
           loading={pending}
-          disabled={selected.size === 0}
+          disabled={selectedCount === 0}
           onClick={accept}
         >
-          Add {selected.size > 0 ? selected.size : ""} task
-          {selected.size === 1 ? "" : "s"}
+          Add {selectedCount > 0 ? selectedCount : ""} task
+          {selectedCount === 1 ? "" : "s"}
         </Button>
       </div>
     </div>

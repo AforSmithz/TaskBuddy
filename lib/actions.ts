@@ -12,7 +12,6 @@ import {
   getValueModel,
   insertMoveChoice,
   createJointScorer,
-  type JointScorer,
   confirmDraft,
   createPendingEntry,
   getEntry,
@@ -55,20 +54,25 @@ import {
   type ReorderOutcome,
 } from "@/lib/store";
 import { buildEODSummary, type EODSummary } from "@/lib/generate";
-import { skillProgress } from "@/lib/skill";
 import {
-  generateCorrectiveTasks,
-  generateReroute,
-  generateTaskModifications,
-} from "@/lib/strategist";
-import { interpretCheckin, resolveCheckin, proposeFromCheckin } from "@/lib/checkin";
-import { SKILL_TASK_PREFIX, type ResolveInput } from "@/lib/portfolio-state";
+  CHECKIN_PROMPT_CAP,
+  checkinCandidates,
+  interpretCheckin,
+  proposeFromCheckin,
+  rankForScope,
+  resolveCheckin,
+  unlockedFrontier,
+} from "@/lib/checkin";
+import type { ResolveInput } from "@/lib/portfolio-state";
 import { requireUser } from "@/lib/auth";
 import {
   decomposeGoalJob,
   extractEntryJob,
   generateFollowUpJob,
   refreshStrategyJob,
+  suggestModificationsJob,
+  suggestRecoveryTasksJob,
+  suggestRerouteJob,
   suggestSkillLinksJob,
   type Job,
 } from "@/lib/job-handlers";
@@ -76,11 +80,9 @@ import { isQueueConfigured, publish } from "@/lib/jobs";
 import type { ValueModel } from "@/lib/value-model";
 import type { WindowAvailability } from "@/lib/window-availability";
 import type {
-  CheckinCandidate,
   CheckinReview,
   CheckinScope,
   CompletionConfidence,
-  SkillNode,
   SkillTaskLinkStatus,
   DegradedCriterion,
   DraftClassification,
@@ -88,13 +90,10 @@ import type {
   GoalKind,
   JobHandle,
   JobRun,
-  ModificationSuggestion,
   OfferedMove,
   PitCall,
   PlanVersion,
-  RecoverySuggestion,
   ReroutePart,
-  RerouteSuggestion,
   StrategyMove,
   SuggestedTask,
   Task,
@@ -667,17 +666,27 @@ export async function logCommitmentAction(
 }
 
 /** Ask the strategist for net-new corrective tasks. Read-only - nothing is persisted until the
- *  user accepts. Null when there's no genuine gap or the LLM is unavailable. */
+ *  user accepts. The suggestion rides `job_runs.result`; null inside it means there was no
+ *  genuine gap to fix, which is an answer rather than a failure.
+ *
+ *  Subject is the project, so the enqueue's reuse path doubles as reload handling: this fires
+ *  on mount, and a refresh while the strategist is still thinking JOINS the run already in
+ *  flight instead of paying for a second one. */
 export async function suggestRecoveryTasksAction(
   projectId: string,
-): Promise<RecoverySuggestion | null> {
-  await requireUser();
-  try {
-    return await generateCorrectiveTasks(projectId);
-  } catch (err) {
-    console.error("suggestRecoveryTasks failed:", err);
-    return null;
-  }
+): Promise<JobHandle> {
+  const user = await requireUser();
+  return enqueue(
+    "strategy.recovery_tasks.requested",
+    projectId,
+    (jobId) => ({
+      type: "strategy.recovery_tasks.requested",
+      userId: user.id,
+      goalId: projectId,
+      jobId,
+    }),
+    () => suggestRecoveryTasksJob(projectId),
+  );
 }
 
 /** Persist the corrective tasks the user accepted, then refresh the forecast. */
@@ -691,17 +700,22 @@ export async function acceptRecoveryTasksAction(
 }
 
 /** Ask the strategist to reshape existing tasks (scope down / split) to fit the budget.
- *  Read-only. Null when no reshape usefully improves the odds. */
+ *  Read-only. A null suggestion means no reshape usefully improves the odds. */
 export async function suggestModificationsAction(
   projectId: string,
-): Promise<ModificationSuggestion | null> {
-  await requireUser();
-  try {
-    return await generateTaskModifications(projectId);
-  } catch (err) {
-    console.error("suggestModifications failed:", err);
-    return null;
-  }
+): Promise<JobHandle> {
+  const user = await requireUser();
+  return enqueue(
+    "strategy.modifications.requested",
+    projectId,
+    (jobId) => ({
+      type: "strategy.modifications.requested",
+      userId: user.id,
+      goalId: projectId,
+      jobId,
+    }),
+    () => suggestModificationsJob(projectId),
+  );
 }
 
 /** Apply the task reshapes the user accepted, then refresh the forecast. */
@@ -715,17 +729,20 @@ export async function applyModificationsAction(
 }
 
 /** Ask the strategist for a whole-plan re-route - a different approach to the same deliverable.
- *  Read-only. Null when no genuinely lighter route exists. */
-export async function suggestRerouteAction(
-  projectId: string,
-): Promise<RerouteSuggestion | null> {
-  await requireUser();
-  try {
-    return await generateReroute(projectId);
-  } catch (err) {
-    console.error("suggestReroute failed:", err);
-    return null;
-  }
+ *  Read-only. A null suggestion means no genuinely lighter route exists. */
+export async function suggestRerouteAction(projectId: string): Promise<JobHandle> {
+  const user = await requireUser();
+  return enqueue(
+    "strategy.reroute.requested",
+    projectId,
+    (jobId) => ({
+      type: "strategy.reroute.requested",
+      userId: user.id,
+      goalId: projectId,
+      jobId,
+    }),
+    () => suggestRerouteJob(projectId),
+  );
 }
 
 /**
@@ -824,87 +841,6 @@ export interface CheckinRunResult {
   eod: EODSummary;
 }
 
-/** How many candidate entities the interpret prompt sees (the rest still resolve).
- *  Caps the prompt, not the resolution blast radius. */
-const CHECKIN_PROMPT_CAP = 60;
-
-/** Derive the check-in candidate set from the already-computed joint scorer - open tasks and
- *  the unattained skill frontier are ALREADY in resolveInput.tasks, so this re-gathers nothing.
- *  Handles are stable within a run (T#/S#/A#). */
-function checkinCandidates(scorer: JointScorer): {
-  candidates: CheckinCandidate[];
-  skillNodes: CheckinCandidate[];
-} {
-  const candidates: CheckinCandidate[] = [];
-  const skillNodes: CheckinCandidate[] = [];
-  let t = 0;
-  let s = 0;
-  for (const task of scorer.resolveInput.tasks) {
-    if (task.id.startsWith(SKILL_TASK_PREFIX)) {
-      const node: CheckinCandidate = {
-        handle: `S${++s}`,
-        type: "skill_node",
-        id: task.id.slice(SKILL_TASK_PREFIX.length),
-        title: task.title,
-        goalId: task.projectId,
-        goalName: task.projectName,
-      };
-      candidates.push(node);
-      skillNodes.push(node);
-    } else {
-      candidates.push({
-        handle: `T${++t}`,
-        type: "task",
-        id: task.id,
-        title: task.title,
-        goalId: task.projectId,
-        goalName: task.projectName,
-      });
-    }
-  }
-  scorer.activities.forEach((a, i) => {
-    candidates.push({
-      handle: `A${i + 1}`,
-      type: "activity",
-      id: a.id,
-      title: a.title,
-      goalId: "",
-      goalName: a.area,
-    });
-  });
-  return { candidates, skillNodes };
-}
-
-/** The unlocked frontier across every learning goal. skillProgress reasons about ONE goal's
- *  graph (attainedIds is goal-local), so group first - a flat call would let one goal's
- *  attainments unlock another's nodes. This is what inferred attainment is confined to. */
-function unlockedFrontier(allNodes: SkillNode[]): ReadonlySet<string> {
-  const byGoal = new Map<string, SkillNode[]>();
-  for (const n of allNodes) {
-    const list = byGoal.get(n.goal_id);
-    if (list) list.push(n);
-    else byGoal.set(n.goal_id, [n]);
-  }
-  const unlocked = new Set<string>();
-  for (const nodes of byGoal.values()) {
-    for (const id of skillProgress(nodes).unlocked) unlocked.add(id);
-  }
-  return unlocked;
-}
-
-/** Put the scoped goal's own entities first before the cap - the scope is the disambiguation.
- *  Resolution still runs against the FULL set, so this only biases what the model SEES, never
- *  the blast radius. Stable partition, so the un-scoped ordering is intact. */
-function rankForScope(
-  candidates: CheckinCandidate[],
-  scope: CheckinScope | undefined,
-): CheckinCandidate[] {
-  if (!scope) return candidates;
-  const inScope = candidates.filter((c) => c.goalId === scope.goalId);
-  const rest = candidates.filter((c) => c.goalId !== scope.goalId);
-  return [...inScope, ...rest];
-}
-
 /** Run interpret -> resolve -> propose over a free-form check-in. The review/commit half is the
  *  existing bundle machinery. No mutation happens here, it's read-only interpretation.
  *
@@ -924,7 +860,6 @@ export async function runCheckinAction(
     listAllSkillNodes(),
   ]);
   const { candidates, skillNodes } = checkinCandidates(scorer);
-  const unlockedNodeIds = unlockedFrontier(allNodes);
 
   const { result, source } = await interpretCheckin(
     report,
@@ -947,7 +882,7 @@ export async function runCheckinAction(
       links,
       candidates,
       // Inference may only credit the unlocked frontier (both spillover tiers).
-      unlockedNodeIds,
+      unlockedNodeIds: unlockedFrontier(allNodes),
     },
     skillNodes,
   );
