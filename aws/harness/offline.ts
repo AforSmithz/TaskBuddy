@@ -480,6 +480,150 @@ async function main(): Promise<void> {
   }
 
   // ===========================================================================
+  console.log("\nrouting - every job type the app can publish must be on the rule's allow-list");
+  // The bus-to-queue rule is an explicit detail-type allow-list, which is the safe direction:
+  // a new event type goes nowhere until someone adds it. The failure is silent in the worst
+  // way, though. publish() succeeds (the BUS accepted the event), the action returns "queued",
+  // and the browser polls a row nothing will ever settle until the 20-minute stale window
+  // expires. entry.follow_up.requested shipped exactly like that.
+  {
+    const fs = await import("fs");
+    const handlers = fs.readFileSync(
+      path.join(__dirname, "..", "..", "lib", "job-handlers.ts"),
+      "utf8",
+    );
+    const stack = fs.readFileSync(
+      path.join(__dirname, "..", "infra", "lib", "events-stack.ts"),
+      "utf8",
+    );
+    // The Job union, read off the source: every `| { type: "x"` arm up to `plan.roll.daily`,
+    // which is the one type Scheduler sends straight to the queue without touching the bus.
+    const union = handlers.slice(
+      handlers.indexOf("export type Job ="),
+      handlers.indexOf("export type UserJob"),
+    );
+    const published = [...union.matchAll(/\|\s*\{?\s*\n?\s*type:\s*"([^"]+)"/g)]
+      .map((m) => m[1])
+      .filter((t) => t !== "plan.roll.daily");
+    const allowList = stack.slice(stack.indexOf("detailType: ["), stack.indexOf("targets: ["));
+    checkThat(
+      "the Job union was actually parsed",
+      published.length >= 8,
+      `only found ${published.length} publishable job types: ${published.join(", ")}`,
+    );
+    const missing = published.filter((t) => !allowList.includes(`"${t}"`));
+    check("every publishable job type is on the allow-list", missing, []);
+  }
+
+  // ===========================================================================
+  console.log("\ncheck-in split - stages A+B run on the queue, stage C runs in the request");
+  {
+    const { parse } = await import("../lambda/llm-worker/index");
+    const rec = (body: unknown) =>
+      ({ body: JSON.stringify(body), messageId: "m", attributes: {} }) as never;
+
+    // The report itself rides the message: it is the input, and the worker has no session to
+    // re-read it from. `scope` is optional and must survive as undefined rather than null,
+    // because rankForScope branches on exactly that.
+    check(
+      "check-in job round-trips its report and scope",
+      parse(
+        rec({
+          detail: {
+            type: "checkin.submitted",
+            userId: "u",
+            report: "finished the auth flow, pushed the migration",
+            scope: { goalId: "g", goalName: "Mobile App" },
+            jobId: "j",
+          },
+        }),
+      ),
+      {
+        type: "checkin.submitted",
+        userId: "u",
+        report: "finished the auth flow, pushed the migration",
+        scope: { goalId: "g", goalName: "Mobile App" },
+        jobId: "j",
+      },
+    );
+    check(
+      "an unscoped check-in keeps no scope key at all",
+      (parse(
+        rec({
+          detail: { type: "checkin.submitted", userId: "u", report: "rough day", jobId: "j" },
+        }),
+      ) as { scope?: unknown })?.scope,
+      undefined,
+    );
+
+    const { regroundResolved } = await import("@/lib/checkin");
+    const cand = (id: string, title: string) => ({
+      handle: "T1",
+      type: "task" as const,
+      id,
+      title,
+      goalId: "g",
+      goalName: "Mobile App",
+    });
+    const intent = {
+      kind: "completed" as const,
+      register: "status" as const,
+      quote: "finished the auth flow",
+      handle: "T1",
+      entityPhrase: "the auth flow",
+      detail: null,
+      confidence: "high" as const,
+    };
+    const resolvedOn = (c: ReturnType<typeof cand>) => [
+      { intent, status: "resolved" as const, match: c, candidates: [c] },
+    ];
+
+    // The whole reason stage B ships ids rather than handles, and the reason stage C re-binds:
+    // time passes between the two, and the entity may not be there any more.
+    check(
+      "an entity finished while the job ran degrades to an unresolved chip",
+      regroundResolved(resolvedOn(cand("t1", "Build the auth flow")), [cand("t2", "Something else")]),
+      [{ intent, status: "unresolved", match: null, candidates: [] }],
+    );
+    check(
+      "a surviving entity picks up its CURRENT title, not the one the job saw",
+      regroundResolved(resolvedOn(cand("t1", "Build the auth flow")), [
+        cand("t1", "Build the auth flow (renamed)"),
+      ])[0].match?.title,
+      "Build the auth flow (renamed)",
+    );
+    // resolved[] comes back through the client on its way to stage C, so this is the trust
+    // boundary too: an id that is not in THIS request's candidate set cannot become a proposal.
+    check(
+      "an id the caller invented cannot bind",
+      regroundResolved(resolvedOn(cand("not-mine", "Someone else's task")), [
+        cand("t1", "Build the auth flow"),
+      ])[0].status,
+      "unresolved",
+    );
+
+    // Handles are positional (T1 is "the first open task"), which is precisely why they are
+    // never shipped across the seam - stage B resolves them in the process that assigned them.
+    const { checkinCandidates } = await import("@/lib/checkin");
+    const scorerWith = (...titles: string[]) => ({
+      resolveInput: {
+        tasks: titles.map((title, i) => ({
+          id: `t${i}`,
+          title,
+          projectId: "g",
+          projectName: "Mobile App",
+        })),
+      },
+      activities: [],
+    });
+    check(
+      "handles are an INDEX into the candidate list, so completing a task shifts them",
+      checkinCandidates(scorerWith("Second task")).candidates[0],
+      { handle: "T1", type: "task", id: "t0", title: "Second task", goalId: "g", goalName: "Mobile App" },
+    );
+  }
+
+  // ===========================================================================
   console.log(`\n${passed} passed, ${failures.length} failed`);
   if (failures.length > 0) {
     console.log("\n" + failures.map((f) => `  ${f}`).join("\n\n"));
