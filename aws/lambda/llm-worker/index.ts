@@ -5,7 +5,11 @@ import {
   decomposeGoalJob,
   extractEntryJob,
   generateFollowUpJob,
+  interpretCheckinJob,
   refreshStrategyJob,
+  suggestModificationsJob,
+  suggestRecoveryTasksJob,
+  suggestRerouteJob,
   suggestSkillLinksJob,
   type Job,
   type UserJob,
@@ -98,6 +102,16 @@ function bodyFor(job: UserJob): () => Promise<Record<string, unknown> | void> {
       // The draft is the whole point of the job, so it rides the row rather
       // than a write - see generateFollowUpJob.
       return () => generateFollowUpJob(job.entryId);
+    case "checkin.submitted":
+      // Stages A and B only. Stage C runs back in the request that reads this,
+      // so the odds on screen are priced against the state on screen.
+      return () => interpretCheckinJob(job.report, job.scope);
+    case "strategy.recovery_tasks.requested":
+      return () => suggestRecoveryTasksJob(job.goalId);
+    case "strategy.modifications.requested":
+      return () => suggestModificationsJob(job.goalId);
+    case "strategy.reroute.requested":
+      return () => suggestRerouteJob(job.goalId);
     default: {
       // Exhaustiveness: adding a Job variant without a case here fails the
       // build rather than silently dropping that job type in production.

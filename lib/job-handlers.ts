@@ -1,10 +1,30 @@
 import "server-only";
+import {
+  CHECKIN_PROMPT_CAP,
+  checkinCandidates,
+  interpretCheckin,
+  rankForScope,
+  resolveCheckin,
+} from "@/lib/checkin";
 import { decomposeLearningGoal } from "@/lib/decompose";
 import { generateFollowUp } from "@/lib/generate";
 import { generatePortfolioStrategy } from "@/lib/portfolio-strategist";
 import { pairKey, suggestSkillTaskLinks } from "@/lib/skill-links";
 import {
+  generateCorrectiveTasks,
+  generateReroute,
+  generateTaskModifications,
+} from "@/lib/strategist";
+import type {
+  CheckinScope,
+  ModificationSuggestion,
+  RecoverySuggestion,
+  ResolvedCheckinIntent,
+  RerouteSuggestion,
+} from "@/lib/types";
+import {
   assembleEntry,
+  createJointScorer,
   getCachedStrategy,
   getEntry,
   getGoal,
@@ -57,6 +77,17 @@ export type Job =
        opts: Pick<AssembleOptions, "kind" | "area" | "projectId" | "autoProject">;
       jobId?: string;
     }
+  | {
+      type: "checkin.submitted";
+      userId: string;
+      report: string;
+      /** Present when the check-in was typed on a goal's page rather than the Today bar. */
+      scope?: CheckinScope;
+      jobId?: string;
+    }
+  | { type: "strategy.recovery_tasks.requested"; userId: string; goalId: string; jobId?: string }
+  | { type: "strategy.modifications.requested"; userId: string; goalId: string; jobId?: string }
+  | { type: "strategy.reroute.requested"; userId: string; goalId: string; jobId?: string }
   | { type: "plan.roll.daily" };
 
 /** The jobs a user starts and watches - everything except the scheduled roll. */
@@ -153,4 +184,70 @@ export async function extractEntryJob(
   });
   await replaceDraftExtraction(entryId, assembled);
   return { tasks: assembled.tasks.length };
+}
+
+
+/** Interpret a free-form check-in and GROUND it: stages A and B, never A alone.
+ *
+ *  The seam is here and not one stage earlier because a handle (`T3`, `S1`, `A2`) is an INDEX
+ *  into the candidate list that produced it. Shipping raw handles to a second request would let
+ *  a task completed in the meantime shift every handle after it, and stage B would bind the
+ *  user's quote to the neighbouring task - silently, and with a pre-checked box. Resolving in
+ *  the same process that built that list turns handles into stable DB ids before anything
+ *  crosses, so the worst a stale result can be is a proposal about work that has moved on.
+ *
+ *  Stage C stays in the request (proposeFromCheckin) because it prices every Family-A move
+ *  against the joint forecast, and those odds should be the ones the user is looking at rather
+ *  than the ones from whenever the queue got round to this.
+ *
+ *  Never throws for a model failure: interpretCheckin catches its own and falls back to the
+ *  offline parser, so a `failed` row here means the gather itself failed. */
+export async function interpretCheckinJob(
+  report: string,
+  scope?: CheckinScope,
+): Promise<{
+  resolved: ResolvedCheckinIntent[];
+  rawReport: string;
+  source: "llm" | "heuristic";
+}> {
+  const scorer = await createJointScorer();
+  const { candidates } = checkinCandidates(scorer);
+  const { result, source } = await interpretCheckin(
+    report,
+    // Cap what the model SEES (scope-ranked); resolution runs against the full set below.
+    rankForScope(candidates, scope).slice(0, CHECKIN_PROMPT_CAP),
+  );
+  return {
+    resolved: resolveCheckin(result, candidates),
+    rawReport: result.rawReport,
+    source,
+  };
+}
+
+/** Ask the strategist for net-new corrective tasks. Read-only: nothing is persisted, the user
+ *  accepts explicitly.
+ *
+ *  All three strategist jobs wrap their suggestion in an object rather than returning it bare.
+ *  `job_runs.result` is nullable and null already means "this job returned nothing", so a bare
+ *  null could not be told apart from a row that has not been written yet - and "the strategist
+ *  found no genuine gap" is a real, renderable answer, not an absence. */
+export async function suggestRecoveryTasksJob(
+  goalId: string,
+): Promise<{ suggestion: RecoverySuggestion | null }> {
+  return { suggestion: await generateCorrectiveTasks(goalId) };
+}
+
+/** Ask the strategist to reshape existing tasks (scope down / split) to fit the budget. */
+export async function suggestModificationsJob(
+  goalId: string,
+): Promise<{ suggestion: ModificationSuggestion | null }> {
+  return { suggestion: await generateTaskModifications(goalId) };
+}
+
+/** Ask the strategist for a whole-plan re-route - a different approach to the same
+ *  deliverable. */
+export async function suggestRerouteJob(
+  goalId: string,
+): Promise<{ suggestion: RerouteSuggestion | null }> {
+  return { suggestion: await generateReroute(goalId) };
 }
