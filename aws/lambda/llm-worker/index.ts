@@ -7,6 +7,7 @@ import {
   generateFollowUpJob,
   interpretCheckinJob,
   refreshStrategyJob,
+  rollPlanJob,
   suggestModificationsJob,
   suggestRecoveryTasksJob,
   suggestRerouteJob,
@@ -14,6 +15,8 @@ import {
   type Job,
   type UserJob,
 } from "@/lib/job-handlers";
+import { listAllUserIds } from "@/lib/db/roll-queries";
+import { publish } from "@/lib/jobs";
 import { claimJobRun, settleJobRun } from "@/lib/store";
 
 /**
@@ -112,6 +115,11 @@ function bodyFor(job: UserJob): () => Promise<Record<string, unknown> | void> {
       return () => suggestModificationsJob(job.goalId);
     case "strategy.reroute.requested":
       return () => suggestRerouteJob(job.goalId);
+    case "plan.roll.user":
+      // One account's share of the nightly fan-out. No model call, so it is the
+      // cheapest job here by a wide margin - and the only one nobody is waiting
+      // on, which is why a jobId is not expected on it.
+      return () => rollPlanJob();
     default: {
       // Exhaustiveness: adding a Job variant without a case here fails the
       // build rather than silently dropping that job type in production.
@@ -154,13 +162,43 @@ async function settleQuietly(
   }
 }
 
+/** Turn one timer tick into one message per account.
+ *
+ *  The reconcile is per-user work and the message carries no user, so the ids come from
+ *  app.all_user_ids() - a SECURITY DEFINER function that returns uuids and nothing else. See
+ *  aws/sql/07_plan_roll.sql for why that is a narrower opening than the alternatives.
+ *
+ *  Published back to the BUS rather than straight to the queue, so a per-user roll is an event
+ *  something else could subscribe to later, exactly like every other job. The worker already
+ *  holds grantPutEventsTo (events-stack.ts), so this needs no new IAM.
+ *
+ *  Throws if any publish failed. That is deliberate: the message goes back on the queue and the
+ *  whole fan-out repeats, including for accounts that already succeeded. Re-rolling an account
+ *  whose plan is already current is a fingerprint check and no write (see rollPlanJob), so the
+ *  duplicate is cheap and the alternative - swallowing it - loses that account's roll for the
+ *  day with only a log line to say so. */
+async function fanOutDailyRoll(): Promise<void> {
+  const ids = await listAllUserIds();
+  // Sequential, not Promise.all: this is two accounts today, and a burst of PutEvents from a
+  // Lambda that is already the queue's only consumer buys nothing worth the concurrency.
+  const failed: string[] = [];
+  const anchor = new Date().toISOString().slice(0, 10);
+  for (const userId of ids) {
+    if (!(await publish({ type: "plan.roll.user", userId, anchor }))) failed.push(userId);
+  }
+  console.info(
+    `plan.roll.daily fanned out ${ids.length - failed.length}/${ids.length} accounts for ${anchor}`,
+  );
+  if (failed.length > 0) {
+    throw new Error(`plan.roll.daily could not publish for ${failed.length} of ${ids.length} accounts`);
+  }
+}
+
 async function run(job: Job, finalAttempt: boolean): Promise<void> {
   if (job.type === "plan.roll.daily") {
-    // The scheduled reconcile is per-user work with no user on the message,
-    // and enumerating accounts from here would need a query that reads across
-    // tenants - the one thing RLS is set up to make impossible. Left
-    // deliberately unimplemented rather than given a bypass; see aws/SPEC.md.
-    console.info("plan.roll.daily received; no-op pending per-user fan-out");
+    // Runs OUTSIDE runAsUser - it has no user, and acquiring the list is the point. Everything
+    // it queues runs inside one.
+    await fanOutDailyRoll();
     return;
   }
 
