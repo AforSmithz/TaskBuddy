@@ -78,6 +78,8 @@ new ObservabilityStack(app, `${APP}-observability`, {
 new CicdStack(app, `${APP}-cicd`, {
   env,
   description: "GitHub Actions OIDC provider and the two roles CI assumes",
+  // Only for the deploy role's rds-db:connect grant, which the schema gate needs.
+  cluster: data.cluster,
 });
 
 // us-east-1 only. See edge-stack.ts.

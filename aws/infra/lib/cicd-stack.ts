@@ -1,8 +1,10 @@
 import { CfnOutput, Duration, Stack, type StackProps } from "aws-cdk-lib";
 import * as iam from "aws-cdk-lib/aws-iam";
+import type * as rds from "aws-cdk-lib/aws-rds";
 import type { Construct } from "constructs";
 import {
   APP,
+  DB_APP_ROLE,
   CDK_QUALIFIER,
   EDGE_REGION,
   GITHUB_DEPLOY_BRANCH,
@@ -47,8 +49,13 @@ const AUDIENCE = "sts.amazonaws.com";
  * execution role bootstrap creates is AdministratorAccess. That is a property of
  * CDK bootstrap, not of this stack, and the branch condition is what bounds it.
  */
+export interface CicdStackProps extends StackProps {
+  /** Only so the deploy role can be granted rds-db:connect for the schema gate. */
+  readonly cluster: rds.IDatabaseCluster;
+}
+
 export class CicdStack extends Stack {
-  constructor(scope: Construct, id: string, props: StackProps) {
+  constructor(scope: Construct, id: string, props: CicdStackProps) {
     super(scope, id, props);
 
     const account = Stack.of(this).account;
@@ -141,6 +148,25 @@ export class CicdStack extends Stack {
     );
     deployRole.addToPolicy(preflightReads);
     deployRole.addToPolicy(bootstrapVersion);
+
+    // The schema gate. Before deploying, CI runs aws/scripts/check-schema.sh,
+    // which reads app.schema_applied and fails the build if the cluster's schema
+    // is not the one the commit expects. That read needs a database identity.
+    //
+    // It is deliberately the APP role, not the master, and deliberately connect
+    // only. taskbuddy_app is `nobypassrls` and the script sets no session GUC, so
+    // app.uid() is NULL and every ordinary policy denies it; the single thing the
+    // connection can read is app.schema_applied, because that is the only object
+    // 08_schema_state.sql grants it. There is also no password to store - the role
+    // holds `rds_iam`, so this mints a 15-minute signed token per job.
+    //
+    // What this pointedly does NOT grant is any ability to APPLY the schema.
+    // Every file in aws/sql defines the security boundary itself, so anything
+    // that could apply them could rewrite app.uid() and read every account's
+    // data. CI verifies; a human applies. See aws/sql/08_schema_state.sql.
+    //
+    // See auth-stack.ts for why this is grantConnect and not a literal ARN.
+    props.cluster.grantConnect(deployRole, DB_APP_ROLE);
 
     const diffRole = new iam.Role(this, "DiffRole", {
       roleName: `${APP}-github-diff`,
