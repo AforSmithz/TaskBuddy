@@ -581,6 +581,55 @@ async function main(): Promise<void> {
   }
 
   // ===========================================================================
+  console.log("\nschema gate - the deploy must not be able to outrun the schema");
+  {
+    const fs = await import("fs");
+    const wf = fs.readFileSync(
+      path.join(__dirname, "..", "..", ".github", "workflows", "deploy.yml"),
+      "utf8",
+    );
+    // ORDER IS THE WHOLE CONTROL. A gate that runs after the deploy is decoration:
+    // the code is already live by the time it complains. Someone reordering these
+    // steps would not obviously be breaking anything, which is why this asserts it.
+    const gate = wf.indexOf("check-schema.sh");
+    const deploy = wf.indexOf("deploy.sh");
+    checkThat(
+      "the workflow runs the schema gate",
+      gate !== -1,
+      "check-schema.sh is not referenced by deploy.yml at all",
+    );
+    checkThat(
+      "the gate runs BEFORE the deploy, not after it",
+      gate !== -1 && deploy !== -1 && gate < deploy,
+      `check-schema.sh at ${gate}, deploy.sh at ${deploy}`,
+    );
+
+    // The gate demands that every file in its list has been applied. If the
+    // destructive one ever entered that list, the gate would block every deploy
+    // until someone ran an irreversible column drop to satisfy it - turning a
+    // safety check into pressure to do the one thing the file warns against.
+    const shared = fs.readFileSync(
+      path.join(__dirname, "..", "scripts", "schema-files.sh"),
+      "utf8",
+    );
+    checkThat(
+      "the irreversible drop is excluded from the applied set",
+      /NEVER_APPLIED=\(\s*"05_drop_password_hash\.sql"\s*\)/.test(shared),
+      "05_drop_password_hash.sql is no longer in NEVER_APPLIED",
+    );
+    // Both halves read the same list from the same file. Two lists would drift,
+    // and the direction it would drift is "the gate stops checking a file".
+    for (const script of ["apply-sql.sh", "check-schema.sh"]) {
+      const body = fs.readFileSync(path.join(__dirname, "..", "scripts", script), "utf8");
+      checkThat(
+        `${script} takes its file list from schema-files.sh`,
+        body.includes("source scripts/schema-files.sh") && body.includes("schema_files"),
+        `${script} does not source the shared list`,
+      );
+    }
+  }
+
+  // ===========================================================================
   console.log("\ncheck-in split - stages A+B run on the queue, stage C runs in the request");
   {
     const { parse } = await import("../lambda/llm-worker/index");
