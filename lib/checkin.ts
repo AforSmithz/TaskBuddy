@@ -61,8 +61,8 @@ distinct clause.
 Intent kinds:
 - "completed": the user says they finished / did / wrapped up an EXISTING item. -> names a task handle.
 - "reschedule": the user is pushing / postponing / moving an existing item to a later time. -> names a task handle + a time in "detail".
-- "add_task": the user says they need to do something NOT already in the list. -> handle null, entityPhrase null, the new work in "detail".
-- "skill_gained": the user says they can now do something they couldn't before ("I can finally write a SQL join"). -> names a skill handle if one matches, else handle null.
+- "add_task": the user says they need to do something NOT already in the list. -> handle "none", entityPhrase null, the new work in "detail".
+- "skill_gained": the user says they can now do something they couldn't before ("I can finally write a SQL join"). -> names a skill handle if one matches, else handle "none".
 - "resolved": the user frames an EXISTING item as having been blocking other work, and now cleared ("I unblocked the deploy", "cleared the blocker on the API, used a template"). -> names the task handle; put any method they named in "detail" ("using a template"), else null. Use "completed" when they simply finished the item without framing it as unblocking. Downstream code reads the dependency graph to decide whether either one cascades — do not reason about what else is unblocked.
 - "time_logged": the user reports how long they spent on an existing item ("spent ~2h on the API client"). -> names a task handle + the amount in "detail".
 - "idea": a thought / suggestion to capture for later, register "idea".
@@ -83,7 +83,8 @@ Rules:
 - Handles come from the candidate list in the user message. They look like T3 or S1.2. A
   candidate suffixed "Project: X" is a task; one suffixed "Skill in: X" is a skill node.
   Only "skill_gained" may name a skill node; only completed / reschedule / resolved /
-  time_logged may name a task. If no candidate list is provided, every handle must be null.
+  time_logged may name a task. An intent that names no entity sets handle to "none" —
+  never null, never an invented handle. With no candidate list, every handle is "none".
 - "confidence" is "high" ONLY when all of: the clause states an action in plain terms (not
   hedged, not hypothetical, not future-conditional); the intent kind is unambiguous; and,
   if this kind needs an entity, exactly one candidate plainly matches. Otherwise "low".
@@ -112,6 +113,19 @@ Rules:
 interface CheckinInterpretationWire {
   intents: CheckinIntent[];
 }
+
+/** The "this intent names no entity" handle.
+ *
+ *  A sentinel STRING rather than JSON null, because Bedrock's strict schema validator rejects
+ *  an enum whose declared type is a union: `{ type: ["string", "null"], enum: [...handles, null] }`
+ *  - the shape Foundry accepted - comes back as
+ *
+ *    Invalid schema: Enum value 'T1' does not match declared type '['string', 'null']'
+ *
+ *  for every model, so the whole chain exhausts and interpretCheckin silently falls back to the
+ *  offline parser. Nothing downstream needs to know: "none" is not a candidate handle, so the
+ *  existing strip in normalize() maps it to null on its own. */
+const NO_HANDLE = "none";
 
 /** Built per request so `handle` is a closed set drawn from the candidates actually shipped,
  *  which makes a fabricated handle structurally impossible and demotes the strip in normalize()
@@ -146,8 +160,8 @@ function checkinSchema(candidates: CheckinCandidate[]) {
               description: "A verbatim span copied from the report.",
             },
             handle: handles.length
-              ? { type: ["string", "null"], enum: [...handles, null] }
-              : { type: ["string", "null"] },
+              ? { type: "string", enum: [...handles, NO_HANDLE] }
+              : { type: "string", enum: [NO_HANDLE] },
             entityPhrase: {
               type: ["string", "null"],
               description: "The user's own words for the entity, e.g. \"the auth flow\".",
