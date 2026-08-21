@@ -652,6 +652,58 @@ async function main(): Promise<void> {
   }
 
   // ===========================================================================
+  console.log("\nstrict JSON schemas - the shapes Bedrock accepts, which are not Foundry's");
+  {
+    // A union `type` next to an `enum` is valid JSON Schema and was accepted by Foundry.
+    // Bedrock rejects it outright:
+    //
+    //   Invalid schema: Enum value 'T1' does not match declared type '['string', 'null']'
+    //
+    // and it fails in the worst available way - both models in the chain refuse, the call
+    // site catches its own error, degrades to the offline heuristic, and settles the
+    // job_runs row `succeeded`. It cost the check-in loop its entire LLM path, live, with
+    // every alarm quiet. A nullable enum is expressed as a sentinel member instead
+    // (lib/checkin.ts NO_HANDLE), so the union never appears beside an enum.
+    //
+    // Union types on their OWN are fine and used widely - extraction_result and the three
+    // strategist schemas all ship them and all answer end_turn. Only the pairing breaks.
+    const fs = await import("fs");
+    const schemaDir = path.join(__dirname, "..", "..", "lib");
+    const offenders: string[] = [];
+    for (const file of fs.readdirSync(schemaDir)) {
+      if (!file.endsWith(".ts")) continue;
+      const body = fs.readFileSync(path.join(schemaDir, file), "utf8");
+      body.split("\n").forEach((line, i) => {
+        // Comment lines are skipped, or the doc-comment above NO_HANDLE - which quotes the
+        // broken shape verbatim so the next reader knows what it looked like - fails this.
+        const code = line.trim();
+        if (code.startsWith("*") || code.startsWith("//") || code.startsWith("/*")) return;
+        // Same object literal: a `type: [...]` array and an `enum:` on one line.
+        if (/type:\s*\[[^\]]*\]/.test(line) && /\benum:/.test(line)) {
+          offenders.push(`lib/${file}:${i + 1}`);
+        }
+      });
+    }
+    checkThat(
+      "no JSON schema pairs a union type with an enum",
+      offenders.length === 0,
+      `Bedrock rejects these outright, and the call site degrades in silence:\n      ${offenders.join("\n      ")}`,
+    );
+
+    const { interpretCheckin } = await import("@/lib/checkin");
+    void interpretCheckin;
+    const checkinSrc = fs.readFileSync(path.join(schemaDir, "checkin.ts"), "utf8");
+    // The sentinel only works because normalize() keeps a handle solely when the candidate
+    // set contains it - "none" never does, so it lands as null with no extra mapping. Drop
+    // that strip and every no-entity intent starts binding to a literal task called "none".
+    checkThat(
+      "the no-entity handle is stripped by the candidate check, not by a special case",
+      /handle\s*&&\s*handles\.has\(handle\)\s*\?\s*handle\s*:\s*null/.test(checkinSrc),
+      "normalize() no longer nulls a handle outside the candidate set, so NO_HANDLE would survive",
+    );
+  }
+
+  // ===========================================================================
   console.log("\ncheck-in split - stages A+B run on the queue, stage C runs in the request");
   {
     const { parse } = await import("../lambda/llm-worker/index");
