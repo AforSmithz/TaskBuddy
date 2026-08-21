@@ -36,6 +36,7 @@ import {
   listSkillTaskLinksForGoal,
   replaceSkillNodes,
   setCachedStrategy,
+  commitRollingPlan,
 } from "@/lib/store";
 
 // The body of every long-running job, with no runtime attached.
@@ -61,7 +62,9 @@ import {
  *  would silently never happen. Missing means "run the work, skip the bookkeeping".
  *
  *  plan.roll.daily carries neither: Scheduler sends a fixed payload on a timer, with no user and
- *  nobody watching a page. */
+ *  nobody watching a page. It is the only arm the worker fans OUT rather than runs - one
+ *  plan.roll.user per account - so plan.roll.user is user-scoped like the rest but still has
+ *  nobody watching, hence no jobId in practice. */
 export type Job =
   | { type: "goal.decompose.requested"; userId: string; goalId: string; jobId?: string }
   | { type: "goal.skill_links.requested"; userId: string; goalId: string; jobId?: string }
@@ -88,6 +91,16 @@ export type Job =
   | { type: "strategy.recovery_tasks.requested"; userId: string; goalId: string; jobId?: string }
   | { type: "strategy.modifications.requested"; userId: string; goalId: string; jobId?: string }
   | { type: "strategy.reroute.requested"; userId: string; goalId: string; jobId?: string }
+  | {
+      type: "plan.roll.user";
+      userId: string;
+      /** The UTC date the fan-out ran for, carried so a delivery that arrives late is
+       *  diagnosable in the log rather than merely being "a roll, at some point". Not used to
+       *  decide anything: the roll reads the clock itself, and a message that crosses midnight
+       *  should reconcile against the new day, not the one it was queued for. */
+      anchor: string;
+      jobId?: string;
+    }
   | { type: "plan.roll.daily" };
 
 /** The jobs a user starts and watches - everything except the scheduled roll. */
@@ -126,6 +139,22 @@ export async function suggestSkillLinksJob(goalId: string): Promise<number> {
   const proposed = await suggestSkillTaskLinks(nodes, tasks, existingPairs);
   const created = await insertSuggestedLinks(proposed);
   return created.length;
+}
+
+/** Roll one account's committed plan forward. The scheduled counterpart to the roll that
+ *  already runs after every mutation - same function, same pricing, so the pre-warm can never
+ *  produce a plan a mutation-time roll wouldn't have.
+ *
+ *  Idempotent by construction rather than by a claim, which is what lets it run with no
+ *  job_runs row: commitRollingPlan short-circuits when the committed row's anchor and
+ *  fingerprint still match the situation, so a redelivered message prices nothing and writes
+ *  nothing. That also means the SECOND run of a duplicate pair skips insertPlanRoll, so the
+ *  evolution timeline doesn't gain a phantom entry.
+ *
+ *  Returns what it decided so the log line says whether the roll actually moved the plan. */
+export async function rollPlanJob(): Promise<{ rolled: boolean }> {
+  const decision = await commitRollingPlan();
+  return { rolled: Boolean(decision?.shouldPersist) };
 }
 
 /** Regenerate the cross-goal portfolio strategy. */
