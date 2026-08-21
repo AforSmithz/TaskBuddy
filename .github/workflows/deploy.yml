@@ -42,7 +42,15 @@
 # The schema is NOT applied here. aws/sql/*.sql runs through
 # aws/scripts/apply-sql.sh against the cluster, by a human who has read it. A
 # pipeline that silently runs DDL on the only copy of the data is a bad trade
-# for the twelve seconds it saves.
+# for the twelve seconds it saves - and here it is worse than the usual version
+# of that trade, because those files define the security boundary itself. Any
+# job that could apply them could rewrite app.uid() and read every account.
+#
+# It IS verified here. The "Check schema" step below reads app.schema_applied as
+# taskbuddy_app over a 15-minute IAM token and fails the build when the cluster's
+# schema is not the one this commit expects, which is the failure the manual
+# split otherwise hides: ship code whose SQL half never landed and the deploy
+# goes green while the feature is silently broken. Verify, never apply.
 name: deploy
 
 on:
@@ -144,6 +152,12 @@ jobs:
           # Longer than the default hour: credentials that expire mid-deploy
           # strand a stack in UPDATE_IN_PROGRESS.
           role-duration-seconds: 7200
+
+      # Before the build, not after: a drifted schema should cost seconds, not a
+      # full Next build plus a CDK deploy. After the credentials step because it
+      # needs an IAM token for the database.
+      - name: Check schema matches this commit
+        run: bash aws/scripts/check-schema.sh
 
       - name: Build and deploy
         env:
