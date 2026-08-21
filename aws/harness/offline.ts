@@ -617,6 +617,28 @@ async function main(): Promise<void> {
       /NEVER_APPLIED=\(\s*"05_drop_password_hash\.sql"\s*\)/.test(shared),
       "05_drop_password_hash.sql is no longer in NEVER_APPLIED",
     );
+    // The gate runs on a fresh clone with nothing but the repo. It first shipped
+    // depending on aws/certs/*.pem, which `*.pem` in .gitignore means exists on
+    // whichever laptop last ran fetch-rds-ca.sh and on no runner ever - so it
+    // passed locally and exited 2 in CI. The committed module is the source of
+    // truth for that certificate; anything else is a machine-local artifact.
+    const gateBody = fs.readFileSync(
+      path.join(__dirname, "..", "scripts", "check-schema.sh"),
+      "utf8",
+    );
+    checkThat(
+      "the gate takes its CA from the committed module, not a gitignored .pem",
+      gateBody.includes("lib/db/rds-ca.ts") && !/certs\/\$\{?REGION/.test(gateBody),
+      "check-schema.sh still reads aws/certs/*.pem, which is not in the repo",
+    );
+    // verify-full, not require: `require` encrypts without checking who answered,
+    // which against a cluster whose SG is open on 5432 is most of the point.
+    checkThat(
+      "the gate verifies the server certificate",
+      gateBody.includes("sslmode=verify-full"),
+      "check-schema.sh no longer pins sslmode=verify-full",
+    );
+
     // Both halves read the same list from the same file. Two lists would drift,
     // and the direction it would drift is "the gate stops checking a file".
     for (const script of ["apply-sql.sh", "check-schema.sh"]) {
