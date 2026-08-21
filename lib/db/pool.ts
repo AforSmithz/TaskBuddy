@@ -234,9 +234,16 @@ export async function withUser<T>(
   }
 }
 
-/** Run `fn` on a pooled connection with NO session GUC set. Only the auth path may use this,
- *  and only via the SECURITY DEFINER functions in 03_auth.sql - with the GUC unset app.uid()
- *  is NULL and every ordinary policy denies, which is the intent. */
+/** Run `fn` on a pooled connection with NO session GUC set. With the GUC unset app.uid() is
+ *  NULL and every ordinary policy denies, which is the intent: this is not a bypass, it is a
+ *  connection that can reach nothing except a SECURITY DEFINER function that was written to be
+ *  reachable that way.
+ *
+ *  Two callers, both of which must stay on that list:
+ *    - the auth path, via 03_auth.sql (a session cannot exist yet; obtaining one is the point)
+ *    - the daily roll's fan-out, via 07_plan_roll.sql (the schedule carries no user)
+ *
+ *  Anything else wanting cross-tenant reach is a design error, not a missing caller here. */
 export async function withoutUser<T>(
   fn: (client: PoolClient) => Promise<T>,
 ): Promise<T> {
