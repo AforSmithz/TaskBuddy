@@ -73,6 +73,11 @@ run 04_cognito.sql
 # signature instead of trusting the GUC. Re-running 01 later puts the trusting version
 # back, with nothing failing to say so - see that file's header.
 run 06_session_mac.sql
+# 07 MUST follow 02, like 03: 02's blanket grants do not cover app-schema
+# functions, but a re-run of 02 is the moment someone is most likely to assume
+# every grant is back. 07 owns its own revoke/grant pair, so re-running it is
+# the fix.
+run 07_plan_roll.sql
 
 echo "all applied. Review the verification query output above - each file ends"
 echo "with checks whose expected results are stated in its comments."
