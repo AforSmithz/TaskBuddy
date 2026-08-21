@@ -513,6 +513,71 @@ async function main(): Promise<void> {
     );
     const missing = published.filter((t) => !allowList.includes(`"${t}"`));
     check("every publishable job type is on the allow-list", missing, []);
+    // Named explicitly, because the check above is only as good as the regex that feeds it and
+    // this arm is the one written across several lines. If the parse ever stops seeing it, the
+    // allow-list check passes vacuously for exactly the type nothing else covers.
+    checkThat(
+      "the fanned-out roll is among the parsed types",
+      published.includes("plan.roll.user"),
+      `plan.roll.user missing from: ${published.join(", ")}`,
+    );
+  }
+
+  // ===========================================================================
+  console.log("\ndaily roll - the fan-out, and the day boundary it has to land after");
+  {
+    const fs = await import("fs");
+    const { parse } = await import("../lambda/llm-worker/index");
+    const rec = (body: unknown) =>
+      ({ body: JSON.stringify(body), messageId: "m", attributes: {} }) as never;
+
+    // The timer message has no user by design; the per-user messages the worker fans out DO,
+    // and are ordinary user jobs from there on. Both shapes have to survive parse().
+    check(
+      "the timer message still parses with no user",
+      parse(rec({ type: "plan.roll.daily" })),
+      { type: "plan.roll.daily" },
+    );
+    check(
+      "a fanned-out roll carries its user and anchor",
+      parse(rec({ detail: { type: "plan.roll.user", userId: "u", anchor: "2026-08-21" } })),
+      { type: "plan.roll.user", userId: "u", anchor: "2026-08-21" },
+    );
+    // The exemption in parse() is for plan.roll.daily specifically, not for "anything with roll
+    // in the name". A per-user roll with no user would run as nobody.
+    check(
+      "a fanned-out roll with no user is rejected",
+      parse(rec({ detail: { type: "plan.roll.user", anchor: "2026-08-21" } })),
+      null,
+    );
+
+    // THE SILENT ONE. The day this roll pre-warms is todayISO() in lib/store.ts, which is UTC.
+    // A schedule that fires before UTC midnight runs against YESTERDAY's anchor, so the first
+    // real page load discards its work and recomputes - while the schedule fires, the worker
+    // succeeds, and every alarm stays quiet. Nothing else in this repo would notice.
+    const stack = fs.readFileSync(
+      path.join(__dirname, "..", "infra", "lib", "events-stack.ts"),
+      "utf8",
+    );
+    checkThat(
+      "todayISO is still the UTC date (the assumption below depends on it)",
+      /function todayISO\(\): string \{\s*return new Date\(\)\.toISOString\(\)/.test(
+        fs.readFileSync(path.join(__dirname, "..", "..", "lib", "store.ts"), "utf8"),
+      ),
+      "todayISO no longer reads as `new Date().toISOString()`; re-derive the schedule hour",
+    );
+    const cron = /scheduleExpression: "cron\((\d+) (\d+) /.exec(stack);
+    const tz = /scheduleExpressionTimezone: "([^"]+)"/.exec(stack);
+    checkThat("the daily-roll schedule was parsed", Boolean(cron && tz), `cron=${cron}, tz=${tz}`);
+    check("the schedule is still expressed in the users' zone", tz?.[1], "Asia/Jakarta");
+    // Asia/Jakarta is UTC+7 and has no DST, so the UTC hour is the local hour minus 7. Fire at
+    // or after 07:00 local and the UTC date has already rolled.
+    const localHour = Number(cron?.[2] ?? -1);
+    checkThat(
+      "the roll fires after the UTC day boundary, not before it",
+      localHour >= 7 && localHour < 24,
+      `cron hour ${localHour} in Asia/Jakarta is ${(localHour + 17) % 24}:00 UTC the previous day, so the roll would anchor to yesterday`,
+    );
   }
 
   // ===========================================================================
