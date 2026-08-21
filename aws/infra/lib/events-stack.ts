@@ -205,6 +205,10 @@ export class EventsStack extends Stack {
           "checkin.submitted",
           "entry.extract.requested",
           "entry.follow_up.requested",
+          // Published BY the worker, not by the web function: the daily roll fans out one of
+          // these per account. It still goes through the bus like everything else, so the same
+          // rule governs it and there is one place to look for what the queue accepts.
+          "plan.roll.user",
         ],
       },
       targets: [
@@ -220,6 +224,9 @@ export class EventsStack extends Stack {
     // it. Scheduler rather than an EventBridge rule with a cron expression because it
     // understands time zones natively, so this stays correct across a DST change without anyone
     // recomputing a UTC offset.
+    //
+    // The worker fans this out into one plan.roll.user per account; see the worker and
+    // aws/sql/07_plan_roll.sql.
     const schedulerRole = new iam.Role(this, "SchedulerRole", {
       assumedBy: new iam.ServicePrincipal("scheduler.amazonaws.com"),
     });
@@ -231,9 +238,18 @@ export class EventsStack extends Stack {
 
     new scheduler.CfnSchedule(this, "DailyRoll", {
       name: `${APP}-daily-roll`,
-      description: "Rolling-horizon reconcile, before anyone is awake to see it.",
+      description: "Rolling-horizon reconcile, just after the app's UTC day boundary.",
       flexibleTimeWindow: { mode: "FLEXIBLE", maximumWindowInMinutes: 15 },
-      scheduleExpression: "cron(0 4 * * ? *)",
+      // 07:10 WIB, NOT the small hours, and the reason is a coupling worth stating: the day this
+      // roll pre-warms is `todayISO()` in lib/store.ts, which is `new Date().toISOString()` -
+      // UTC. So the app's day boundary is UTC midnight = 07:00 WIB, and a roll fired at 04:00
+      // WIB would run at 21:00 UTC the PREVIOUS day, anchor the committed plan to yesterday,
+      // and be discarded by the first real page load. It would look like it worked: the
+      // schedule fires, the worker succeeds, the alarms stay quiet, and the plan is recomputed
+      // on read anyway. Ten minutes past, to clear the boundary without relying on clock skew.
+      //
+      // If the app's day boundary ever becomes per-user local time, move this back to 04:00.
+      scheduleExpression: "cron(10 7 * * ? *)",
       scheduleExpressionTimezone: "Asia/Jakarta",
       target: {
         arn: this.jobQueue.queueArn,
@@ -244,7 +260,7 @@ export class EventsStack extends Stack {
         // hours, which for a DAILY schedule means a failing delivery is still retrying
         // when the next day's fire is due - two rolls in flight for different days, and
         // an alarm that cannot tell you which one is broken. An hour is the whole
-        // sensible window for a job whose entire point is to land before anyone is awake.
+        // sensible window for a job whose entire point is to land before the first page load.
         retryPolicy: {
           maximumRetryAttempts: 5,
           maximumEventAgeInSeconds: 3600,
