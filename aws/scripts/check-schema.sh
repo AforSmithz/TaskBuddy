@@ -37,10 +37,24 @@ source scripts/schema-files.sh
 REGION="${AWS_REGION:-ap-southeast-1}"
 PGDATABASE="${PGDATABASE:-taskbuddy}"
 DB_USER="taskbuddy_app"
-CA_BUNDLE="certs/${REGION}-bundle.pem"
 
 command -v psql >/dev/null || { echo "psql not found (brew install libpq)" >&2; exit 2; }
-[ -f "$CA_BUNDLE" ] || { echo "CA bundle missing: aws/$CA_BUNDLE (run aws/scripts/fetch-rds-ca.sh)" >&2; exit 2; }
+
+# The CA comes out of lib/db/rds-ca.ts, NOT aws/certs/*.pem. The .pem is an
+# intermediate that fetch-rds-ca.sh writes on the way to generating that module,
+# and `*.pem` is gitignored - so it exists on the laptop that last ran the script
+# and on no CI runner ever. Reading the committed module instead means the gate
+# trusts exactly the roots the application trusts, reviewed in the same diff,
+# rather than whatever a fresh download produced a moment ago.
+CA_BUNDLE=$(mktemp)
+trap 'rm -f "$CA_BUNDLE"' EXIT
+sed -n '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/p' \
+  ../lib/db/rds-ca.ts > "$CA_BUNDLE"
+grep -q "BEGIN CERTIFICATE" "$CA_BUNDLE" || {
+  echo "no certificates found in lib/db/rds-ca.ts" >&2
+  echo "Regenerate it with: bash aws/scripts/fetch-rds-ca.sh" >&2
+  exit 2
+}
 
 # The writer endpoint, from the stack that owns it rather than hardcoded.
 PGHOST=$(aws cloudformation describe-stacks --stack-name taskbuddy-data --region "$REGION" \
